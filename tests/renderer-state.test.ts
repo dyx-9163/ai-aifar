@@ -12,6 +12,7 @@ function deltaEvent(sequence: number): AgentEvent {
     type: 'message.delta',
     threadId: 'thread-1',
     turnId: 'turn-1',
+    modelProfileId: 'model-1',
     sequence,
     text: 'Hello',
   };
@@ -22,6 +23,7 @@ function approvalEvent(): AgentEvent {
     type: 'approval.required',
     threadId: 'thread-1',
     turnId: 'turn-1',
+    modelProfileId: 'model-1',
     sequence: 2,
     approvalId: 'approval-1',
     title: 'Approve change',
@@ -60,23 +62,27 @@ describe('renderer state reducer', () => {
     expect(second.events).toHaveLength(2);
   });
 
-  it('tracks the active running turn and clears it after completion', () => {
-    const running = reduceEvent(emptyState(), {
+  it('tracks active runtime without changing the selected chat after completion', () => {
+    const selected = { ...emptyState(), activeThreadId: 'thread-1' };
+    const running = reduceEvent(selected, {
       type: 'turn.started',
       threadId: 'thread-1',
       turnId: 'turn-1',
+      modelProfileId: 'model-1',
       sequence: 1,
       title: 'run',
     });
-    expect(running.activeTurnId).toBe('turn-1');
+    expect(running.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'running' });
 
     const completed = reduceEvent(running, {
       type: 'turn.completed',
       threadId: 'thread-1',
       turnId: 'turn-1',
+      modelProfileId: 'model-1',
       sequence: 2,
     });
-    expect(completed.activeTurnId).toBeUndefined();
+    expect(completed.activeThreadId).toBe('thread-1');
+    expect(completed.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'completed' });
   });
 
   it('marks a required approval as pending', () => {
@@ -204,6 +210,56 @@ describe('renderer state reducer', () => {
     ]);
   });
 
+  it('keeps reasoning modes separate from answer messages in the timeline', () => {
+    const items: Item[] = [
+      {
+        id: 'item-turn-1-assistant-1',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: '前半',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      },
+      {
+        id: 'item-turn-1-reasoning-raw',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'reasoning',
+        mode: 'raw',
+        text: '分析',
+        incomplete: true,
+        createdAt: '2026-08-17T00:00:02.000Z',
+      },
+      {
+        id: 'item-turn-1-reasoning-summary',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'reasoning',
+        mode: 'summary',
+        text: '摘要',
+        incomplete: false,
+        createdAt: '2026-08-17T00:00:03.000Z',
+      },
+      {
+        id: 'item-turn-1-assistant-2',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: '后半',
+        createdAt: '2026-08-17T00:00:04.000Z',
+      },
+    ];
+
+    expect(createTimelineEntries(items)).toMatchObject([
+      { kind: 'message', role: 'assistant', text: '前半' },
+      { kind: 'reasoning', mode: 'raw', text: '分析', incomplete: true },
+      { kind: 'reasoning', mode: 'summary', text: '摘要', incomplete: false },
+      { kind: 'message', role: 'assistant', text: '后半' },
+    ]);
+  });
+
   it('renders turn failures in the conversation timeline', () => {
     expect(
       createTimelineEntries([], [
@@ -264,14 +320,18 @@ describe('renderer state reducer', () => {
     }
   });
 
-  it('cancels the active running turn through the desktop bridge', async () => {
+  it('cancels only the active chat turn and waits in cancelling for a terminal event', async () => {
     const originalWindow = globalThis.window;
     let cancelled: { threadId: string; turnId: string } | undefined;
+    let resolveCancel: (() => void) | undefined;
     Object.defineProperty(globalThis, 'window', {
       value: {
         desktop: {
-          cancelTurn: async (threadId: string, turnId: string) => {
+          cancelTurn: (threadId: string, turnId: string) => {
             cancelled = { threadId, turnId };
+            return new Promise<void>((resolve) => {
+              resolveCancel = resolve;
+            });
           },
         },
       },
@@ -283,25 +343,74 @@ describe('renderer state reducer', () => {
       app.state.value = {
         ...app.state.value,
         activeThreadId: 'thread-1',
-        activeTurnId: 'turn-1',
-        busy: true,
+        runtimeByThread: {
+          'thread-1': { threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', status: 'running' },
+          'thread-2': { threadId: 'thread-2', turnId: 'turn-2', modelProfileId: 'model-1', status: 'running' },
+        },
       };
 
-      await app.cancelTurn();
+      const cancelling = app.cancelTurn();
 
       expect(cancelled).toEqual({ threadId: 'thread-1', turnId: 'turn-1' });
-      expect(app.state.value.busy).toBe(false);
+      expect(app.activeTurnId.value).toBe('turn-1');
+      expect(app.state.value.runtimeByThread['thread-1'].status).toBe('cancelling');
+      expect(app.state.value.runtimeByThread['thread-2'].status).toBe('running');
+      resolveCancel?.();
+      await cancelling;
+      expect(app.state.value.runtimeByThread['thread-1'].status).toBe('cancelling');
+
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.cancelled',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        modelProfileId: 'model-1',
+        sequence: 4,
+      });
+      expect(app.state.value.runtimeByThread['thread-1'].status).toBe('cancelled');
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
     }
   });
 
-  it('clears busy state when starting a turn fails before events arrive', async () => {
+  it('does not send cancellation for a terminal active runtime', async () => {
+    const originalWindow = globalThis.window;
+    let cancelCalls = 0;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          cancelTurn: async () => {
+            cancelCalls += 1;
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+        runtimeByThread: {
+          'thread-1': { threadId: 'thread-1', turnId: 'turn-1', status: 'completed' },
+        },
+      };
+
+      await app.cancelTurn();
+
+      expect(cancelCalls).toBe(0);
+      expect(app.state.value.runtimeByThread['thread-1'].status).toBe('completed');
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('restores the active runtime when the cancellation request is rejected before a terminal event', async () => {
     const originalWindow = globalThis.window;
     Object.defineProperty(globalThis, 'window', {
       value: {
         desktop: {
-          startTurn: async () => {
+          cancelTurn: async () => {
             throw new Error('Agent runtime is not ready.');
           },
         },
@@ -314,17 +423,96 @@ describe('renderer state reducer', () => {
       app.state.value = {
         ...app.state.value,
         activeThreadId: 'thread-1',
+        runtimeByThread: {
+          'thread-1': { threadId: 'thread-1', turnId: 'turn-1', status: 'running' },
+        },
       };
 
-      await expect(app.startTurn('hello')).rejects.toThrow('Agent runtime is not ready.');
+      await expect(app.cancelTurn()).rejects.toThrow('Agent runtime is not ready.');
 
-      expect(app.state.value.busy).toBe(false);
+      expect(app.state.value.runtimeByThread['thread-1'].status).toBe('running');
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
     }
   });
 
-  it('clears busy state when the turn start acknowledgement hangs', async () => {
+  it('optimistically queues only the target chat until the start acknowledgement arrives', async () => {
+    const originalWindow = globalThis.window;
+    let resolveStart: ((value: { turnId: string }) => void) | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+        runtimeByThread: {
+          'thread-2': { threadId: 'thread-2', turnId: 'turn-2', modelProfileId: 'model-1', status: 'running' },
+        },
+      };
+
+      const turn = app.startTurn('hello');
+
+      expect(app.activeRuntime.value).toMatchObject({ threadId: 'thread-1', status: 'queued' });
+      expect(app.activeBusy.value).toBe(true);
+      expect(app.state.value.runtimeByThread['thread-2'].status).toBe('running');
+      resolveStart?.({ turnId: 'turn-1' });
+      await turn;
+      expect(app.activeTurnId.value).toBe('turn-1');
+      expect(app.state.value.snapshot.items['thread-1']).toMatchObject([{ turnId: 'turn-1', role: 'user', text: 'hello' }]);
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('rolls back only the optimistic target runtime when starting a turn fails', async () => {
+    const originalWindow = globalThis.window;
+    let rejectStart: ((error: Error) => void) | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((_resolve, reject) => {
+            rejectStart = reject;
+          }),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+        runtimeByThread: {
+          'thread-1': { threadId: 'thread-1', turnId: 'turn-old', status: 'completed' },
+          'thread-2': { threadId: 'thread-2', turnId: 'turn-2', status: 'running' },
+        },
+      };
+
+      const turn = app.startTurn('hello');
+      expect(app.state.value.runtimeByThread['thread-1'].status).toBe('queued');
+      expect(app.state.value.runtimeByThread['thread-1'].turnId).toBeUndefined();
+      rejectStart?.(new Error('Agent runtime is not ready.'));
+      await expect(turn).rejects.toThrow('Agent runtime is not ready.');
+
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ status: 'completed', turnId: 'turn-old' });
+      expect(app.state.value.runtimeByThread['thread-2'].status).toBe('running');
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('rolls back the optimistic runtime when the turn start acknowledgement hangs', async () => {
     vi.useFakeTimers();
     const originalWindow = globalThis.window;
     Object.defineProperty(globalThis, 'window', {
@@ -344,11 +532,47 @@ describe('renderer state reducer', () => {
       };
 
       const turn = app.startTurn('hello');
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ status: 'queued' });
       const turnExpectation = expect(turn).rejects.toThrow('Agent runtime did not acknowledge');
       await vi.advanceTimersByTimeAsync(10_000);
 
       await turnExpectation;
-      expect(app.state.value.busy).toBe(false);
+      expect(app.state.value.runtimeByThread['thread-1']).toBeUndefined();
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('keeps an event-confirmed runtime when the start acknowledgement fails late', async () => {
+    const originalWindow = globalThis.window;
+    let rejectStart: ((error: Error) => void) | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((_resolve, reject) => {
+            rejectStart = reject;
+          }),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = { ...app.state.value, activeThreadId: 'thread-1' };
+      const turn = app.startTurn('hello');
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.started',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        modelProfileId: 'model-1',
+        sequence: 1,
+        title: 'run',
+      });
+      rejectStart?.(new Error('late bridge failure'));
+
+      await expect(turn).rejects.toThrow('late bridge failure');
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ status: 'running', turnId: 'turn-1' });
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
     }
@@ -450,16 +674,22 @@ describe('renderer state reducer', () => {
     }
   });
 
-  it('renders the latest active model progress until the turn finishes', () => {
+  it('renders the latest active model progress for a non-terminal turn', () => {
     const active = createTimelineEntries([], [
-      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', sequence: 1, phase: 'reasoning' },
-      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', sequence: 2, phase: 'answering' },
+      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 1, phase: 'reasoning' },
+      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 2, phase: 'answering' },
     ] as never);
     expect(active).toContainEqual({ id: 'model.progress-turn-1', kind: 'progress', phase: 'answering' });
+  });
 
+  it.each([
+    { type: 'turn.completed' as const },
+    { type: 'turn.failed' as const, error: 'HTTP 503' },
+    { type: 'turn.cancelled' as const },
+  ])('clears model progress after $type', (terminal) => {
     const finished = createTimelineEntries([], [
-      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', sequence: 1, phase: 'reasoning' },
-      { type: 'turn.completed', threadId: 'thread-1', turnId: 'turn-1', sequence: 2 },
+      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 1, phase: 'reasoning' },
+      { ...terminal, threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 2 },
     ] as never);
     expect(finished.some((entry) => entry.kind === 'progress')).toBe(false);
   });

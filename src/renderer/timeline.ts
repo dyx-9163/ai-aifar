@@ -1,4 +1,4 @@
-import type { Item, ModelRunMetrics, ModelRunPhase } from '../shared/domain';
+import type { Item, ModelRunMetrics, ModelRunPhase, ReasoningOutputMode } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
 
 export type TimelineEntry =
@@ -9,6 +9,14 @@ export type TimelineEntry =
       text: string;
       turnId?: string;
       live: boolean;
+    }
+  | {
+      id: string;
+      kind: 'reasoning';
+      mode: ReasoningOutputMode;
+      text: string;
+      turnId?: string;
+      incomplete: boolean;
     }
   | {
       id: string;
@@ -30,7 +38,9 @@ export type TimelineEntry =
 export function createTimelineEntries(items: Item[], events: AgentEvent[] = []): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
   const terminalTurns = new Set(
-    events.filter((event) => event.type === 'turn.completed' || event.type === 'turn.failed').map((event) => event.turnId),
+    events
+      .filter((event) => event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.cancelled')
+      .map((event) => event.turnId),
   );
   const progressByTurn = new Map<string, Extract<AgentEvent, { type: 'model.progress' }>>();
 
@@ -47,6 +57,14 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = []):
     }
 
     if (item.kind === 'reasoning') {
+      entries.push({
+        id: item.id,
+        kind: 'reasoning',
+        mode: item.mode,
+        text: item.text,
+        turnId: item.turnId,
+        incomplete: item.incomplete,
+      });
       continue;
     }
 

@@ -17,6 +17,7 @@ import type {
   ReasoningMode,
   ReasoningProtocol,
   RuntimeSettingsInput,
+  ThreadRuntimeState,
   ThreadSummary,
 } from '../../shared/domain';
 
@@ -49,6 +50,15 @@ export function useApp() {
     const threadId = state.value.activeThreadId;
     return threadId ? (state.value.snapshot.items[threadId] ?? []) : [];
   });
+
+  const activeRuntime = computed<ThreadRuntimeState | undefined>(() => {
+    const threadId = state.value.activeThreadId;
+    return threadId
+      ? state.value.runtimeByThread[threadId] ?? { threadId, status: 'idle' }
+      : undefined;
+  });
+  const activeBusy = computed(() => ['queued', 'running', 'cancelling'].includes(activeRuntime.value?.status ?? 'idle'));
+  const activeTurnId = computed(() => activeRuntime.value?.turnId);
 
   const activeModelProfileId = computed(() => activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId);
   const activeModelProfile = computed(() =>
@@ -101,28 +111,49 @@ export function useApp() {
   async function startTurn(text: string): Promise<void> {
     const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
     const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
-    state.value.busy = true;
+    const previousRuntime = state.value.runtimeByThread[threadId];
+    state.value = replaceThreadRuntime(state.value, threadId, {
+      threadId,
+      modelProfileId,
+      status: 'queued',
+    });
     try {
       const response = await withTimeout(
         window.desktop.startTurn(threadId, text, modelProfileId),
         TURN_START_ACK_TIMEOUT_MS,
         'Agent runtime did not acknowledge the turn within 10s.',
       );
+      const currentRuntime = state.value.runtimeByThread[threadId];
+      if (currentRuntime?.status === 'queued' && currentRuntime.turnId === undefined) {
+        state.value = replaceThreadRuntime(state.value, threadId, { ...currentRuntime, turnId: response.turnId });
+      }
       state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
     } catch (error) {
-      state.value = { ...state.value, busy: false, activeTurnId: undefined };
+      const currentRuntime = state.value.runtimeByThread[threadId];
+      if (currentRuntime?.status === 'queued' && currentRuntime.turnId === undefined) {
+        state.value = replaceThreadRuntime(state.value, threadId, previousRuntime);
+      }
       throw error;
     }
   }
 
   async function cancelTurn(): Promise<void> {
     const threadId = state.value.activeThreadId;
-    const turnId = state.value.activeTurnId;
-    if (!threadId || !turnId) {
+    const runtime = activeRuntime.value;
+    const turnId = runtime?.turnId;
+    if (!threadId || !turnId || !['queued', 'running', 'cancelling'].includes(runtime.status)) {
       return;
     }
-    await window.desktop.cancelTurn(threadId, turnId);
-    state.value = { ...state.value, busy: false, activeTurnId: undefined };
+    state.value = replaceThreadRuntime(state.value, threadId, { ...runtime, status: 'cancelling' });
+    try {
+      await window.desktop.cancelTurn(threadId, turnId);
+    } catch (error) {
+      const currentRuntime = state.value.runtimeByThread[threadId];
+      if (currentRuntime?.turnId === turnId && currentRuntime.status === 'cancelling') {
+        state.value = replaceThreadRuntime(state.value, threadId, runtime);
+      }
+      throw error;
+    }
   }
 
   async function respondApproval(approved: boolean): Promise<void> {
@@ -213,6 +244,9 @@ export function useApp() {
     loading,
     activeThread,
     activeItems,
+    activeRuntime,
+    activeBusy,
+    activeTurnId,
     activeModelProfile,
     activeModelProfileId,
     visibleEvents,
@@ -231,6 +265,20 @@ export function useApp() {
     updateSettings,
     selectModelProfile,
   };
+}
+
+function replaceThreadRuntime(
+  state: RendererState,
+  threadId: string,
+  runtime?: ThreadRuntimeState,
+): RendererState {
+  const runtimeByThread = { ...state.runtimeByThread };
+  if (runtime) {
+    runtimeByThread[threadId] = runtime;
+  } else {
+    delete runtimeByThread[threadId];
+  }
+  return { ...state, runtimeByThread };
 }
 
 function replaceModelProfile(state: RendererState, profile: ModelProfile): RendererState {
