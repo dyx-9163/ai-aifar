@@ -912,6 +912,49 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('reloads authoritative runtime state when cancellation is not accepted', async () => {
+    const originalWindow = globalThis.window;
+    let snapshotCalls = 0;
+    const authoritativeSnapshot: AppSnapshot = {
+      ...emptyState().snapshot,
+      groups: [{
+        id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
+      }],
+      threads: [{
+        id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'running', modelProfileId: 'model-1',
+        createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:01.000Z',
+      }],
+      turns: [{
+        id: 'turn-1', threadId: 'thread-1', modelProfileId: 'model-1', status: 'running',
+        createdAt: '2026-08-17T00:00:00.000Z', startedAt: '2026-08-17T00:00:01.000Z', incomplete: true,
+      }],
+    };
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          cancelTurn: async () => false,
+          getSnapshot: async () => {
+            snapshotCalls += 1;
+            return authoritativeSnapshot;
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = reduceEvent(app.state.value, { type: 'snapshot', snapshot: authoritativeSnapshot });
+
+      await app.cancelTurn();
+
+      expect(snapshotCalls).toBe(1);
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'running' });
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('cancels the current turn after superseded turn events arrive late', async () => {
     const originalWindow = globalThis.window;
     let cancelled: { threadId: string; turnId: string } | undefined;

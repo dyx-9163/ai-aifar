@@ -198,7 +198,15 @@ export function useApp() {
     }
     state.value = replaceThreadRuntime(state.value, threadId, { ...runtime, status: 'cancelling' });
     try {
-      await window.desktop.cancelTurn(threadId, turnId);
+      const accepted = await window.desktop.cancelTurn(threadId, turnId);
+      if (accepted === false) {
+        const snapshot = await window.desktop.getSnapshot();
+        const currentRuntime = state.value.runtimeByThread[threadId];
+        if (currentRuntime?.turnId === turnId && currentRuntime.status === 'cancelling') {
+          state.value = replaceThreadRuntime(state.value, threadId, runtime);
+        }
+        state.value = reduceEvent(state.value, { type: 'snapshot', snapshot });
+      }
     } catch (error) {
       const currentRuntime = state.value.runtimeByThread[threadId];
       if (currentRuntime?.turnId === turnId && currentRuntime.status === 'cancelling') {

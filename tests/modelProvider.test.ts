@@ -37,6 +37,91 @@ const ignoreHandlers: ModelStreamHandlers = {
 };
 
 describe('OpenAI-compatible model provider', () => {
+  it('stops at the DONE sentinel and releases a provider stream that remains open', async () => {
+    let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelCalls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        sourceController = controller;
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      },
+      cancel() {
+        cancelCalls += 1;
+      },
+    });
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(body as unknown as BodyInit, { status: 200 });
+    const completion = streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      completion.then(() => 'completed' as const),
+      new Promise<'timed-out'>((resolve) => {
+        timeout = setTimeout(() => resolve('timed-out'), 75);
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (outcome === 'timed-out') {
+      sourceController.close();
+      await completion;
+    }
+
+    expect(outcome).toBe('completed');
+    expect(cancelCalls).toBe(1);
+  });
+
+  it('times out a model stream that never produces another chunk and releases its reader', async () => {
+    let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelCalls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        sourceController = controller;
+      },
+      cancel() {
+        cancelCalls += 1;
+      },
+    });
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(body as unknown as BodyInit, { status: 200 });
+    const completion = streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+      () => Date.now(),
+      20,
+    );
+
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      completion.then(
+        () => ({ type: 'completed' as const }),
+        (error: unknown) => ({ type: 'rejected' as const, error }),
+      ),
+      new Promise<{ type: 'timed-out' }>((resolve) => {
+        guard = setTimeout(() => resolve({ type: 'timed-out' }), 125);
+      }),
+    ]);
+    if (guard) clearTimeout(guard);
+    if (outcome.type === 'timed-out') {
+      sourceController.close();
+      await completion;
+    }
+
+    expect(outcome).toMatchObject({
+      type: 'rejected',
+      error: expect.objectContaining({ message: 'Model request timed out after 20ms.' }),
+    });
+    expect(cancelCalls).toBe(1);
+  });
+
   it('streams answer deltas without inventing reasoning parameters for an unsupported profile', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',

@@ -175,6 +175,12 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         context.lastQueuePosition = undefined;
         await context.next({ type: 'turn.started', title: turn.title });
       },
+      onCancelling: async (turn) => {
+        const context = active.get(turn.turnId);
+        if (!context) return;
+        database.updateTurn(turn.turnId, { status: 'cancelling', incomplete: true });
+        await context.next({ type: 'turn.cancelling' });
+      },
       onCancelled: async (turn) => {
         const context = active.get(turn.turnId);
         if (!context) return;
@@ -267,7 +273,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       approvalResolvers.delete(`approval-${turn.turnId}`);
       active.delete(turn.turnId);
     } catch (error) {
-      if (isAbortError(error) && signal.aborted) throw error;
+      if (signal.aborted) throw abortReason(signal);
       const message = safeErrorMessage(error, profile?.apiKey ? [profile.apiKey] : []);
       database.updateTurn(turn.turnId, {
         status: 'failed',
@@ -537,12 +543,12 @@ function isTerminalPayload(payload: SequencedEventPayload): boolean {
     || payload.type === 'turn.cancelled';
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
 }
 
-function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException('Turn was cancelled.', 'AbortError');
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('Turn was cancelled.', 'AbortError');
 }
 
 function safeErrorMessage(error: unknown, secrets: string[] = []): string {

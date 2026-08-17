@@ -330,6 +330,8 @@ function applyRuntimeEvent(current: ThreadRuntimeState | undefined, event: Seque
       return terminal || base.status === 'cancelling'
         ? base
         : { ...base, status: 'running', queuePosition: undefined, startedAt: base.startedAt ?? now, error: undefined };
+    case 'turn.cancelling':
+      return terminal ? base : { ...base, status: 'cancelling', queuePosition: undefined, error: undefined };
     case 'turn.completed':
       return terminal ? base : { ...base, status: 'completed', queuePosition: undefined, completedAt: now, error: undefined };
     case 'turn.failed':
@@ -704,6 +706,7 @@ function turnStatuses(
 
 function statusFromEvent(event: SequencedAgentEvent): ThreadRuntimeState['status'] | undefined {
   if (event.type === 'turn.queued') return 'queued';
+  if (event.type === 'turn.cancelling') return 'cancelling';
   if (event.type === 'turn.completed') return 'completed';
   if (event.type === 'turn.failed') return 'failed';
   if (event.type === 'turn.cancelled') return 'cancelled';

@@ -53,6 +53,7 @@ export type SequencedAgentEvent =
   | ({ type: 'tool.output'; toolId: string; output: string } & SequencedTurnEnvelope)
   | ({ type: 'model.metrics'; metrics: ModelRunMetrics } & SequencedTurnEnvelope)
   | ({ type: 'approval.required'; approvalId: string; title: string; description: string } & SequencedTurnEnvelope)
+  | ({ type: 'turn.cancelling' } & SequencedTurnEnvelope)
   | ({ type: 'turn.completed' } & SequencedTurnEnvelope)
   | ({ type: 'turn.failed'; error: string } & SequencedTurnEnvelope)
   | ({ type: 'turn.cancelled' } & SequencedTurnEnvelope);
@@ -326,6 +327,7 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
       );
     case 'approval.required':
       return hasString(value, 'approvalId') && hasString(value, 'title') && hasString(value, 'description');
+    case 'turn.cancelling':
     case 'turn.completed':
       return true;
     case 'turn.failed':

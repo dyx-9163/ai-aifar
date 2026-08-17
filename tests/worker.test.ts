@@ -358,6 +358,64 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('persists and emits cancelling before an aborted provider settles', async () => {
+    const releaseProvider = deferred<void>();
+    let providerSignal: AbortSignal | undefined;
+    const harness = createHarness(async (_profile, _messages, _handlers, signal) => {
+      providerSignal = signal;
+      await releaseProvider.promise;
+      return metrics();
+    });
+    const thread = harness.database.createThread('Slow cancellation');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'run', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(providerSignal).toBeDefined());
+
+    expect(harness.runtime.cancelTurn(turnId)).toBe(true);
+    try {
+      await eventually(() => {
+        expect(providerSignal?.aborted).toBe(true);
+        expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+          id: turnId,
+          status: 'cancelling',
+          incomplete: true,
+        }));
+        expect(typesFor(harness.events, turnId)).toContain('turn.cancelling');
+      });
+    } finally {
+      releaseProvider.resolve();
+    }
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.cancelled'));
+    harness.database.close();
+  });
+
+  it('prioritizes an accepted abort over a later ordinary provider error', async () => {
+    const providerStarted = deferred<void>();
+    const harness = createHarness(async (_profile, _messages, _handlers, signal) => {
+      providerStarted.resolve();
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      throw new Error('provider failed while aborting');
+    });
+    const thread = harness.database.createThread('Abort wins');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'run', modelProfileId: harness.profile.id,
+    });
+    await providerStarted.promise;
+
+    expect(harness.runtime.cancelTurn(turnId)).toBe(true);
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.cancelled'));
+
+    expect(typesFor(harness.events, turnId)).toContain('turn.cancelling');
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.failed');
+    expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: turnId,
+      status: 'cancelled',
+      incomplete: true,
+    }));
+    harness.database.close();
+  });
+
   it('persists and emits a visible redacted provider failure once', async () => {
     const harness = createHarness(async (profile) => {
       throw new Error(`Authorization: Bearer ${profile.apiKey}; upstream exploded`);

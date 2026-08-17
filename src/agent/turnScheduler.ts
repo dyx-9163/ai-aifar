@@ -9,6 +9,7 @@ export interface ScheduledTurn {
 export interface SchedulerCallbacks {
   onQueued(turn: ScheduledTurn, position: number): Promise<void> | void;
   onStarted(turn: ScheduledTurn): Promise<void> | void;
+  onCancelling?(turn: ScheduledTurn): Promise<void> | void;
   onCancelled(turn: ScheduledTurn, wasRunning: boolean): Promise<void> | void;
   onQueuePositions(
     modelProfileId: string,
@@ -81,6 +82,9 @@ export class ModelTurnScheduler {
         return false;
       }
       running.controller.abort();
+      this.scheduleModelOperation(running.turn.modelProfileId, {
+        run: () => this.invoke(() => this.callbacks.onCancelling?.(running.turn)),
+      });
       return true;
     }
 

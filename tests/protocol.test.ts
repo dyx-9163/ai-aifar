@@ -263,7 +263,8 @@ describe('desktop protocol guards', () => {
     { type: 'answer.delta', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 2, text: '答案' },
     { type: 'reasoning.raw.delta', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 3, text: '分析' },
     { type: 'reasoning.summary.delta', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 4, text: '摘要' },
-    { type: 'turn.cancelled', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 5 },
+    { type: 'turn.cancelling', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 5 },
+    { type: 'turn.cancelled', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 6 },
   ])('accepts $type', (event) => {
     expect(isAgentEvent(event)).toBe(true);
   });

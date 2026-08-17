@@ -323,12 +323,13 @@ describe('Agent Client Core', () => {
   it('applies queued cancellation and terminal events only to the matching thread', () => {
     let state = reduceAgentEvent(emptyAgentClientState(), queued('thread-1', 'turn-1', 1));
     state = reduceAgentEvent(state, started('thread-2', 'turn-2', 1));
-    state = reduceAgentEvent(state, { type: 'turn.cancelled', ...envelope('thread-1', 'turn-1', 2) });
+    state = reduceAgentEvent(state, { type: 'turn.cancelling', ...envelope('thread-1', 'turn-1', 2) });
     state = reduceAgentEvent(state, { type: 'turn.failed', ...envelope('thread-2', 'turn-2', 2), error: 'HTTP 503' });
 
-    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'cancelled' });
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'cancelling' });
     expect(state.runtimeByThread['thread-2']).toMatchObject({ turnId: 'turn-2', status: 'failed', error: 'HTTP 503' });
 
+    state = reduceAgentEvent(state, { type: 'turn.cancelled', ...envelope('thread-1', 'turn-1', 3) });
     state = reduceAgentEvent(state, started('thread-3', 'turn-3', 1));
     state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-3', 'turn-3', 2) });
     expect(state.runtimeByThread['thread-1'].status).toBe('cancelled');
