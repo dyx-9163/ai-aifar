@@ -17,6 +17,9 @@ export interface AgentClientState {
   events: AgentEvent[];
   lastSequenceByTurn: Record<string, number>;
   runtimeByThread: Record<string, ThreadRuntimeState>;
+  currentTurnByThread: Record<string, string>;
+  supersededTurns: Record<string, true>;
+  optimisticThreads: Record<string, true>;
   pendingApproval?: Approval;
 }
 
@@ -40,6 +43,9 @@ export function emptyAgentClientState(): AgentClientState {
     events: [],
     lastSequenceByTurn: {},
     runtimeByThread: {},
+    currentTurnByThread: {},
+    supersededTurns: {},
+    optimisticThreads: {},
   };
 }
 
@@ -49,11 +55,17 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
       ? state.activeThreadId
       : event.snapshot.threads[0]?.id;
     const activeThread = event.snapshot.threads.find((thread) => thread.id === activeThreadId);
-    const snapshot = reconcileSnapshot(state.snapshot, event.snapshot);
+    const runtimeProjection = reconcileSnapshotRuntimes(state, event.snapshot.turns ?? []);
+    const turns = reconcileTurns(state.snapshot.turns ?? [], event.snapshot.turns ?? []);
+    const snapshot = reconcileSnapshot(
+      state.snapshot,
+      { ...event.snapshot, turns },
+      turnStatuses(turns, state.events, runtimeProjection.runtimeByThread),
+    );
     return {
       ...state,
       snapshot,
-      runtimeByThread: runtimeFromTurns(snapshot.turns ?? []),
+      ...runtimeProjection,
       activeThreadId,
       activeGroupId: activeThread?.groupId ?? state.activeGroupId ?? event.snapshot.groups[0]?.id,
       pendingApproval: snapshot.approvals.find((approval) => approval.status === 'pending'),
@@ -65,11 +77,12 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
     return state;
   }
 
+  const runtimeProjection = reduceCurrentRuntime(state, event);
   let nextState: AgentClientState = {
     ...state,
     events: [...state.events, event],
     lastSequenceByTurn: { ...state.lastSequenceByTurn, [turnKey]: event.sequence },
-    runtimeByThread: reduceRuntimeByThread(state.runtimeByThread, event),
+    ...runtimeProjection,
   };
 
   if (event.type === 'message.delta' || event.type === 'answer.delta') {
@@ -78,6 +91,26 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
     nextState = applyReasoningDeltaToSnapshot(nextState, event.threadId, event.turnId, 'raw', event.text);
   } else if (event.type === 'reasoning.summary.delta') {
     nextState = applyReasoningDeltaToSnapshot(nextState, event.threadId, event.turnId, 'summary', event.text);
+  }
+
+  if (
+    event.type === 'message.delta' ||
+    event.type === 'answer.delta' ||
+    event.type === 'reasoning.raw.delta' ||
+    event.type === 'reasoning.summary.delta'
+  ) {
+    const terminalStatus = knownTerminalStatus(nextState, event.threadId, event.turnId);
+    if (terminalStatus) {
+      nextState = {
+        ...nextState,
+        snapshot: markTurnContentIncomplete(
+          nextState.snapshot,
+          event.threadId,
+          event.turnId,
+          terminalStatus !== 'completed',
+        ),
+      };
+    }
   }
 
   if (event.type === 'approval.required') {
@@ -96,11 +129,15 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
   }
 
   if (isTerminalEvent(event)) {
+    const terminalStatus = knownTerminalStatus(nextState, event.threadId, event.turnId) ?? eventStatus(event);
     nextState = {
       ...nextState,
-      snapshot: event.type === 'turn.completed'
-        ? markTurnContentComplete(nextState.snapshot, event.threadId, event.turnId)
-        : nextState.snapshot,
+      snapshot: markTurnContentIncomplete(
+        nextState.snapshot,
+        event.threadId,
+        event.turnId,
+        terminalStatus !== 'completed',
+      ),
       pendingApproval:
         nextState.pendingApproval?.threadId === event.threadId && nextState.pendingApproval.turnId === event.turnId
           ? undefined
@@ -215,83 +252,224 @@ function replaceThreadItems(state: AgentClientState, threadId: string, items: It
   };
 }
 
-function reduceRuntimeByThread(
-  runtimes: Record<string, ThreadRuntimeState>,
-  event: SequencedAgentEvent,
-): Record<string, ThreadRuntimeState> {
-  const current = runtimes[event.threadId];
-  const sameTurn = current?.turnId === event.turnId;
-  if (current && !sameTurn && isActiveStatus(current.status) && isTerminalEvent(event)) {
-    return runtimes;
+type RuntimeProjection = Pick<
+  AgentClientState,
+  'runtimeByThread' | 'currentTurnByThread' | 'supersededTurns' | 'optimisticThreads'
+>;
+
+function reduceCurrentRuntime(state: AgentClientState, event: SequencedAgentEvent): RuntimeProjection {
+  const threadId = event.threadId;
+  const eventKey = turnKey(threadId, event.turnId);
+  const currentTurnId = state.currentTurnByThread[threadId] ?? state.runtimeByThread[threadId]?.turnId;
+  const currentRuntime = state.runtimeByThread[threadId];
+  const optimistic = Boolean(state.optimisticThreads[threadId]);
+  if (state.supersededTurns[eventKey]) {
+    return runtimeProjection(state);
   }
 
+  const sameTurn = currentTurnId === event.turnId;
+  const claimsOptimistic = optimistic && (!currentTurnId || !sameTurn);
+  const opensAfterTerminal =
+    !optimistic &&
+    Boolean(currentTurnId) &&
+    currentTurnId !== event.turnId &&
+    isTerminalStatus(currentRuntime?.status) &&
+    isTurnOpeningEvent(event);
+  const claimsEmpty = !optimistic && !currentTurnId;
+  const shouldApply = sameTurn && !optimistic || claimsOptimistic || opensAfterTerminal || claimsEmpty;
+  if (!shouldApply) {
+    return runtimeProjection(state);
+  }
+
+  const currentTurnByThread = { ...state.currentTurnByThread, [threadId]: event.turnId };
+  const supersededTurns = { ...state.supersededTurns };
+  if (currentTurnId && currentTurnId !== event.turnId) {
+    supersededTurns[turnKey(threadId, currentTurnId)] = true;
+  }
+  const optimisticThreads = { ...state.optimisticThreads };
+  delete optimisticThreads[threadId];
+  const base = sameTurn ? currentRuntime : undefined;
+  return {
+    runtimeByThread: {
+      ...state.runtimeByThread,
+      [threadId]: applyRuntimeEvent(base, event),
+    },
+    currentTurnByThread,
+    supersededTurns,
+    optimisticThreads,
+  };
+}
+
+function applyRuntimeEvent(current: ThreadRuntimeState | undefined, event: SequencedAgentEvent): ThreadRuntimeState {
   const now = Date.now();
-  const base: ThreadRuntimeState = sameTurn
+  const base: ThreadRuntimeState = current
     ? { ...current, modelProfileId: event.modelProfileId }
     : { threadId: event.threadId, turnId: event.turnId, modelProfileId: event.modelProfileId, status: 'running' };
-  let runtime: ThreadRuntimeState;
+  const terminal = isTerminalStatus(base.status);
 
   switch (event.type) {
     case 'turn.queued':
-      runtime = { ...base, status: 'queued', queuePosition: event.queuePosition, error: undefined };
-      break;
+      return terminal || base.status === 'running' || base.status === 'cancelling'
+        ? base
+        : { ...base, status: 'queued', queuePosition: event.queuePosition, error: undefined };
     case 'turn.started':
-      runtime = { ...base, status: 'running', queuePosition: undefined, startedAt: sameTurn ? current.startedAt ?? now : now, error: undefined };
-      break;
+      return terminal || base.status === 'cancelling'
+        ? base
+        : { ...base, status: 'running', queuePosition: undefined, startedAt: base.startedAt ?? now, error: undefined };
     case 'turn.completed':
-      runtime = { ...base, status: 'completed', queuePosition: undefined, completedAt: now, error: undefined };
-      break;
+      return terminal ? base : { ...base, status: 'completed', queuePosition: undefined, completedAt: now, error: undefined };
     case 'turn.failed':
-      runtime = { ...base, status: 'failed', queuePosition: undefined, completedAt: now, error: event.error };
-      break;
+      return terminal ? base : { ...base, status: 'failed', queuePosition: undefined, completedAt: now, error: event.error };
     case 'turn.cancelled':
-      runtime = { ...base, status: 'cancelled', queuePosition: undefined, completedAt: now, error: undefined };
-      break;
+      return terminal ? base : { ...base, status: 'cancelled', queuePosition: undefined, completedAt: now, error: undefined };
     case 'model.metrics':
-      runtime = { ...base, tokensPerSecond: event.metrics.tokensPerSecond };
-      break;
+      return { ...base, tokensPerSecond: event.metrics.tokensPerSecond ?? base.tokensPerSecond };
     case 'message.delta':
     case 'answer.delta':
     case 'reasoning.raw.delta':
     case 'reasoning.summary.delta':
-      runtime = {
+      return {
         ...base,
-        status: base.status === 'cancelling' ? 'cancelling' : 'running',
+        status: terminal || base.status === 'cancelling' ? base.status : 'running',
+        queuePosition: terminal || base.status === 'cancelling' ? base.queuePosition : undefined,
         firstTokenAt: base.firstTokenAt ?? now,
       };
-      break;
     default:
-      runtime = base;
+      return base;
   }
-
-  return { ...runtimes, [event.threadId]: runtime };
 }
 
-function runtimeFromTurns(turns: TurnRecord[]): Record<string, ThreadRuntimeState> {
-  const newestByThread = new Map<string, TurnRecord>();
-  for (const turn of turns) {
-    if (!isRecoverableSnapshotStatus(turn.status)) continue;
-    const previous = newestByThread.get(turn.threadId);
-    if (!previous || compareTurns(previous, turn) <= 0) {
-      newestByThread.set(turn.threadId, turn);
+function reconcileSnapshotRuntimes(state: AgentClientState, incomingTurns: TurnRecord[]): RuntimeProjection {
+  const newestIncoming = newestTurnsByThread(incomingTurns);
+  const incomingById = new Map(incomingTurns.map((turn) => [turn.id, turn]));
+  const runtimeByThread = { ...state.runtimeByThread };
+  const currentTurnByThread = { ...state.currentTurnByThread };
+  const supersededTurns = { ...state.supersededTurns };
+  const optimisticThreads = { ...state.optimisticThreads };
+  const threadIds = new Set([
+    ...Object.keys(runtimeByThread),
+    ...Object.keys(currentTurnByThread),
+    ...newestIncoming.keys(),
+  ]);
+
+  for (const threadId of threadIds) {
+    const candidate = newestIncoming.get(threadId);
+    const current = runtimeByThread[threadId];
+    const currentTurnId = currentTurnByThread[threadId] ?? current?.turnId;
+    const optimistic = Boolean(optimisticThreads[threadId]);
+
+    if (!candidate) {
+      if (!optimistic && (!currentTurnId || state.lastSequenceByTurn[turnKey(threadId, currentTurnId)] === undefined)) {
+        delete runtimeByThread[threadId];
+        delete currentTurnByThread[threadId];
+      }
+      continue;
     }
+
+    if (optimistic && (!currentTurnId || candidate.id === currentTurnId || supersededTurns[turnKey(threadId, candidate.id)])) {
+      continue;
+    }
+
+    if (candidate.id === currentTurnId) {
+      runtimeByThread[threadId] = mergeRuntime(current, runtimeFromTurn(candidate));
+      continue;
+    }
+
+    if (supersededTurns[turnKey(threadId, candidate.id)]) {
+      continue;
+    }
+
+    const currentIncoming = currentTurnId ? incomingById.get(currentTurnId) : undefined;
+    const currentKnown = currentTurnId
+      ? currentIncoming ?? state.snapshot.turns.find((turn) => turn.id === currentTurnId)
+      : undefined;
+    const currentHasLiveSequence = Boolean(
+      currentTurnId && state.lastSequenceByTurn[turnKey(threadId, currentTurnId)] !== undefined,
+    );
+    const candidateIsNewer = !currentKnown || compareTurns(currentKnown, candidate) < 0;
+    const canReplaceCurrent =
+      !currentTurnId ||
+      (candidateIsNewer && Boolean(currentIncoming) && (!currentHasLiveSequence || isTerminalStatus(current?.status)));
+    if (!canReplaceCurrent) {
+      continue;
+    }
+
+    if (currentTurnId) {
+      supersededTurns[turnKey(threadId, currentTurnId)] = true;
+    }
+    runtimeByThread[threadId] = runtimeFromTurn(candidate);
+    currentTurnByThread[threadId] = candidate.id;
+    delete optimisticThreads[threadId];
   }
 
-  return Object.fromEntries(
-    [...newestByThread].map(([threadId, turn]) => [threadId, {
-      threadId,
-      turnId: turn.id,
-      modelProfileId: turn.modelProfileId,
-      status: turn.status,
-      startedAt: timestamp(turn.startedAt),
-      completedAt: timestamp(turn.completedAt),
-      error: turn.error,
-    } satisfies ThreadRuntimeState]),
-  );
+  return { runtimeByThread, currentTurnByThread, supersededTurns, optimisticThreads };
+}
+
+function newestTurnsByThread(turns: TurnRecord[]): Map<string, TurnRecord> {
+  const newest = new Map<string, TurnRecord>();
+  for (const turn of turns) {
+    const previous = newest.get(turn.threadId);
+    if (!previous || compareTurns(previous, turn) < 0) {
+      newest.set(turn.threadId, turn);
+    }
+  }
+  return newest;
+}
+
+function runtimeFromTurn(turn: TurnRecord): ThreadRuntimeState {
+  return {
+    threadId: turn.threadId,
+    turnId: turn.id,
+    modelProfileId: turn.modelProfileId,
+    status: turn.status,
+    startedAt: timestamp(turn.startedAt),
+    completedAt: timestamp(turn.completedAt),
+    error: turn.error,
+  };
+}
+
+function mergeRuntime(current: ThreadRuntimeState | undefined, incoming: ThreadRuntimeState): ThreadRuntimeState {
+  if (!current || current.turnId !== incoming.turnId) return incoming;
+  const status = monotonicStatus(current.status, incoming.status);
+  return {
+    ...incoming,
+    ...current,
+    modelProfileId: incoming.modelProfileId ?? current.modelProfileId,
+    status,
+    queuePosition: status === 'queued' ? current.queuePosition ?? incoming.queuePosition : undefined,
+    startedAt: current.startedAt ?? incoming.startedAt,
+    completedAt: current.completedAt ?? incoming.completedAt,
+    error: status === 'failed' ? current.error ?? incoming.error : undefined,
+  };
+}
+
+function monotonicStatus(current: ThreadRuntimeState['status'], incoming: ThreadRuntimeState['status']): ThreadRuntimeState['status'] {
+  if (isTerminalStatus(current)) return current;
+  if (isTerminalStatus(incoming)) return incoming;
+  const rank: Record<ThreadRuntimeState['status'], number> = {
+    idle: 0,
+    queued: 1,
+    running: 2,
+    cancelling: 3,
+    completed: 4,
+    failed: 4,
+    cancelled: 4,
+    interrupted: 4,
+  };
+  return rank[incoming] > rank[current] ? incoming : current;
 }
 
 function compareTurns(left: TurnRecord, right: TurnRecord): number {
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+  for (const field of ['createdAt', 'startedAt', 'completedAt'] as const) {
+    const compared = timestampForOrder(left[field]) - timestampForOrder(right[field]);
+    if (compared !== 0) return compared;
+  }
+  return left.id.localeCompare(right.id);
+}
+
+function timestampForOrder(value?: string): number {
+  const parsed = value ? Date.parse(value) : Number.NEGATIVE_INFINITY;
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
 }
 
 function timestamp(value?: string): number | undefined {
@@ -300,12 +478,27 @@ function timestamp(value?: string): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-function isRecoverableSnapshotStatus(status: TurnRecord['status']): boolean {
-  return status === 'queued' || status === 'running' || status === 'cancelling' || status === 'interrupted';
+function isTerminalStatus(
+  status: ThreadRuntimeState['status'] | undefined,
+): status is Extract<ThreadRuntimeState['status'], 'completed' | 'failed' | 'cancelled' | 'interrupted'> {
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'interrupted';
 }
 
-function isActiveStatus(status: ThreadRuntimeState['status']): boolean {
-  return status === 'queued' || status === 'running' || status === 'cancelling';
+function isTurnOpeningEvent(event: SequencedAgentEvent): boolean {
+  return event.type === 'turn.queued' || event.type === 'turn.started';
+}
+
+function turnKey(threadId: string, turnId: string): string {
+  return `${threadId}:${turnId}`;
+}
+
+function runtimeProjection(state: AgentClientState): RuntimeProjection {
+  return {
+    runtimeByThread: state.runtimeByThread,
+    currentTurnByThread: state.currentTurnByThread,
+    supersededTurns: state.supersededTurns,
+    optimisticThreads: state.optimisticThreads,
+  };
 }
 
 function isTerminalEvent(event: SequencedAgentEvent): event is Extract<SequencedAgentEvent, {
@@ -314,31 +507,137 @@ function isTerminalEvent(event: SequencedAgentEvent): event is Extract<Sequenced
   return event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.cancelled';
 }
 
-function reconcileSnapshot(current: AppSnapshot, incoming: AppSnapshot): AppSnapshot {
+function eventStatus(
+  event: Extract<SequencedAgentEvent, { type: 'turn.completed' | 'turn.failed' | 'turn.cancelled' }>,
+): Extract<ThreadRuntimeState['status'], 'completed' | 'failed' | 'cancelled'> {
+  if (event.type === 'turn.completed') return 'completed';
+  if (event.type === 'turn.failed') return 'failed';
+  return 'cancelled';
+}
+
+function firstTerminalStatus(
+  events: AgentEvent[],
+  threadId: string,
+  turnId: string,
+): Extract<ThreadRuntimeState['status'], 'completed' | 'failed' | 'cancelled'> | undefined {
+  for (const candidate of events) {
+    if (
+      candidate.type !== 'snapshot' &&
+      candidate.threadId === threadId &&
+      candidate.turnId === turnId &&
+      isTerminalEvent(candidate)
+    ) {
+      return eventStatus(candidate);
+    }
+  }
+  return undefined;
+}
+
+function knownTerminalStatus(
+  state: AgentClientState,
+  threadId: string,
+  turnId: string,
+): Extract<ThreadRuntimeState['status'], 'completed' | 'failed' | 'cancelled' | 'interrupted'> | undefined {
+  const runtime = state.runtimeByThread[threadId];
+  if (runtime?.turnId === turnId && isTerminalStatus(runtime.status)) {
+    return runtime.status;
+  }
+  return firstTerminalStatus(state.events, threadId, turnId);
+}
+
+function reconcileTurns(current: TurnRecord[], incoming: TurnRecord[]): TurnRecord[] {
+  const turns = new Map(current.map((turn) => [turn.id, turn]));
+  for (const turn of incoming) {
+    const existing = turns.get(turn.id);
+    if (!existing) {
+      turns.set(turn.id, turn);
+      continue;
+    }
+    const status = monotonicStatus(existing.status, turn.status) as TurnRecord['status'];
+    turns.set(turn.id, {
+      ...existing,
+      ...turn,
+      status,
+      startedAt: turn.startedAt ?? existing.startedAt,
+      completedAt: turn.completedAt ?? existing.completedAt,
+      error: status === 'failed' ? turn.error ?? existing.error : undefined,
+      incomplete: status !== 'completed',
+    });
+  }
+  return [...turns.values()].sort(compareTurns);
+}
+
+function turnStatuses(
+  turns: TurnRecord[],
+  events: AgentEvent[],
+  runtimes: Record<string, ThreadRuntimeState>,
+): Map<string, ThreadRuntimeState['status']> {
+  const statuses = new Map<string, ThreadRuntimeState['status']>(turns.map((turn) => [turn.id, turn.status]));
+  const liveStatuses = new Map<string, ThreadRuntimeState['status']>();
+  for (const event of events) {
+    if (event.type === 'snapshot') continue;
+    const previous = liveStatuses.get(event.turnId);
+    const status = statusFromEvent(event);
+    if (!status || isTerminalStatus(previous)) continue;
+    liveStatuses.set(event.turnId, previous ? monotonicStatus(previous, status) : status);
+  }
+  for (const [turnId, status] of liveStatuses) {
+    statuses.set(turnId, status);
+  }
+  for (const runtime of Object.values(runtimes)) {
+    if (runtime.turnId) statuses.set(runtime.turnId, runtime.status);
+  }
+  return statuses;
+}
+
+function statusFromEvent(event: SequencedAgentEvent): ThreadRuntimeState['status'] | undefined {
+  if (event.type === 'turn.queued') return 'queued';
+  if (event.type === 'turn.completed') return 'completed';
+  if (event.type === 'turn.failed') return 'failed';
+  if (event.type === 'turn.cancelled') return 'cancelled';
+  return 'running';
+}
+
+function reconcileSnapshot(
+  current: AppSnapshot,
+  incoming: AppSnapshot,
+  statuses: Map<string, ThreadRuntimeState['status']>,
+): AppSnapshot {
   const items: Record<string, Item[]> = {};
   const threadIds = new Set([...Object.keys(incoming.items), ...Object.keys(current.items)]);
   for (const threadId of threadIds) {
-    items[threadId] = reconcileThreadItems(current.items[threadId] ?? [], incoming.items[threadId] ?? []);
+    items[threadId] = reconcileThreadItems(current.items[threadId] ?? [], incoming.items[threadId] ?? [], statuses);
   }
   return { ...incoming, items };
 }
 
-function reconcileThreadItems(current: Item[], incoming: Item[]): Item[] {
+function reconcileThreadItems(
+  current: Item[],
+  incoming: Item[],
+  statuses: Map<string, ThreadRuntimeState['status']>,
+): Item[] {
   const next = incoming.map((item) => {
     const key = logicalStreamKey(item);
-    if (!key || !isTextStreamItem(item)) return item;
+    if (!key || !isTextStreamItem(item)) return normalizeItemIncomplete(item, statuses);
     const live = current.filter((candidate) => logicalStreamKey(candidate) === key).filter(isTextStreamItem);
     const text = live.reduce((combined, candidate) => reconcileStreamText(combined, candidate.text), item.text);
-    return { ...item, text };
+    return normalizeItemIncomplete({ ...item, text }, statuses);
   });
   const representedKeys = new Set(next.map(logicalStreamKey).filter((key): key is string => Boolean(key)));
   const representedIds = new Set(next.map((item) => item.id));
   for (const item of current) {
     const key = logicalStreamKey(item);
     if (representedIds.has(item.id) || (key && representedKeys.has(key))) continue;
-    next.push(item);
+    next.push(normalizeItemIncomplete(item, statuses));
   }
   return next;
+}
+
+function normalizeItemIncomplete(item: Item, statuses: Map<string, ThreadRuntimeState['status']>): Item {
+  if (!item.turnId || !isTextStreamItem(item)) return item;
+  const status = statuses.get(item.turnId);
+  if (!status) return item;
+  return { ...item, incomplete: status !== 'completed' };
 }
 
 function reconcileStreamText(left: string, right: string): string {
@@ -368,7 +667,12 @@ function isTextStreamItem(item: Item): item is MessageItem | ReasoningItem {
   return item.kind === 'reasoning' || (item.kind === 'message' && item.role === 'assistant');
 }
 
-function markTurnContentComplete(snapshot: AppSnapshot, threadId: string, turnId: string): AppSnapshot {
+function markTurnContentIncomplete(
+  snapshot: AppSnapshot,
+  threadId: string,
+  turnId: string,
+  incomplete: boolean,
+): AppSnapshot {
   const items = snapshot.items[threadId];
   if (!items) return snapshot;
   return {
@@ -377,7 +681,7 @@ function markTurnContentComplete(snapshot: AppSnapshot, threadId: string, turnId
       ...snapshot.items,
       [threadId]: items.map((item) => {
         if (item.turnId !== turnId || !isTextStreamItem(item)) return item;
-        return { ...item, incomplete: false };
+        return { ...item, incomplete };
       }),
     },
   };

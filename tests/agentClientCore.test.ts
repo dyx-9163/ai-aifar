@@ -240,6 +240,366 @@ describe('Agent Client Core', () => {
     expect(state.runtimeByThread['thread-3'].status).toBe('completed');
   });
 
+  it('does not let a stale snapshot roll back a live terminal runtime or complete content', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-live', 1));
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-live', 2, '完整答案'));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-live', 3) });
+
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [{
+          id: 'turn-live',
+          threadId: 'thread-1',
+          modelProfileId: 'model-1',
+          status: 'queued',
+          createdAt: '2026-08-17T00:00:00.000Z',
+          incomplete: true,
+        }],
+        items: {
+          'thread-1': [{
+            id: 'item-turn-live-assistant',
+            threadId: 'thread-1',
+            turnId: 'turn-live',
+            kind: 'message',
+            role: 'assistant',
+            text: '完整',
+            incomplete: true,
+            createdAt: '2026-08-17T00:00:01.000Z',
+          }],
+        },
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-live', status: 'completed' });
+    expect(state.snapshot.items['thread-1']).toMatchObject([
+      { turnId: 'turn-live', text: '完整答案', incomplete: false },
+    ]);
+  });
+
+  it.each([
+    { type: 'turn.failed' as const, error: 'HTTP 503', wantStatus: 'failed' as const },
+    { type: 'turn.cancelled' as const, wantStatus: 'cancelled' as const },
+  ])('does not let stale complete item metadata override a live $wantStatus turn', (terminal) => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-live', 1));
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-live', 2, '部分答案'));
+    state = reduceAgentEvent(state, {
+      ...terminal,
+      threadId: 'thread-1',
+      turnId: 'turn-live',
+      modelProfileId: 'model-1',
+      sequence: 3,
+    });
+
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [{
+          id: 'turn-live',
+          threadId: 'thread-1',
+          modelProfileId: 'model-1',
+          status: 'running',
+          createdAt: '2026-08-17T00:00:00.000Z',
+          startedAt: '2026-08-17T00:00:01.000Z',
+          incomplete: true,
+        }],
+        items: {
+          'thread-1': [{
+            id: 'item-turn-live-assistant',
+            threadId: 'thread-1',
+            turnId: 'turn-live',
+            kind: 'message',
+            role: 'assistant',
+            text: '部分答案',
+            incomplete: false,
+            createdAt: '2026-08-17T00:00:02.000Z',
+          }],
+        },
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1'].status).toBe(terminal.wantStatus);
+    expect(state.snapshot.items['thread-1']).toMatchObject([{ incomplete: true }]);
+  });
+
+  it('accepts a newer terminal snapshot for the live current turn', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-1', 1));
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-1', 2, '答案'));
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [{
+          id: 'turn-1',
+          threadId: 'thread-1',
+          modelProfileId: 'model-1',
+          status: 'completed',
+          createdAt: '2026-08-17T00:00:00.000Z',
+          startedAt: '2026-08-17T00:00:01.000Z',
+          completedAt: '2026-08-17T00:00:02.000Z',
+          incomplete: false,
+        }],
+        items: {
+          'thread-1': [{
+            id: 'item-turn-1-assistant',
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            kind: 'message',
+            role: 'assistant',
+            text: '答案',
+            incomplete: false,
+            createdAt: '2026-08-17T00:00:01.000Z',
+          }],
+        },
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'completed' });
+    expect(state.snapshot.items['thread-1']).toMatchObject([{ text: '答案', incomplete: false }]);
+  });
+
+  it('selects the newest snapshot turn overall before mapping its terminal status', () => {
+    const sameCreatedAt = '2026-08-17T00:00:00.000Z';
+    const state = reduceAgentEvent(emptyAgentClientState(), {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [
+          {
+            id: 'turn-z-old',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'interrupted',
+            createdAt: sameCreatedAt,
+            startedAt: '2026-08-17T00:01:00.000Z',
+            incomplete: true,
+          },
+          {
+            id: 'turn-a-new',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'completed',
+            createdAt: sameCreatedAt,
+            startedAt: '2026-08-17T00:02:00.000Z',
+            completedAt: '2026-08-17T00:03:00.000Z',
+            incomplete: false,
+          },
+        ],
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-a-new', status: 'completed' });
+  });
+
+  it('uses turn id as a stable tie-breaker when all snapshot timestamps match', () => {
+    const timestamp = '2026-08-17T00:00:00.000Z';
+    const state = reduceAgentEvent(emptyAgentClientState(), {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [
+          {
+            id: 'turn-a',
+            threadId: 'thread-1',
+            status: 'interrupted',
+            createdAt: timestamp,
+            startedAt: timestamp,
+            completedAt: timestamp,
+            incomplete: true,
+          },
+          {
+            id: 'turn-z',
+            threadId: 'thread-1',
+            status: 'failed',
+            createdAt: timestamp,
+            startedAt: timestamp,
+            completedAt: timestamp,
+            error: 'stable winner',
+            incomplete: true,
+          },
+        ],
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({
+      turnId: 'turn-z',
+      status: 'failed',
+      error: 'stable winner',
+    });
+  });
+
+  it.each([
+    {
+      terminal: { type: 'turn.completed' as const },
+      staleStatus: 'failed' as const,
+      staleIncomplete: true,
+      wantIncomplete: false,
+    },
+    {
+      terminal: { type: 'turn.failed' as const, error: 'live failure' },
+      staleStatus: 'completed' as const,
+      staleIncomplete: false,
+      wantIncomplete: true,
+    },
+  ])('keeps superseded live terminal metadata when snapshot says $staleStatus', (input) => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-old', 1));
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-old', 2, '旧答案'));
+    state = reduceAgentEvent(state, {
+      ...input.terminal,
+      threadId: 'thread-1',
+      turnId: 'turn-old',
+      modelProfileId: 'model-1',
+      sequence: 3,
+    });
+    state = reduceAgentEvent(state, started('thread-1', 'turn-new', 1));
+
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [
+          {
+            id: 'turn-old',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: input.staleStatus,
+            createdAt: '2026-08-17T00:00:00.000Z',
+            startedAt: '2026-08-17T00:00:01.000Z',
+            completedAt: '2026-08-17T00:00:02.000Z',
+            incomplete: input.staleStatus !== 'completed',
+          },
+          {
+            id: 'turn-new',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'running',
+            createdAt: '2026-08-17T00:01:00.000Z',
+            startedAt: '2026-08-17T00:01:01.000Z',
+            incomplete: true,
+          },
+        ],
+        items: {
+          'thread-1': [{
+            id: 'item-turn-old-assistant',
+            threadId: 'thread-1',
+            turnId: 'turn-old',
+            kind: 'message',
+            role: 'assistant',
+            text: '旧答案',
+            incomplete: input.staleIncomplete,
+            createdAt: '2026-08-17T00:00:01.000Z',
+          }],
+        },
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-new', status: 'running' });
+    expect(state.snapshot.items['thread-1']).toMatchObject([{ turnId: 'turn-old', incomplete: input.wantIncomplete }]);
+  });
+
+  it('keeps a new running turn current while sealing content from superseded turn events', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-old', 1));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-old', 2) });
+    state = reduceAgentEvent(state, queued('thread-1', 'turn-new', 1));
+    state = reduceAgentEvent(state, started('thread-1', 'turn-new', 2));
+
+    state = reduceAgentEvent(state, started('thread-1', 'turn-old', 3));
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-old', 4, '迟到答案'));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-old', 5) });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-new', status: 'running' });
+    expect(state.snapshot.items['thread-1']).toContainEqual(expect.objectContaining({
+      turnId: 'turn-old',
+      text: '迟到答案',
+      incomplete: false,
+    }));
+  });
+
+  it('does not let superseded nonterminal or terminal events replace a new terminal runtime', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-old', 1));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-old', 2) });
+    state = reduceAgentEvent(state, started('thread-1', 'turn-new', 1));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-new', 2) });
+
+    state = reduceAgentEvent(state, started('thread-1', 'turn-old', 3));
+    state = reduceAgentEvent(state, { type: 'turn.failed', ...envelope('thread-1', 'turn-old', 4), error: 'late failure' });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-new', status: 'completed' });
+  });
+
+  it.each([
+    {
+      first: { type: 'turn.completed' as const },
+      second: { type: 'turn.failed' as const, error: 'late conflicting failure' },
+      wantStatus: 'completed' as const,
+      wantIncomplete: false,
+    },
+    {
+      first: { type: 'turn.failed' as const, error: 'first failure' },
+      second: { type: 'turn.completed' as const },
+      wantStatus: 'failed' as const,
+      wantIncomplete: true,
+    },
+  ])('keeps the first terminal projection when a conflicting $second.type arrives', (input) => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-1', 1));
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-1', 2, '答案'));
+    state = reduceAgentEvent(state, {
+      ...input.first,
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      modelProfileId: 'model-1',
+      sequence: 3,
+    });
+    state = reduceAgentEvent(state, {
+      ...input.second,
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      modelProfileId: 'model-1',
+      sequence: 4,
+    });
+
+    expect(state.runtimeByThread['thread-1'].status).toBe(input.wantStatus);
+    expect(state.snapshot.items['thread-1']).toMatchObject([{ incomplete: input.wantIncomplete }]);
+  });
+
+  it('keeps completed content sealed when a later delta is retained for the same turn', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), answerDelta('thread-1', 'turn-1', 1, '前'));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-1', 2) });
+    state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-1', 3, '后'));
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'completed' });
+    expect(state.snapshot.items['thread-1']).toMatchObject([{ text: '前后', incomplete: false }]);
+  });
+
+  it('accepts a complete snapshot chain that contains a newer turn after the live terminal', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-old', 1));
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-old', 2) });
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [
+          {
+            id: 'turn-old',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'completed',
+            createdAt: '2026-08-17T00:00:00.000Z',
+            completedAt: '2026-08-17T00:00:01.000Z',
+            incomplete: false,
+          },
+          {
+            id: 'turn-new',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'running',
+            createdAt: '2026-08-17T00:01:00.000Z',
+            startedAt: '2026-08-17T00:01:01.000Z',
+            incomplete: true,
+          },
+        ],
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-new', status: 'running' });
+    expect(state.supersededTurns['thread-1:turn-old']).toBe(true);
+  });
+
   it('maps internal agent events into dependency-free AG-UI boundary events', () => {
     expect(mapAgentEventToAgUiEvents({ type: 'message.delta', ...envelope('thread-1', 'turn-1', 2), text: 'hello' })).toEqual([
       {

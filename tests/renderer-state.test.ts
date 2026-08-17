@@ -436,6 +436,45 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('cancels the current turn after superseded turn events arrive late', async () => {
+    const originalWindow = globalThis.window;
+    let cancelled: { threadId: string; turnId: string } | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          cancelTurn: async (threadId: string, turnId: string) => {
+            cancelled = { threadId, turnId };
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = { ...app.state.value, activeThreadId: 'thread-1' };
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.started', threadId: 'thread-1', turnId: 'turn-old', modelProfileId: 'model-1', sequence: 1, title: 'old',
+      });
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.completed', threadId: 'thread-1', turnId: 'turn-old', modelProfileId: 'model-1', sequence: 2,
+      });
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.started', threadId: 'thread-1', turnId: 'turn-new', modelProfileId: 'model-1', sequence: 1, title: 'new',
+      });
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.started', threadId: 'thread-1', turnId: 'turn-old', modelProfileId: 'model-1', sequence: 3, title: 'late old',
+      });
+
+      await app.cancelTurn();
+
+      expect(cancelled).toEqual({ threadId: 'thread-1', turnId: 'turn-new' });
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-new', status: 'cancelling' });
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('optimistically queues only the target chat until the start acknowledgement arrives', async () => {
     const originalWindow = globalThis.window;
     let resolveStart: ((value: { turnId: string }) => void) | undefined;
@@ -465,10 +504,60 @@ describe('renderer state reducer', () => {
       expect(app.activeRuntime.value).toMatchObject({ threadId: 'thread-1', status: 'queued' });
       expect(app.activeBusy.value).toBe(true);
       expect(app.state.value.runtimeByThread['thread-2'].status).toBe('running');
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'snapshot',
+        snapshot: {
+          ...emptyState().snapshot,
+          threads: [{
+            id: 'thread-1',
+            groupId: 'default-group',
+            title: 'New task',
+            status: 'ready',
+            createdAt: '2026-08-17T00:00:00.000Z',
+            updatedAt: '2026-08-17T00:00:00.000Z',
+          }],
+        },
+      });
+      expect(app.activeRuntime.value).toMatchObject({ threadId: 'thread-1', status: 'queued' });
       resolveStart?.({ turnId: 'turn-1' });
       await turn;
       expect(app.activeTurnId.value).toBe('turn-1');
       expect(app.state.value.snapshot.items['thread-1']).toMatchObject([{ turnId: 'turn-1', role: 'user', text: 'hello' }]);
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('lets an event arriving before the start acknowledgement claim the optimistic turn', async () => {
+    const originalWindow = globalThis.window;
+    let resolveStart: ((value: { turnId: string }) => void) | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = { ...app.state.value, activeThreadId: 'thread-1' };
+      const turn = app.startTurn('hello');
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.started',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        modelProfileId: 'model-1',
+        sequence: 1,
+        title: 'run',
+      });
+      resolveStart?.({ turnId: 'turn-1' });
+      await turn;
+
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'running' });
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
     }

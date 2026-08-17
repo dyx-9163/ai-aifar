@@ -112,26 +112,30 @@ export function useApp() {
     const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
     const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
     const previousRuntime = state.value.runtimeByThread[threadId];
-    state.value = replaceThreadRuntime(state.value, threadId, {
-      threadId,
-      modelProfileId,
-      status: 'queued',
-    });
+    state.value = {
+      ...replaceThreadRuntime(state.value, threadId, {
+        threadId,
+        modelProfileId,
+        status: 'queued',
+      }),
+      optimisticThreads: { ...state.value.optimisticThreads, [threadId]: true },
+    };
     try {
       const response = await withTimeout(
         window.desktop.startTurn(threadId, text, modelProfileId),
         TURN_START_ACK_TIMEOUT_MS,
         'Agent runtime did not acknowledge the turn within 10s.',
       );
-      const currentRuntime = state.value.runtimeByThread[threadId];
-      if (currentRuntime?.status === 'queued' && currentRuntime.turnId === undefined) {
-        state.value = replaceThreadRuntime(state.value, threadId, { ...currentRuntime, turnId: response.turnId });
-      }
+      state.value = acknowledgeThreadTurn(state.value, threadId, response.turnId, modelProfileId);
       state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
     } catch (error) {
-      const currentRuntime = state.value.runtimeByThread[threadId];
-      if (currentRuntime?.status === 'queued' && currentRuntime.turnId === undefined) {
-        state.value = replaceThreadRuntime(state.value, threadId, previousRuntime);
+      if (state.value.optimisticThreads[threadId]) {
+        const optimisticThreads = { ...state.value.optimisticThreads };
+        delete optimisticThreads[threadId];
+        state.value = {
+          ...replaceThreadRuntime(state.value, threadId, previousRuntime),
+          optimisticThreads,
+        };
       }
       throw error;
     }
@@ -279,6 +283,31 @@ function replaceThreadRuntime(
     delete runtimeByThread[threadId];
   }
   return { ...state, runtimeByThread };
+}
+
+function acknowledgeThreadTurn(
+  state: RendererState,
+  threadId: string,
+  turnId: string,
+  modelProfileId?: string,
+): RendererState {
+  const currentTurnId = state.currentTurnByThread[threadId];
+  const currentRuntime = state.runtimeByThread[threadId];
+  const supersededTurns = { ...state.supersededTurns };
+  if (currentTurnId && currentTurnId !== turnId) {
+    supersededTurns[`${threadId}:${currentTurnId}`] = true;
+  }
+  const optimisticThreads = { ...state.optimisticThreads };
+  delete optimisticThreads[threadId];
+  const runtime = currentRuntime?.turnId === turnId
+    ? currentRuntime
+    : { threadId, turnId, modelProfileId, status: 'queued' as const };
+  return {
+    ...replaceThreadRuntime(state, threadId, runtime),
+    currentTurnByThread: { ...state.currentTurnByThread, [threadId]: turnId },
+    supersededTurns,
+    optimisticThreads,
+  };
 }
 
 function replaceModelProfile(state: RendererState, profile: ModelProfile): RendererState {
