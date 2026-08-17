@@ -11,9 +11,11 @@ import type {
   ModelProfile,
   ModelProfileInput,
   ModelResponseSpeed,
+  ReasoningItem,
   ReasoningProtocol,
   RuntimeSettingsInput,
   ThreadSummary,
+  TurnRecord,
 } from '../shared/domain.js';
 import {
   normalizeMaxConcurrency,
@@ -32,6 +34,13 @@ export interface AppDatabase {
   setLanguage(language: LanguagePreference): void;
   updateSettings(settings: RuntimeSettingsInput): AppSettings;
   getThreadMessages(threadId: string, limit?: number): MessageItem[];
+  createTurn(turn: TurnRecord): void;
+  updateTurn(
+    turnId: string,
+    patch: Partial<Pick<TurnRecord, 'status' | 'startedAt' | 'completedAt' | 'error' | 'incomplete'>>,
+  ): void;
+  completeTurn(turnId: string, completedAt: string): void;
+  interruptUnfinishedTurns(): void;
   appendItem(item: Item): void;
   upsertApproval(approval: Approval): void;
   saveModelProfile(profile: ModelProfileInput): ModelProfile;
@@ -62,6 +71,18 @@ type ChatGroupRow = {
 type ItemRow = {
   thread_id: string;
   payload: string;
+};
+
+type TurnRow = {
+  id: string;
+  thread_id: string;
+  model_profile_id: string | null;
+  status: TurnRecord['status'];
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+  incomplete: number;
 };
 
 type ApprovalRow = {
@@ -115,6 +136,17 @@ class SqliteAppDatabase implements AppDatabase {
       .all()
       .map((row) => mapThread(row as ThreadRow));
 
+    const turns = this.db
+      .prepare(
+        `SELECT tr.id, tr.thread_id, tr.model_profile_id, tr.status, tr.created_at, tr.started_at, tr.completed_at, tr.error, tr.incomplete
+         FROM turns tr
+         INNER JOIN threads t ON t.id = tr.thread_id
+         WHERE t.deleted_at IS NULL
+         ORDER BY tr.created_at ASC, tr.id ASC`,
+      )
+      .all()
+      .map((row) => mapTurn(row as TurnRow));
+
     const items: Record<string, Item[]> = {};
     for (const row of this.db
       .prepare(
@@ -140,7 +172,7 @@ class SqliteAppDatabase implements AppDatabase {
     return {
       groups,
       threads,
-      turns: [],
+      turns,
       items,
       approvals,
       modelProfiles: this.readModelProfiles(false),
@@ -290,18 +322,114 @@ class SqliteAppDatabase implements AppDatabase {
     return merged.slice(Math.max(0, merged.length - limit));
   }
 
+  createTurn(turn: TurnRecord): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO turns (id, thread_id, model_profile_id, status, created_at, started_at, completed_at, error, incomplete, updated_at)
+           VALUES (:id, :threadId, :modelProfileId, :status, :createdAt, :startedAt, :completedAt, :error, :incomplete, :updatedAt)`,
+        )
+        .run({
+          id: turn.id,
+          threadId: turn.threadId,
+          modelProfileId: turn.modelProfileId ?? null,
+          status: turn.status,
+          createdAt: turn.createdAt,
+          startedAt: turn.startedAt ?? null,
+          completedAt: turn.completedAt ?? null,
+          error: turn.error ?? null,
+          incomplete: turn.incomplete ? 1 : 0,
+          updatedAt: turn.completedAt ?? turn.startedAt ?? turn.createdAt,
+        });
+    });
+  }
+
+  updateTurn(
+    turnId: string,
+    patch: Partial<Pick<TurnRecord, 'status' | 'startedAt' | 'completedAt' | 'error' | 'incomplete'>>,
+  ): void {
+    const assignments: string[] = [];
+    const values: Record<string, string | number | null> = { turnId, updatedAt: new Date().toISOString() };
+    if (patch.status !== undefined) {
+      assignments.push('status = :status');
+      values.status = patch.status;
+    }
+    if (patch.startedAt !== undefined) {
+      assignments.push('started_at = :startedAt');
+      values.startedAt = patch.startedAt;
+    }
+    if (patch.completedAt !== undefined) {
+      assignments.push('completed_at = :completedAt');
+      values.completedAt = patch.completedAt;
+    }
+    if (patch.error !== undefined) {
+      assignments.push('error = :error');
+      values.error = patch.error;
+    }
+    if (patch.incomplete !== undefined) {
+      assignments.push('incomplete = :incomplete');
+      values.incomplete = patch.incomplete ? 1 : 0;
+    }
+    if (assignments.length === 0) {
+      return;
+    }
+
+    this.transaction(() => {
+      this.db
+        .prepare(`UPDATE turns SET ${assignments.join(', ')}, updated_at = :updatedAt WHERE id = :turnId`)
+        .run(values);
+    });
+  }
+
+  completeTurn(turnId: string, completedAt: string): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE turns
+           SET status = 'completed', completed_at = :completedAt, incomplete = 0, updated_at = :completedAt
+           WHERE id = :turnId`,
+        )
+        .run({ turnId, completedAt });
+
+      const rows = this.db
+        .prepare(`SELECT id, payload FROM items WHERE turn_id = :turnId AND kind IN ('message', 'reasoning')`)
+        .all({ turnId }) as Array<{ id: string; payload: string }>;
+      const updatePayload = this.db.prepare('UPDATE items SET payload = :payload WHERE id = :id');
+      for (const row of rows) {
+        const item = parseItem(row.payload);
+        if (item && ((item.kind === 'reasoning') || (item.kind === 'message' && item.role === 'assistant'))) {
+          updatePayload.run({ id: row.id, payload: JSON.stringify({ ...item, incomplete: false }) });
+        }
+      }
+    });
+  }
+
+  interruptUnfinishedTurns(): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE turns
+           SET status = 'interrupted', updated_at = :updatedAt
+           WHERE status IN ('queued', 'running', 'cancelling')`,
+        )
+        .run({ updatedAt: new Date().toISOString() });
+    });
+  }
+
   appendItem(item: Item): void {
     this.transaction(() => {
       if (item.turnId) {
         this.db
           .prepare(
-            'INSERT OR IGNORE INTO turns (id, thread_id, status, created_at, updated_at) VALUES (:id, :threadId, :status, :createdAt, :updatedAt)',
+            `INSERT OR IGNORE INTO turns (id, thread_id, status, created_at, incomplete, updated_at)
+             VALUES (:id, :threadId, :status, :createdAt, :incomplete, :updatedAt)`,
           )
           .run({
             id: item.turnId,
             threadId: item.threadId,
             status: 'running',
             createdAt: item.createdAt,
+            incomplete: 1,
             updatedAt: item.createdAt,
           });
       }
@@ -476,8 +604,13 @@ class SqliteAppDatabase implements AppDatabase {
       CREATE TABLE IF NOT EXISTS turns (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        model_profile_id TEXT,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        error TEXT,
+        incomplete INTEGER NOT NULL DEFAULT 1,
         updated_at TEXT NOT NULL
       );
 
@@ -531,6 +664,11 @@ class SqliteAppDatabase implements AppDatabase {
     this.ensureColumn('threads', 'model_profile_id', 'ALTER TABLE threads ADD COLUMN model_profile_id TEXT');
     this.ensureColumn('threads', 'group_id', 'ALTER TABLE threads ADD COLUMN group_id TEXT');
     this.ensureColumn('threads', 'deleted_at', 'ALTER TABLE threads ADD COLUMN deleted_at TEXT');
+    this.ensureColumn('turns', 'model_profile_id', 'ALTER TABLE turns ADD COLUMN model_profile_id TEXT');
+    this.ensureColumn('turns', 'started_at', 'ALTER TABLE turns ADD COLUMN started_at TEXT');
+    this.ensureColumn('turns', 'completed_at', 'ALTER TABLE turns ADD COLUMN completed_at TEXT');
+    this.ensureColumn('turns', 'error', 'ALTER TABLE turns ADD COLUMN error TEXT');
+    this.ensureColumn('turns', 'incomplete', 'ALTER TABLE turns ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 1');
     this.ensureColumn(
       'model_profiles',
       'reasoning',
@@ -548,6 +686,8 @@ class SqliteAppDatabase implements AppDatabase {
     );
     this.ensureDefaultGroup();
     this.applyMigration(2, () => this.compactAssistantMessageFragments());
+    this.applyMigration(3, () => undefined);
+    this.interruptUnfinishedTurns();
   }
 
   private readSettings(): AppSettings {
@@ -614,19 +754,20 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   private insertOrMergeItem(item: Item): void {
-    if (item.kind === 'message' && item.role === 'assistant' && item.turnId) {
+    const streamKey = logicalStreamKey(item);
+    if (streamKey) {
       const candidates = this.db
         .prepare(
           `SELECT id, payload
            FROM items
-           WHERE thread_id = :threadId AND turn_id = :turnId AND kind = 'message'
+           WHERE thread_id = :threadId AND turn_id = :turnId
            ORDER BY created_at ASC, id ASC`,
         )
-        .all({ threadId: item.threadId, turnId: item.turnId }) as Array<{ id: string; payload: string }>;
+        .all({ threadId: item.threadId, turnId: item.turnId ?? null }) as Array<{ id: string; payload: string }>;
       const existing = candidates
-        .map((candidate) => ({ ...candidate, item: parseMessageItem(candidate.payload) }))
-        .find((candidate) => candidate.item?.role === 'assistant');
-      if (existing?.item) {
+        .map((candidate) => ({ ...candidate, item: parseItem(candidate.payload) }))
+        .find((candidate) => candidate.item && logicalStreamKey(candidate.item) === streamKey);
+      if (existing?.item && isTextStreamItem(existing.item) && isTextStreamItem(item)) {
         this.db
           .prepare('UPDATE items SET payload = :payload WHERE id = :id')
           .run({ id: existing.id, payload: JSON.stringify({ ...existing.item, text: existing.item.text + item.text }) });
@@ -731,6 +872,45 @@ function parseMessageItem(payload: string): MessageItem | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseItem(payload: string): Item | undefined {
+  try {
+    const item = JSON.parse(payload) as Partial<Item>;
+    return typeof item.kind === 'string' && typeof item.id === 'string' && typeof item.threadId === 'string'
+      ? (item as Item)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function logicalStreamKey(item: Item): string | undefined {
+  if (item.kind === 'message' && item.role === 'assistant' && item.turnId) {
+    return `answer:${item.turnId}`;
+  }
+  if (item.kind === 'reasoning' && item.turnId) {
+    return `reasoning:${item.mode}:${item.turnId}`;
+  }
+  return undefined;
+}
+
+function isTextStreamItem(item: Item): item is MessageItem | ReasoningItem {
+  return item.kind === 'reasoning' || (item.kind === 'message' && item.role === 'assistant');
+}
+
+function mapTurn(row: TurnRow): TurnRecord {
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    modelProfileId: row.model_profile_id ?? undefined,
+    status: row.status,
+    createdAt: row.created_at,
+    startedAt: row.started_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    error: row.error ?? undefined,
+    incomplete: row.incomplete === 1,
+  };
 }
 
 function mapThread(row: ThreadRow): ThreadSummary {

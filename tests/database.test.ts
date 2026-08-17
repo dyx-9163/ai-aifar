@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Item } from '../src/shared/domain';
+import type { Item, ReasoningItem, ReasoningOutputMode, TurnRecord } from '../src/shared/domain';
 import { openDatabase } from '../src/agent/database';
 
 let tempDirectories: string[] = [];
@@ -26,6 +26,30 @@ function userItem(threadId: string, text: string, id = 'item-1', turnId = 'turn-
   };
 }
 
+function turnRecord(id: string, threadId: string, modelProfileId: string, status: TurnRecord['status']): TurnRecord {
+  return {
+    id,
+    threadId,
+    modelProfileId,
+    status,
+    createdAt: '2026-08-17T00:00:00.000Z',
+    incomplete: true,
+  };
+}
+
+function reasoningItem(turnId: string, threadId: string, mode: ReasoningOutputMode, text: string): ReasoningItem {
+  return {
+    id: `item-${turnId}-reasoning-${mode}`,
+    threadId,
+    turnId,
+    kind: 'reasoning',
+    mode,
+    text,
+    incomplete: true,
+    createdAt: '2026-08-17T00:00:01.000Z',
+  };
+}
+
 afterEach(() => {
   for (const directory of tempDirectories) {
     rmSync(directory, { recursive: true, force: true });
@@ -34,6 +58,111 @@ afterEach(() => {
 });
 
 describe('sqlite app database', () => {
+  it('merges reasoning fragments into one logical item', () => {
+    const db = openDatabase(createDbPath());
+    const thread = db.createThread('Reasoning');
+    db.createTurn(turnRecord('turn-1', thread.id, 'model-1', 'running'));
+    db.appendItem(reasoningItem('turn-1', thread.id, 'raw', '第一段'));
+    db.appendItem(reasoningItem('turn-1', thread.id, 'raw', '第二段'));
+
+    const reasoning = db.getSnapshot().items[thread.id].filter((item) => item.kind === 'reasoning');
+    expect(reasoning).toHaveLength(1);
+    expect(reasoning[0]).toMatchObject({ mode: 'raw', text: '第一段第二段', incomplete: true });
+    db.close();
+  });
+
+  it('marks unfinished turns interrupted on reopen without replaying them', () => {
+    const path = createDbPath();
+    const first = openDatabase(path);
+    const thread = first.createThread('Interrupted');
+    first.createTurn(turnRecord('turn-1', thread.id, 'model-1', 'queued'));
+    first.createTurn({ ...turnRecord('turn-completed', thread.id, 'model-1', 'completed'), incomplete: false });
+    first.createTurn({ ...turnRecord('turn-failed', thread.id, 'model-1', 'failed'), incomplete: false });
+    first.createTurn({ ...turnRecord('turn-cancelled', thread.id, 'model-1', 'cancelled'), incomplete: false });
+    first.close();
+
+    const second = openDatabase(path);
+    expect(second.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: 'turn-1', status: 'interrupted', incomplete: true,
+    }));
+    expect(second.getSnapshot().turns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'turn-completed', status: 'completed', incomplete: false }),
+      expect.objectContaining({ id: 'turn-failed', status: 'failed', incomplete: false }),
+      expect.objectContaining({ id: 'turn-cancelled', status: 'cancelled', incomplete: false }),
+    ]));
+    second.close();
+  });
+
+  it('keeps one reasoning and assistant row per streamed turn', () => {
+    const db = openDatabase(createDbPath());
+    const thread = db.createThread('Bounded stream');
+    db.createTurn(turnRecord('turn-1', thread.id, 'model-1', 'running'));
+
+    for (let index = 0; index < 100; index += 1) {
+      db.appendItem(reasoningItem('turn-1', thread.id, 'raw', String(index)));
+      db.appendItem({
+        id: `item-turn-1-answer-${index}`,
+        threadId: thread.id,
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: String(index),
+        incomplete: true,
+        createdAt: `2026-08-17T00:00:${String(index % 60).padStart(2, '0')}.000Z`,
+      });
+    }
+
+    const streamedItems = db.getSnapshot().items[thread.id].filter((item) => item.turnId === 'turn-1');
+    expect(streamedItems.filter((item) => item.kind === 'reasoning' && item.mode === 'raw')).toHaveLength(1);
+    expect(streamedItems.filter((item) => item.kind === 'message' && item.role === 'assistant')).toHaveLength(1);
+    db.close();
+  });
+
+  it('completes a turn and its streamed payloads atomically', () => {
+    const db = openDatabase(createDbPath());
+    const thread = db.createThread('Complete stream');
+    db.createTurn(turnRecord('turn-1', thread.id, 'model-1', 'running'));
+    db.appendItem(reasoningItem('turn-1', thread.id, 'raw', 'thinking'));
+    db.appendItem({
+      id: 'item-turn-1-answer',
+      threadId: thread.id,
+      turnId: 'turn-1',
+      kind: 'message',
+      role: 'assistant',
+      text: 'answer',
+      incomplete: true,
+      createdAt: '2026-08-17T00:00:02.000Z',
+    });
+
+    db.completeTurn('turn-1', '2026-08-17T00:00:03.000Z');
+
+    expect(db.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: 'turn-1', status: 'completed', completedAt: '2026-08-17T00:00:03.000Z', incomplete: false,
+    }));
+    expect(db.getSnapshot().items[thread.id].filter((item) => item.turnId === 'turn-1')).toEqual([
+      expect.objectContaining({ kind: 'reasoning', incomplete: false }),
+      expect.objectContaining({ kind: 'message', role: 'assistant', incomplete: false }),
+    ]);
+    db.close();
+  });
+
+  it('updates only the supplied persisted turn lifecycle fields', () => {
+    const db = openDatabase(createDbPath());
+    const thread = db.createThread('Turn lifecycle');
+    db.createTurn(turnRecord('turn-1', thread.id, 'model-1', 'queued'));
+
+    db.updateTurn('turn-1', { status: 'running', startedAt: '2026-08-17T00:00:01.000Z' });
+
+    expect(db.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: 'turn-1',
+      modelProfileId: 'model-1',
+      status: 'running',
+      startedAt: '2026-08-17T00:00:01.000Z',
+      incomplete: true,
+    }));
+    db.close();
+  });
+
   it('persists a thread and items across reopen', () => {
     const dbPath = createDbPath();
     const first = openDatabase(dbPath);
