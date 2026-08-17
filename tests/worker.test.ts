@@ -228,6 +228,55 @@ describe('worker turn runtime', () => {
     reopened.close();
   });
 
+  it('settles a persisted approval when approval event delivery fails the turn', async () => {
+    const harness = createHarness(async () => metrics(), undefined, true, 'approval.required');
+    const thread = harness.database.createThread('Approval delivery failure');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: '修改投递失败配置', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+
+    const snapshot = harness.database.getSnapshot();
+    expect(snapshot.turns).toContainEqual(expect.objectContaining({
+      id: turnId,
+      status: 'failed',
+      error: 'delivery failed for approval.required',
+    }));
+    expect(snapshot.approvals).toContainEqual(expect.objectContaining({
+      id: `approval-${turnId}`,
+      status: 'rejected',
+      respondedAt: expect.any(String),
+    }));
+    expect(harness.runtime.respondApproval(`approval-${turnId}`, true)).toBe(false);
+    expect(harness.database.getSnapshot().approvals).not.toContainEqual(expect.objectContaining({
+      id: `approval-${turnId}`,
+      status: 'approved',
+    }));
+    harness.database.close();
+  });
+
+  it('preserves the original failure when pending approval settlement also fails', async () => {
+    const harness = createHarness(async () => metrics(), undefined, true, 'approval.required', true);
+    const thread = harness.database.createThread('Approval settlement failure');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: '修改清理失败配置', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+
+    expect(harness.approvalSettlementAttempts()).toBe(1);
+    expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: turnId,
+      status: 'failed',
+      error: 'delivery failed for approval.required',
+    }));
+    expect(harness.events).toContainEqual(expect.objectContaining({
+      type: 'turn.failed',
+      turnId,
+      error: 'delivery failed for approval.required',
+    }));
+    harness.database.close();
+  });
+
   it('cancels a queued turn once and keeps streamed content incomplete', async () => {
     const blocker = deferred<void>();
     const harness = createHarness(async (_profile, messages, handlers, signal) => {
@@ -384,12 +433,14 @@ function createHarness(
   apiKey?: string,
   deterministicIds = true,
   rejectEventType?: AgentEvent['type'],
+  failApprovalSettlement = false,
 ): {
   database: AppDatabase;
   databasePath: string;
   profile: RuntimeModelProfile;
   runtime: WorkerTurnRuntime;
   events: AgentEvent[];
+  approvalSettlementAttempts(): number;
 } {
   const directory = mkdtempSync(join(tmpdir(), 'private-ai-worker-'));
   tempDirectories.push(directory);
@@ -398,10 +449,26 @@ function createHarness(
   openDatabases.push(database);
   const profile = saveProfile(database, 'model-1', 'Model 1', 1, apiKey);
   const events: AgentEvent[] = [];
+  let settlementAttempts = 0;
+  const runtimeDatabase = new Proxy(database, {
+    get(target, property) {
+      if (property === 'upsertApproval') {
+        return (approval: Parameters<AppDatabase['upsertApproval']>[0]) => {
+          if (failApprovalSettlement && approval.status === 'rejected') {
+            settlementAttempts += 1;
+            throw new Error('approval settlement failed');
+          }
+          return target.upsertApproval(approval);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
   let nextTurn = 1;
   let clock = 0;
   const runtime = createWorkerTurnRuntime({
-    database,
+    database: runtimeDatabase,
     postEvent: (event) => {
       if (event.type === rejectEventType) throw new Error(`delivery failed for ${event.type}`);
       events.push(event);
@@ -410,7 +477,14 @@ function createHarness(
     createTurnId: deterministicIds ? () => `turn-${nextTurn++}` : undefined,
     now: () => new Date(Date.UTC(2026, 7, 17, 0, 0, clock++)).toISOString(),
   });
-  return { database, databasePath, profile: database.getModelProfileForRuntime(profile.id)!, runtime, events };
+  return {
+    database,
+    databasePath,
+    profile: database.getModelProfileForRuntime(profile.id)!,
+    runtime,
+    events,
+    approvalSettlementAttempts: () => settlementAttempts,
+  };
 }
 
 function saveProfile(database: AppDatabase, id: string, name: string, maxConcurrency: number, apiKey?: string): RuntimeModelProfile {

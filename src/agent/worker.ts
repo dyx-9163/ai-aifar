@@ -274,6 +274,11 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         incomplete: true,
       });
       try {
+        settlePendingApproval(database, turn.turnId, 'rejected', now());
+      } catch {
+        // Approval cleanup must not hide the original execution failure.
+      }
+      try {
         await context.next({ type: 'turn.failed', error: message });
       } finally {
         approvalResolvers.delete(`approval-${turn.turnId}`);
