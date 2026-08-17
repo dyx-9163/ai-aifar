@@ -71,7 +71,7 @@ export async function runDemoTurn(input: DemoTurnInput, emit: EmitAgentEvent, si
   await next({ type: 'turn.completed' });
 }
 
-function requiresApproval(text: string): boolean {
+export function requiresApproval(text: string): boolean {
   return /修改|删除|write|delete/i.test(text);
 }
 
