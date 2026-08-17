@@ -19,6 +19,7 @@ export interface AgentClientState {
   runtimeByThread: Record<string, ThreadRuntimeState>;
   currentTurnByThread: Record<string, string>;
   supersededTurns: Record<string, true>;
+  snapshotTerminalStatusByTurn: Record<string, TerminalStatus>;
   optimisticThreads: Record<string, true>;
   pendingApproval?: Approval;
 }
@@ -45,6 +46,7 @@ export function emptyAgentClientState(): AgentClientState {
     runtimeByThread: {},
     currentTurnByThread: {},
     supersededTurns: {},
+    snapshotTerminalStatusByTurn: {},
     optimisticThreads: {},
   };
 }
@@ -57,6 +59,7 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
     const activeThread = event.snapshot.threads.find((thread) => thread.id === activeThreadId);
     const runtimeProjection = reconcileSnapshotRuntimes(state, event.snapshot.turns ?? []);
     const turns = reconcileTurns(state.snapshot.turns ?? [], event.snapshot.turns ?? []);
+    const snapshotTerminalStatusByTurn = indexSnapshotTerminalStatuses(turns);
     const snapshot = reconcileSnapshot(
       state.snapshot,
       { ...event.snapshot, turns },
@@ -66,6 +69,7 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
       ...state,
       snapshot,
       ...runtimeProjection,
+      snapshotTerminalStatusByTurn,
       activeThreadId,
       activeGroupId: activeThread?.groupId ?? state.activeGroupId ?? event.snapshot.groups[0]?.id,
       pendingApproval: snapshot.approvals.find((approval) => approval.status === 'pending'),
@@ -402,7 +406,43 @@ function reconcileSnapshotRuntimes(state: AgentClientState, incomingTurns: TurnR
     delete optimisticThreads[threadId];
   }
 
+  indexSnapshotHistory(
+    state,
+    incomingTurns,
+    incomingById,
+    currentTurnByThread,
+    runtimeByThread,
+    optimisticThreads,
+    supersededTurns,
+  );
+
   return { runtimeByThread, currentTurnByThread, supersededTurns, optimisticThreads };
+}
+
+function indexSnapshotHistory(
+  state: AgentClientState,
+  incomingTurns: TurnRecord[],
+  incomingById: Map<string, TurnRecord>,
+  currentTurnByThread: Record<string, string>,
+  runtimeByThread: Record<string, ThreadRuntimeState>,
+  optimisticThreads: Record<string, true>,
+  supersededTurns: Record<string, true>,
+): void {
+  for (const turn of incomingTurns) {
+    const currentTurnId = currentTurnByThread[turn.threadId] ?? runtimeByThread[turn.threadId]?.turnId;
+    if (!currentTurnId) {
+      if (optimisticThreads[turn.threadId]) {
+        supersededTurns[turnKey(turn.threadId, turn.id)] = true;
+      }
+      continue;
+    }
+    if (turn.id === currentTurnId) continue;
+    const currentTurn = incomingById.get(currentTurnId)
+      ?? state.snapshot.turns.find((candidate) => candidate.threadId === turn.threadId && candidate.id === currentTurnId);
+    if (currentTurn && compareTurns(turn, currentTurn) < 0) {
+      supersededTurns[turnKey(turn.threadId, turn.id)] = true;
+    }
+  }
 }
 
 function newestTurnsByThread(turns: TurnRecord[]): Map<string, TurnRecord> {
@@ -484,6 +524,11 @@ function isTerminalStatus(
   return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'interrupted';
 }
 
+type TerminalStatus = Extract<
+  ThreadRuntimeState['status'],
+  'completed' | 'failed' | 'cancelled' | 'interrupted'
+>;
+
 function isTurnOpeningEvent(event: SequencedAgentEvent): boolean {
   return event.type === 'turn.queued' || event.type === 'turn.started';
 }
@@ -542,7 +587,18 @@ function knownTerminalStatus(
   if (runtime?.turnId === turnId && isTerminalStatus(runtime.status)) {
     return runtime.status;
   }
-  return firstTerminalStatus(state.events, threadId, turnId);
+  return firstTerminalStatus(state.events, threadId, turnId)
+    ?? state.snapshotTerminalStatusByTurn[turnKey(threadId, turnId)];
+}
+
+function indexSnapshotTerminalStatuses(turns: TurnRecord[]): Record<string, TerminalStatus> {
+  const statuses: Record<string, TerminalStatus> = {};
+  for (const turn of turns) {
+    if (isTerminalStatus(turn.status)) {
+      statuses[turnKey(turn.threadId, turn.id)] = turn.status;
+    }
+  }
+  return statuses;
 }
 
 function reconcileTurns(current: TurnRecord[], incoming: TurnRecord[]): TurnRecord[] {
