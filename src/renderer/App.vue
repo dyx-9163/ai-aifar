@@ -103,10 +103,12 @@ async function testModelProfile(profile: ModelProfileInput, report: (message: st
       :loading="app.loading.value"
       :model-profiles="app.state.value.snapshot.modelProfiles"
       :active-model-profile-id="app.activeModelProfileId.value"
+      :active-model-profile="app.activeModelProfile.value"
       :t="t"
       @submit="app.startTurn"
       @cancel="app.cancelTurn"
       @select-model="app.selectModelProfile"
+      @update-model-runtime="app.updateActiveModelRuntime"
     />
 
     <Inspector

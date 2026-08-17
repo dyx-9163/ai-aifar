@@ -313,6 +313,8 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .model-picker {
@@ -366,6 +368,84 @@ button {
   border-radius: 999px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.runtime-menu {
+  position: relative;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runtime-menu summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  cursor: pointer;
+  list-style: none;
+}
+
+.runtime-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-menu summary::after {
+  content: "›";
+  color: var(--subtle);
+  transform: rotate(90deg);
+}
+
+.runtime-menu strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.runtime-menu.disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.runtime-menu-panel {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  min-width: 180px;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 16px 40px color-mix(in srgb, #000000 38%, transparent);
+}
+
+.runtime-menu-panel button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.runtime-menu-panel button.active,
+.runtime-menu-panel button:hover {
+  background: var(--panel-raised);
+}
+
+.runtime-menu-panel button.active::after {
+  content: "✓";
+  color: var(--accent);
 }
 
 .timeline {

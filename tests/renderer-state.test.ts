@@ -292,6 +292,96 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('updates the active model runtime preferences from the chat header', async () => {
+    const originalWindow = globalThis.window;
+    const profile = {
+      id: 'model-1',
+      name: 'Private model endpoint',
+      provider: 'openai-compatible' as const,
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'private-model',
+      apiKeyConfigured: true,
+      capabilities: { text: true, vision: false, longContext: false, reasoning: true, streamingUsage: true },
+      reasoning: { mode: 'disabled' as const, protocol: 'qwen' as const, effort: 'medium' as const },
+      responseSpeed: 'standard' as const,
+      isDefault: true,
+      createdAt: '2026-08-17T00:00:00.000Z',
+      updatedAt: '2026-08-17T00:00:00.000Z',
+    };
+    const snapshot = {
+      groups: [],
+      threads: [
+        {
+          id: 'thread-1',
+          groupId: 'default-group',
+          title: 'New task',
+          status: 'ready' as const,
+          modelProfileId: 'model-1',
+          createdAt: '2026-08-17T00:00:00.000Z',
+          updatedAt: '2026-08-17T00:00:00.000Z',
+        },
+      ],
+      items: {},
+      approvals: [],
+      modelProfiles: [profile],
+      settings: {
+        theme: 'system' as const,
+        language: 'zh-CN' as const,
+        activeModelProfileId: 'model-1',
+        showModelMetrics: true,
+        contextMessageLimit: 20,
+      },
+    };
+    let savedProfile: unknown;
+    let currentSnapshot = snapshot;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          getSnapshot: async () => currentSnapshot,
+          saveModelProfile: async (input: unknown) => {
+            savedProfile = input;
+            currentSnapshot = {
+              ...currentSnapshot,
+              modelProfiles: [
+                {
+                  ...profile,
+                  reasoning: { mode: 'enabled' as const, protocol: 'qwen' as const, effort: 'high' as const },
+                  responseSpeed: 'fast' as const,
+                },
+              ],
+            };
+            return currentSnapshot.modelProfiles[0];
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...reduceEvent(app.state.value, { type: 'snapshot', snapshot }),
+        activeThreadId: 'thread-1',
+        activeGroupId: 'default-group',
+      };
+
+      await app.updateActiveModelRuntime({
+        reasoning: { mode: 'enabled', effort: 'high' },
+        responseSpeed: 'fast',
+      });
+
+      expect(savedProfile).toMatchObject({
+        id: 'model-1',
+        name: 'Private model endpoint',
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'high' },
+        responseSpeed: 'fast',
+      });
+      expect(app.activeModelProfile.value?.responseSpeed).toBe('fast');
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('renders model run metrics as a compact timeline row', () => {
     expect(
       createTimelineEntries([], [
@@ -304,6 +394,7 @@ describe('renderer state reducer', () => {
             reasoningRequested: 'enabled',
             reasoningProtocol: 'qwen',
             reasoningObserved: true,
+            responseSpeed: 'fast',
             durationMs: 2_000,
             completionTokens: 40,
             tokensPerSecond: 20,
@@ -316,7 +407,7 @@ describe('renderer state reducer', () => {
     ).toContainEqual({
       id: 'model.metrics-turn-1-3',
       kind: 'metrics',
-      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
+      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 速度：fast · 40 tokens (server) · stop',
     });
   });
 

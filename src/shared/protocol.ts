@@ -2,6 +2,7 @@ import type {
   AppSnapshot,
   LanguagePreference,
   MetricSource,
+  ModelResponseSpeed,
   ModelProfileInput,
   ModelRunMetrics,
   ReasoningEffort,
@@ -75,11 +76,15 @@ function isReasoningProtocol(value: unknown): value is ReasoningProtocol {
 }
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === 'low' || value === 'medium' || value === 'high';
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
 }
 
 function isMetricSource(value: unknown): value is MetricSource {
   return value === 'server' || value === 'client' || value === 'unavailable';
+}
+
+function isModelResponseSpeed(value: unknown): value is ModelResponseSpeed {
+  return value === 'standard' || value === 'fast' || value === 'quality';
 }
 
 function isReasoningInput(value: unknown): boolean {
@@ -125,6 +130,7 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
     hasString(value, 'model') &&
     hasOptionalString(value, 'apiKey') &&
     isReasoningInput(value.reasoning) &&
+    (value.responseSpeed === undefined || isModelResponseSpeed(value.responseSpeed)) &&
     (value.isDefault === undefined || typeof value.isDefault === 'boolean')
   );
 }
@@ -198,6 +204,7 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
         isReasoningMode(value.metrics.reasoningRequested) &&
         isReasoningProtocol(value.metrics.reasoningProtocol) &&
         typeof value.metrics.reasoningObserved === 'boolean' &&
+        (value.metrics.responseSpeed === undefined || isModelResponseSpeed(value.metrics.responseSpeed)) &&
         isMetricSource(value.metrics.speedSource) &&
         isMetricSource(value.metrics.usageSource)
       );

@@ -12,6 +12,7 @@ import type {
   ModelReasoningSettings,
   ModelProfile,
   ModelProfileInput,
+  ModelResponseSpeed,
   RuntimeSettingsInput,
   ThreadSummary,
 } from '../shared/domain.js';
@@ -83,6 +84,7 @@ type ModelProfileRow = {
   api_key: string | null;
   capabilities: string;
   reasoning: string;
+  response_speed: string | null;
   is_default: number;
   created_at: string;
   updated_at: string;
@@ -351,6 +353,7 @@ class SqliteAppDatabase implements AppDatabase {
       apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
       capabilities: normalizeCapabilities(input.capabilities),
       reasoning: normalizeReasoning(input.reasoning ?? existing?.reasoning),
+      responseSpeed: normalizeResponseSpeed(input.responseSpeed ?? existing?.responseSpeed),
       isDefault: Boolean(input.isDefault),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -363,8 +366,8 @@ class SqliteAppDatabase implements AppDatabase {
       }
       this.db
         .prepare(
-          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, is_default, created_at, updated_at)
-           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :isDefault, :createdAt, :updatedAt)
+          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, response_speed, is_default, created_at, updated_at)
+           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :responseSpeed, :isDefault, :createdAt, :updatedAt)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              provider = excluded.provider,
@@ -373,6 +376,7 @@ class SqliteAppDatabase implements AppDatabase {
              api_key = excluded.api_key,
              capabilities = excluded.capabilities,
              reasoning = excluded.reasoning,
+             response_speed = excluded.response_speed,
              is_default = excluded.is_default,
              updated_at = excluded.updated_at`,
         )
@@ -385,6 +389,7 @@ class SqliteAppDatabase implements AppDatabase {
           apiKey: profile.apiKey ?? null,
           capabilities: JSON.stringify(profile.capabilities),
           reasoning: JSON.stringify(profile.reasoning),
+          responseSpeed: profile.responseSpeed,
           isDefault: profile.isDefault ? 1 : 0,
           createdAt: profile.createdAt,
           updatedAt: profile.updatedAt,
@@ -516,6 +521,11 @@ class SqliteAppDatabase implements AppDatabase {
       'model_profiles',
       'reasoning',
       'ALTER TABLE model_profiles ADD COLUMN reasoning TEXT NOT NULL DEFAULT \'{"mode":"disabled","protocol":"none","effort":"medium"}\'',
+    );
+    this.ensureColumn(
+      'model_profiles',
+      'response_speed',
+      "ALTER TABLE model_profiles ADD COLUMN response_speed TEXT NOT NULL DEFAULT 'standard'",
     );
     this.ensureDefaultGroup();
   }
@@ -650,6 +660,7 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
     apiKeyConfigured: Boolean(row.api_key),
     capabilities: parseCapabilities(row.capabilities),
     reasoning: parseReasoning(row.reasoning),
+    responseSpeed: normalizeResponseSpeed(row.response_speed),
     isDefault: row.is_default === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -687,7 +698,7 @@ function normalizeReasoning(input?: Partial<ModelReasoningSettings>): ModelReaso
     mode: input?.mode === 'auto' || input?.mode === 'enabled' || input?.mode === 'disabled' ? input.mode : 'disabled',
     protocol:
       input?.protocol === 'qwen' || input?.protocol === 'openai' || input?.protocol === 'custom' ? input.protocol : 'none',
-    effort: input?.effort === 'low' || input?.effort === 'high' ? input.effort : 'medium',
+    effort: input?.effort === 'low' || input?.effort === 'high' || input?.effort === 'xhigh' ? input.effort : 'medium',
   };
 }
 
@@ -704,6 +715,10 @@ function clampContextLimit(value: number): number {
     return 20;
   }
   return Math.min(200, Math.max(1, Math.trunc(value)));
+}
+
+function normalizeResponseSpeed(value: unknown): ModelResponseSpeed {
+  return value === 'fast' || value === 'quality' ? value : 'standard';
 }
 
 function normalizeBaseUrl(value: string): string {

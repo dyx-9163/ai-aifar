@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import type { Item, ModelProfile, ThreadSummary } from '../../shared/domain';
+import type { Item, ModelProfile, ModelResponseSpeed, ReasoningEffort, ThreadSummary } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
 import { renderMarkdown } from '../markdown';
@@ -16,6 +16,7 @@ const props = defineProps<{
   loading: boolean;
   modelProfiles: ModelProfile[];
   activeModelProfileId?: string;
+  activeModelProfile?: ModelProfile;
   t: Translator;
 }>();
 
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   submit: [text: string];
   cancel: [];
   selectModel: [modelProfileId?: string];
+  updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: ReasoningEffort }; responseSpeed?: ModelResponseSpeed }];
 }>();
 
 const timelineEntries = computed(() => createTimelineEntries(props.items, props.events));
@@ -38,6 +40,53 @@ const scrollSignature = computed(() =>
 function handleModelChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value;
   emit('selectModel', value || undefined);
+}
+
+const activeReasoningEffort = computed(() => props.activeModelProfile?.reasoning.effort ?? 'medium');
+const activeResponseSpeed = computed(() => props.activeModelProfile?.responseSpeed ?? 'standard');
+const reasoningEffortOptions: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+const responseSpeedOptions: ModelResponseSpeed[] = ['standard', 'fast', 'quality'];
+const reasoningSummary = computed(() => {
+  if (!props.activeModelProfile || props.activeModelProfile.reasoning.mode === 'disabled') {
+    return props.t('disabled');
+  }
+  return reasoningEffortLabel(activeReasoningEffort.value);
+});
+const speedSummary = computed(() => responseSpeedLabel(activeResponseSpeed.value));
+
+function setReasoningEffort(effort: ReasoningEffort): void {
+  emit('updateModelRuntime', { reasoning: { mode: 'enabled', effort } });
+}
+
+function disableReasoning(): void {
+  emit('updateModelRuntime', { reasoning: { mode: 'disabled' } });
+}
+
+function setResponseSpeed(responseSpeed: ModelResponseSpeed): void {
+  emit('updateModelRuntime', { responseSpeed });
+}
+
+function reasoningEffortLabel(effort: ReasoningEffort): string {
+  if (effort === 'low') {
+    return props.t('low');
+  }
+  if (effort === 'high') {
+    return props.t('high');
+  }
+  if (effort === 'xhigh') {
+    return props.t('xhigh');
+  }
+  return props.t('medium');
+}
+
+function responseSpeedLabel(responseSpeed: ModelResponseSpeed): string {
+  if (responseSpeed === 'fast') {
+    return props.t('fast');
+  }
+  if (responseSpeed === 'quality') {
+    return props.t('quality');
+  }
+  return props.t('standard');
 }
 
 function scrollToBottomNow(): void {
@@ -130,6 +179,53 @@ function nextAnimationFrame(): Promise<void> {
             </option>
           </select>
         </label>
+        <details class="runtime-menu" data-testid="reasoning-runtime-menu" :class="{ disabled: !activeModelProfile }">
+          <summary data-testid="reasoning-runtime-trigger">
+            <span>{{ t('reasoningEffort') }}</span>
+            <strong>{{ reasoningSummary }}</strong>
+          </summary>
+          <div class="runtime-menu-panel">
+            <button
+              type="button"
+              data-testid="reasoning-runtime-disabled"
+              :class="{ active: activeModelProfile?.reasoning.mode === 'disabled' }"
+              :disabled="!activeModelProfile"
+              @click="disableReasoning"
+            >
+              {{ t('disabled') }}
+            </button>
+            <button
+              v-for="effort in reasoningEffortOptions"
+              :key="effort"
+              type="button"
+              :data-testid="`reasoning-runtime-${effort}`"
+              :class="{ active: activeModelProfile?.reasoning.mode !== 'disabled' && activeReasoningEffort === effort }"
+              :disabled="!activeModelProfile"
+              @click="setReasoningEffort(effort)"
+            >
+              {{ reasoningEffortLabel(effort) }}
+            </button>
+          </div>
+        </details>
+        <details class="runtime-menu" data-testid="speed-runtime-menu" :class="{ disabled: !activeModelProfile }">
+          <summary data-testid="speed-runtime-trigger">
+            <span>{{ t('responseSpeed') }}</span>
+            <strong>{{ speedSummary }}</strong>
+          </summary>
+          <div class="runtime-menu-panel">
+            <button
+              v-for="speed in responseSpeedOptions"
+              :key="speed"
+              type="button"
+              :data-testid="`speed-runtime-${speed}`"
+              :class="{ active: activeResponseSpeed === speed }"
+              :disabled="!activeModelProfile"
+              @click="setResponseSpeed(speed)"
+            >
+              {{ responseSpeedLabel(speed) }}
+            </button>
+          </div>
+        </details>
         <span class="runtime-pill">{{ busy ? t('running') : t('ready') }}</span>
       </div>
     </header>

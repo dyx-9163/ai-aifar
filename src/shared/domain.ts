@@ -77,7 +77,8 @@ export type ModelProviderType = 'openai-compatible';
 export type MetricSource = 'server' | 'client' | 'unavailable';
 export type ReasoningMode = 'auto' | 'enabled' | 'disabled';
 export type ReasoningProtocol = 'none' | 'qwen' | 'openai' | 'custom';
-export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type ModelResponseSpeed = 'standard' | 'fast' | 'quality';
 
 export interface ModelReasoningSettings {
   mode: ReasoningMode;
@@ -107,6 +108,7 @@ export interface ModelProfile {
   apiKeyConfigured: boolean;
   capabilities: ModelCapabilities;
   reasoning: ModelReasoningSettings;
+  responseSpeed: ModelResponseSpeed;
   isDefault: boolean;
   createdAt: string;
   updatedAt: string;
@@ -121,6 +123,7 @@ export interface ModelProfileInput {
   apiKey?: string;
   capabilities?: Partial<ModelCapabilities>;
   reasoning?: Partial<ModelReasoningSettings>;
+  responseSpeed?: ModelResponseSpeed;
   isDefault?: boolean;
 }
 
@@ -130,6 +133,7 @@ export interface ModelRunMetrics {
   reasoningRequested: ReasoningMode;
   reasoningProtocol: ReasoningProtocol;
   reasoningObserved: boolean;
+  responseSpeed?: ModelResponseSpeed;
   durationMs: number;
   tokensPerSecond?: number;
   speedSource: MetricSource;

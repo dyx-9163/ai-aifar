@@ -63,6 +63,7 @@ export async function streamChatCompletion(
     reasoningRequested: profile.reasoning.mode,
     reasoningProtocol: profile.reasoning.protocol,
     reasoningObserved: Boolean(reasoningTokens && reasoningTokens > 0),
+    responseSpeed: profile.responseSpeed,
     durationMs,
     timeToFirstTokenMs: firstTokenAt ? Math.max(0, firstTokenAt - startedAt) : undefined,
     ...streamedMetrics,

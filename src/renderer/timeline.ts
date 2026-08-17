@@ -87,6 +87,9 @@ function formatMetrics(metrics: ModelRunMetrics): string {
   if (typeof metrics.tokensPerSecond === 'number') {
     parts.push(`${metrics.tokensPerSecond.toFixed(1)} tok/s (${metrics.speedSource ?? 'unavailable'})`);
   }
+  if (metrics.responseSpeed) {
+    parts.push(`速度：${metrics.responseSpeed}`);
+  }
   if (typeof metrics.completionTokens === 'number') {
     parts.push(`${metrics.completionTokens} tokens (${metrics.usageSource ?? 'unavailable'})`);
   }

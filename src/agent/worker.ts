@@ -228,6 +228,7 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
       protocol: input.reasoning?.protocol ?? existing?.reasoning.protocol ?? 'none',
       effort: input.reasoning?.effort ?? existing?.reasoning.effort ?? 'medium',
     },
+    responseSpeed: input.responseSpeed ?? existing?.responseSpeed ?? 'standard',
     isDefault: input.isDefault ?? existing?.isDefault ?? false,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),

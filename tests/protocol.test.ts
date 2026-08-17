@@ -46,7 +46,8 @@ describe('desktop protocol guards', () => {
           provider: 'openai-compatible',
           baseUrl: 'http://127.0.0.1:8080/v1',
           model: 'deepseek-r1',
-          reasoning: { mode: 'enabled', protocol: 'openai', effort: 'high' },
+          reasoning: { mode: 'enabled', protocol: 'openai', effort: 'xhigh' },
+          responseSpeed: 'fast',
         },
       }),
     ).toBe(true);
@@ -59,9 +60,25 @@ describe('desktop protocol guards', () => {
           baseUrl: 'http://127.0.0.1:8080/v1',
           model: 'qwen',
           reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+          responseSpeed: 'standard',
         },
       }),
     ).toBe(true);
+  });
+
+  it('rejects invalid model runtime preferences', () => {
+    expect(
+      isDesktopRequest({
+        type: 'modelProfile.save',
+        profile: {
+          name: 'Bad speed',
+          provider: 'openai-compatible',
+          baseUrl: 'http://127.0.0.1:8080/v1',
+          model: 'x',
+          responseSpeed: 'turbo',
+        },
+      }),
+    ).toBe(false);
   });
 
   it('rejects an incomplete model profile save request', () => {
@@ -120,6 +137,7 @@ describe('desktop protocol guards', () => {
           reasoningRequested: 'enabled',
           reasoningProtocol: 'qwen',
           reasoningObserved: true,
+          responseSpeed: 'fast',
           durationMs: 1000,
           tokensPerSecond: 8,
           speedSource: 'client',

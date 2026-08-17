@@ -5,6 +5,7 @@ import type {
   LanguagePreference,
   ModelProfile,
   ModelProfileInput,
+  ModelResponseSpeed,
   ReasoningEffort,
   ReasoningMode,
   ReasoningProtocol,
@@ -42,6 +43,7 @@ const form = reactive({
   reasoningMode: 'disabled' as ReasoningMode,
   reasoningProtocol: 'none' as ReasoningProtocol,
   reasoningEffort: 'medium' as ReasoningEffort,
+  responseSpeed: 'standard' as ModelResponseSpeed,
 });
 
 const activeReasoningLabel = computed(() => {
@@ -73,6 +75,7 @@ function loadProfile(profile: ModelProfile): void {
   form.reasoningMode = profile.reasoning.mode;
   form.reasoningProtocol = profile.reasoning.protocol;
   form.reasoningEffort = profile.reasoning.effort;
+  form.responseSpeed = profile.responseSpeed;
   modelStatus.value = profile.apiKeyConfigured ? props.t('savedProfileLoadedKeepKey') : props.t('savedProfileLoaded');
 }
 
@@ -86,6 +89,7 @@ function resetForm(): void {
   form.reasoningMode = 'disabled';
   form.reasoningProtocol = 'none';
   form.reasoningEffort = 'medium';
+  form.responseSpeed = 'standard';
   modelStatus.value = props.t('readyToAddModel');
 }
 
@@ -110,6 +114,7 @@ function inputFromForm(): ModelProfileInput {
       protocol: form.reasoningProtocol,
       effort: form.reasoningEffort,
     },
+    responseSpeed: form.responseSpeed,
   };
 }
 
@@ -295,6 +300,15 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                   <option value="low">{{ t('low') }}</option>
                   <option value="medium">{{ t('medium') }}</option>
                   <option value="high">{{ t('high') }}</option>
+                  <option value="xhigh">{{ t('xhigh') }}</option>
+                </select>
+              </label>
+              <label class="field-stack">
+                <span>{{ t('responseSpeed') }}</span>
+                <select v-model="form.responseSpeed" class="model-select wide">
+                  <option value="standard">{{ t('standard') }}</option>
+                  <option value="fast">{{ t('fast') }}</option>
+                  <option value="quality">{{ t('quality') }}</option>
                 </select>
               </label>
             </div>

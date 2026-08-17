@@ -32,6 +32,14 @@ test('launches the desktop and streams a demo turn', async () => {
     await page.getByLabel('Model', { exact: true }).fill('DeepSeek-R1');
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByRole('button', { name: /DeepSeek Local/ })).toBeVisible();
+    await page.getByRole('button', { name: /Back to chat/ }).click();
+    await expect(page.getByTestId('reasoning-runtime-menu')).toBeVisible();
+    await expect(page.getByTestId('speed-runtime-menu')).toBeVisible();
+    await page.getByTestId('reasoning-runtime-trigger').click();
+    await page.getByTestId('reasoning-runtime-high').click();
+    await page.getByTestId('speed-runtime-trigger').click();
+    await page.getByTestId('speed-runtime-fast').click();
+    await page.getByRole('button', { name: /Settings/ }).click();
     await expect(page.getByRole('button', { name: /Advanced/ })).toBeVisible();
     await page.getByRole('button', { name: /Advanced/ }).click();
     await expect(page.getByTestId('metrics-toggle')).toBeVisible();

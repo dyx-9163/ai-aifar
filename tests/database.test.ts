@@ -169,13 +169,16 @@ describe('sqlite app database', () => {
       baseUrl: 'http://127.0.0.1:8080/v1',
       model: 'reasoner',
       apiKey: 'secret',
-      reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'high' },
+      reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'xhigh' },
+      responseSpeed: 'fast',
       capabilities: { reasoning: true, streamingUsage: true },
     });
 
-    expect(saved.reasoning).toEqual({ mode: 'enabled', protocol: 'qwen', effort: 'high' });
+    expect(saved.reasoning).toEqual({ mode: 'enabled', protocol: 'qwen', effort: 'xhigh' });
+    expect(saved.responseSpeed).toBe('fast');
     expect(saved).not.toHaveProperty('apiKey');
-    expect(db.getModelProfileForRuntime(saved.id)?.reasoning).toEqual({ mode: 'enabled', protocol: 'qwen', effort: 'high' });
+    expect(db.getModelProfileForRuntime(saved.id)?.reasoning).toEqual({ mode: 'enabled', protocol: 'qwen', effort: 'xhigh' });
+    expect(db.getModelProfileForRuntime(saved.id)?.responseSpeed).toBe('fast');
     db.close();
   });
 

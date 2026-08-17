@@ -6,7 +6,28 @@ import {
   reduceAgentEvent,
   type AgentClientState,
 } from '../../agentClient/core';
-import type { ChatGroup, Item, LanguagePreference, ModelProfile, ModelProfileInput, RuntimeSettingsInput, ThreadSummary } from '../../shared/domain';
+import type {
+  ChatGroup,
+  Item,
+  LanguagePreference,
+  ModelProfile,
+  ModelProfileInput,
+  ModelResponseSpeed,
+  ReasoningEffort,
+  ReasoningMode,
+  ReasoningProtocol,
+  RuntimeSettingsInput,
+  ThreadSummary,
+} from '../../shared/domain';
+
+export interface ActiveModelRuntimePatch {
+  reasoning?: Partial<{
+    mode: ReasoningMode;
+    protocol: ReasoningProtocol;
+    effort: ReasoningEffort;
+  }>;
+  responseSpeed?: ModelResponseSpeed;
+}
 
 export type RendererState = AgentClientState;
 export const emptyState = emptyAgentClientState;
@@ -107,6 +128,30 @@ export function useApp() {
     return saved;
   }
 
+  async function updateActiveModelRuntime(patch: ActiveModelRuntimePatch): Promise<ModelProfile | undefined> {
+    const profile = activeModelProfile.value;
+    if (!profile) {
+      return undefined;
+    }
+
+    const saved = await window.desktop.saveModelProfile({
+      id: profile.id,
+      name: profile.name,
+      provider: profile.provider,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      capabilities: profile.capabilities,
+      reasoning: {
+        ...profile.reasoning,
+        ...patch.reasoning,
+      },
+      responseSpeed: patch.responseSpeed ?? profile.responseSpeed,
+      isDefault: profile.isDefault,
+    });
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return saved;
+  }
+
   async function deleteModelProfile(id: string): Promise<void> {
     await window.desktop.deleteModelProfile(id);
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
@@ -151,6 +196,7 @@ export function useApp() {
     cancelTurn,
     respondApproval,
     saveModelProfile,
+    updateActiveModelRuntime,
     deleteModelProfile,
     testModelProfile,
     setLanguage,

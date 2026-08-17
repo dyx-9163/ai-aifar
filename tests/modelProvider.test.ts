@@ -14,6 +14,7 @@ const profile: RuntimeModelProfile = {
   apiKeyConfigured: true,
   capabilities: { text: true, vision: false, longContext: false, reasoning: false, streamingUsage: false },
   reasoning: { mode: 'disabled', protocol: 'none', effort: 'medium' },
+  responseSpeed: 'standard',
   isDefault: true,
   createdAt: '2026-08-17T00:00:00.000Z',
   updatedAt: '2026-08-17T00:00:00.000Z',
@@ -50,6 +51,7 @@ describe('OpenAI-compatible model provider', () => {
       reasoningRequested: 'disabled',
       reasoningProtocol: 'none',
       reasoningObserved: false,
+      responseSpeed: 'standard',
       speedSource: 'unavailable',
       usageSource: 'unavailable',
     });
@@ -106,6 +108,27 @@ describe('OpenAI-compatible model provider', () => {
     );
 
     expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('high');
+  });
+
+  it('records requested fast response speed without inventing provider timing', async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(
+        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+
+    const metrics = await streamChatCompletion(
+      { ...profile, responseSpeed: 'fast' },
+      [{ role: 'user', content: 'hello' }],
+      () => undefined,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(metrics).toMatchObject({
+      responseSpeed: 'fast',
+      speedSource: 'unavailable',
+    });
   });
 
   it('retries once without optional usage and reasoning parameters when rejected', async () => {
