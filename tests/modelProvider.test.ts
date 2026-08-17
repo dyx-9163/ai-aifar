@@ -241,6 +241,75 @@ describe('OpenAI-compatible model provider', () => {
     expect(answer).toEqual(['最终答案']);
   });
 
+  it('ignores zero-length answer, raw reasoning, and summary deltas', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":""}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_summary":""}}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const answer: string[] = [];
+    const raw: string[] = [];
+    const summary: string[] = [];
+    const phases: string[] = [];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+
+    const metrics = await streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      {
+        onAnswerDelta: (delta) => answer.push(delta),
+        onRawReasoningDelta: (delta) => raw.push(delta),
+        onReasoningSummaryDelta: (delta) => summary.push(delta),
+        onPhase: (phase) => phases.push(phase),
+      },
+      new AbortController().signal,
+      fetchImpl,
+      () => 1_000,
+    );
+
+    expect(answer).toEqual([]);
+    expect(raw).toEqual([]);
+    expect(summary).toEqual([]);
+    expect(phases).toEqual([]);
+    expect(metrics.timeToFirstTokenMs).toBeUndefined();
+    expect(metrics.reasoningObserved).toBe(false);
+  });
+
+  it('preserves whitespace-only answer, raw reasoning, and summary deltas', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"reasoning_content":" "}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_summary":"  "}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":" "}}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const answer: string[] = [];
+    const raw: string[] = [];
+    const summary: string[] = [];
+    const phases: string[] = [];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+
+    await streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      {
+        onAnswerDelta: (delta) => answer.push(delta),
+        onRawReasoningDelta: (delta) => raw.push(delta),
+        onReasoningSummaryDelta: (delta) => summary.push(delta),
+        onPhase: (phase) => phases.push(phase),
+      },
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(raw).toEqual([' ']);
+    expect(summary).toEqual(['  ']);
+    expect(answer).toEqual([' ']);
+    expect(phases).toEqual(['reasoning', 'answering']);
+  });
+
   it('does not retry a rejected reasoning parameter without reasoning', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -272,6 +341,97 @@ describe('OpenAI-compatible model provider', () => {
     });
     expect(requests).toHaveLength(1);
     expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('max');
+  });
+
+  it('does not retry when a structured reasoning error merely mentions stream_options', async () => {
+    let fetchCalls = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify({
+        error: {
+          message: 'reasoning_effort is unsupported while stream_options.include_usage is enabled',
+          param: 'reasoning_effort',
+          code: 'invalid_parameter',
+        },
+      }), { status: 400 });
+    };
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: {
+          ...profile.capabilities,
+          reasoning: { inputMode: 'effort', effortOptions: ['max'], outputModes: ['summary'] },
+          usage: { tokens: true, reasoningTokens: true },
+        },
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'max', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow('HTTP 400');
+    expect(fetchCalls).toBe(1);
+  });
+
+  it('does not let message text override a structured reasoning error code', async () => {
+    let fetchCalls = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify({
+        error: {
+          message: 'stream_options.include_usage is unsupported',
+          code: 'invalid_reasoning_effort',
+        },
+      }), { status: 400 });
+    };
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, usage: { tokens: true, reasoningTokens: true } },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow('HTTP 400');
+    expect(fetchCalls).toBe(1);
+  });
+
+  it('retries a structured stream usage parameter error exactly once', async () => {
+    const requests: RequestInit[] = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(init ?? {});
+      if (requests.length === 1) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'unsupported parameter',
+            param: 'stream_options.include_usage',
+            code: 'unsupported_parameter',
+          },
+        }), { status: 400 });
+      }
+      return new Response(
+        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, usage: { tokens: true, reasoningTokens: true } },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(requests).toHaveLength(2);
+    expect(JSON.parse(String(requests[0]?.body)).stream_options).toEqual({ include_usage: true });
+    expect(JSON.parse(String(requests[1]?.body)).stream_options).toBeUndefined();
   });
 
   it('retries once without stream_options while preserving reasoning parameters', async () => {

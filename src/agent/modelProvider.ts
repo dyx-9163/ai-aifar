@@ -268,10 +268,9 @@ function parseStreamChunk(data: string): ParsedStreamChunk {
   const usage: StreamedMetrics = {};
   const delta = parsed.choices?.[0]?.delta;
   const chunk: ParsedStreamChunk = {};
-  if (typeof delta?.content === 'string') chunk.answerDelta = delta.content;
-  if (typeof delta?.reasoning_content === 'string') chunk.rawReasoningDelta = delta.reasoning_content;
-  else if (typeof delta?.reasoning === 'string') chunk.rawReasoningDelta = delta.reasoning;
-  if (typeof delta?.reasoning_summary === 'string') chunk.reasoningSummaryDelta = delta.reasoning_summary;
+  chunk.answerDelta = nonEmptyStreamText(delta?.content);
+  chunk.rawReasoningDelta = nonEmptyStreamText(delta?.reasoning_content) ?? nonEmptyStreamText(delta?.reasoning);
+  chunk.reasoningSummaryDelta = nonEmptyStreamText(delta?.reasoning_summary);
   const finishReason = parsed.choices?.[0]?.finish_reason;
   if (typeof finishReason === 'string') {
     chunk.finishReason = finishReason;
@@ -314,8 +313,51 @@ async function readErrorBody(response: Response): Promise<string> {
 
 function isStreamUsageCompatibilityError(status: number, body: string): boolean {
   if (status !== 400 && status !== 422) return false;
-  const normalized = body.toLowerCase();
-  return normalized.includes('stream_options') || normalized.includes('include_usage');
+  const structured = parseStructuredProviderError(body);
+  if (structured?.param) {
+    return isStreamUsageParameter(structured.param);
+  }
+  if (structured?.code) {
+    return isStreamUsageCode(structured.code);
+  }
+  return explicitlyRejectsStreamUsage(structured?.message ?? body);
+}
+
+function parseStructuredProviderError(body: string): { param?: string; code?: string; message?: string } | undefined {
+  try {
+    const parsed = JSON.parse(body) as { error?: { param?: unknown; code?: unknown; message?: unknown } };
+    if (!parsed.error || typeof parsed.error !== 'object') return undefined;
+    return {
+      param: typeof parsed.error.param === 'string' ? parsed.error.param : undefined,
+      code: typeof parsed.error.code === 'string' ? parsed.error.code : undefined,
+      message: typeof parsed.error.message === 'string' ? parsed.error.message : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isStreamUsageParameter(param: string): boolean {
+  const normalized = param.trim().toLowerCase();
+  return normalized === 'stream_options'
+    || normalized === 'include_usage'
+    || normalized === 'stream_options.include_usage';
+}
+
+function isStreamUsageCode(code: string): boolean {
+  return /(?:^|[._-])(?:stream_options|include_usage)(?:$|[._-])/.test(code.trim().toLowerCase());
+}
+
+function explicitlyRejectsStreamUsage(message: string): boolean {
+  const target = '(?:stream_options(?:\\.include_usage)?|include_usage)';
+  const problem = '(?:unsupported|not\\s+supported|unknown|unrecognized|invalid)';
+  const normalized = message.toLowerCase();
+  return new RegExp(`${problem}(?:\\s+request)?(?:\\s+parameter)?\\s*[:=]?\\s*["']?${target}\\b`).test(normalized)
+    || new RegExp(`\\b${target}\\b\\s+(?:is\\s+)?${problem}`).test(normalized);
+}
+
+function nonEmptyStreamText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function redactResponseExcerpt(body: string, apiKey: string | undefined): string {
