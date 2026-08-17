@@ -220,6 +220,7 @@ export interface TurnRecord {
   completedAt?: string;
   error?: string;
   incomplete: boolean;
+  metrics?: ModelRunMetrics;
 }
 
 export interface ThreadRuntimeState {

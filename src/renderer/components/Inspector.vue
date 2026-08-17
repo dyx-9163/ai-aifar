@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { AppSettings, Approval, ModelRunMetrics } from '../../shared/domain';
+import type { AppSettings, Approval, ModelRunMetrics, TurnRecord } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
 
 const props = defineProps<{
   pendingApproval?: Approval;
   events: AgentEvent[];
+  turns: TurnRecord[];
   settings: AppSettings;
   busy: boolean;
   t: Translator;
@@ -18,11 +19,12 @@ defineEmits<{
 }>();
 
 const activity = computed(() => props.events.filter((event) => event.type !== 'message.delta').slice(-8).reverse());
-const latestMetrics = computed(() =>
-  props.events
+const latestMetrics = computed(() => {
+  const live = props.events
     .filter((event): event is Extract<AgentEvent, { type: 'model.metrics' }> => event.type === 'model.metrics')
-    .at(-1)?.metrics,
-);
+    .at(-1)?.metrics;
+  return live ?? props.turns.filter((turn) => turn.metrics).at(-1)?.metrics;
+});
 
 function activityText(event: AgentEvent): string {
   if (event.type === 'turn.failed') {

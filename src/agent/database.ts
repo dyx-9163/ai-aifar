@@ -10,6 +10,7 @@ import type {
   MessageItem,
   ModelProfile,
   ModelProfileInput,
+  ModelRunMetrics,
   ModelResponseSpeed,
   ReasoningItem,
   ReasoningProtocol,
@@ -40,7 +41,7 @@ export interface AppDatabase {
     patch: Partial<Pick<TurnRecord, 'status' | 'startedAt' | 'completedAt' | 'error' | 'incomplete'>>,
   ): void;
   failTurn(turnId: string, completedAt: string, error: string): void;
-  completeTurn(turnId: string, completedAt: string): void;
+  completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): void;
   interruptUnfinishedTurns(): void;
   appendItem(item: Item): void;
   upsertApproval(approval: Approval): void;
@@ -84,6 +85,7 @@ type TurnRow = {
   completed_at: string | null;
   error: string | null;
   incomplete: number;
+  metrics: string | null;
 };
 
 type ApprovalRow = {
@@ -139,7 +141,7 @@ class SqliteAppDatabase implements AppDatabase {
 
     const turns = this.db
       .prepare(
-        `SELECT tr.id, tr.thread_id, tr.model_profile_id, tr.status, tr.created_at, tr.started_at, tr.completed_at, tr.error, tr.incomplete
+        `SELECT tr.id, tr.thread_id, tr.model_profile_id, tr.status, tr.created_at, tr.started_at, tr.completed_at, tr.error, tr.incomplete, tr.metrics
          FROM turns tr
          INNER JOIN threads t ON t.id = tr.thread_id
          WHERE t.deleted_at IS NULL
@@ -405,15 +407,16 @@ class SqliteAppDatabase implements AppDatabase {
     });
   }
 
-  completeTurn(turnId: string, completedAt: string): void {
+  completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): void {
     this.transaction(() => {
       this.db
         .prepare(
           `UPDATE turns
-           SET status = 'completed', completed_at = :completedAt, incomplete = 0, updated_at = :completedAt
+           SET status = 'completed', completed_at = :completedAt, incomplete = 0,
+               metrics = COALESCE(:metrics, metrics), updated_at = :completedAt
            WHERE id = :turnId`,
         )
-        .run({ turnId, completedAt });
+        .run({ turnId, completedAt, metrics: metrics ? JSON.stringify(metrics) : null });
 
       const rows = this.db
         .prepare(`SELECT id, payload FROM items WHERE turn_id = :turnId AND kind IN ('message', 'reasoning')`)
@@ -723,6 +726,7 @@ class SqliteAppDatabase implements AppDatabase {
     this.ensureDefaultGroup();
     this.applyMigration(2, () => this.compactAssistantMessageFragments());
     this.applyMigration(3, () => this.migrateLegacyTurnCompletion());
+    this.applyMigration(4, () => this.ensureColumn('turns', 'metrics', 'ALTER TABLE turns ADD COLUMN metrics TEXT'));
     this.interruptUnfinishedTurns();
   }
 
@@ -980,7 +984,30 @@ function mapTurn(row: TurnRow): TurnRecord {
     completedAt: row.completed_at ?? undefined,
     error: row.error ?? undefined,
     incomplete: row.incomplete === 1,
+    metrics: parseModelRunMetrics(row.metrics),
   };
+}
+
+function parseModelRunMetrics(value: string | null): ModelRunMetrics | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as Partial<ModelRunMetrics>;
+    if (
+      typeof parsed !== 'object'
+      || parsed === null
+      || !Number.isFinite(parsed.durationMs)
+      || !['auto', 'enabled', 'disabled'].includes(parsed.reasoningRequested ?? '')
+      || !['none', 'qwen', 'openai', 'custom'].includes(parsed.reasoningProtocol ?? '')
+      || typeof parsed.reasoningObserved !== 'boolean'
+      || !['server', 'client', 'unavailable'].includes(parsed.speedSource ?? '')
+      || !['server', 'client', 'unavailable'].includes(parsed.usageSource ?? '')
+    ) {
+      return undefined;
+    }
+    return parsed as ModelRunMetrics;
+  } catch {
+    return undefined;
+  }
 }
 
 function mapThread(row: ThreadRow): ThreadSummary {

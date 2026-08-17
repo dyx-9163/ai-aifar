@@ -94,6 +94,10 @@ export function useApp() {
     const threadId = state.value.activeThreadId;
     return threadId ? (state.value.snapshot.items[threadId] ?? []) : [];
   });
+  const activeTurns = computed(() => {
+    const threadId = state.value.activeThreadId;
+    return threadId ? state.value.snapshot.turns.filter((turn) => turn.threadId === threadId) : [];
+  });
 
   const activeRuntime = computed<ThreadRuntimeState | undefined>(() => {
     const threadId = state.value.activeThreadId;
@@ -329,6 +333,7 @@ export function useApp() {
     loading,
     activeThread,
     activeItems,
+    activeTurns,
     activeRuntime,
     activeBusy,
     activeTurnId,

@@ -220,6 +220,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     const context = active.get(turn.turnId);
     if (!context) return;
 
+    let finalMetrics: ModelRunMetrics | undefined;
     try {
       let outcome: 'completed' | 'awaiting-approval' = 'completed';
       if (profile) {
@@ -246,6 +247,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
           handlers,
           signal,
         );
+        finalMetrics = metrics;
         throwIfAborted(signal);
         await context.next({ type: 'model.metrics', metrics });
       } else {
@@ -264,7 +266,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
 
       if (outcome === 'awaiting-approval') return;
-      database.completeTurn(turn.turnId, now());
+      database.completeTurn(turn.turnId, now(), finalMetrics);
       try {
         await context.next({ type: 'turn.completed' });
       } catch {

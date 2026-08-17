@@ -697,6 +697,7 @@ function reconcileTurns(current: TurnRecord[], incoming: TurnRecord[]): TurnReco
       completedAt: turn.completedAt ?? existing.completedAt,
       error: status === 'failed' ? turn.error ?? existing.error : undefined,
       incomplete: status !== 'completed',
+      metrics: turn.metrics ?? existing.metrics,
     });
   }
   return [...turns.values()].sort(compareTurns);

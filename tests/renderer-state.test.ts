@@ -1536,6 +1536,49 @@ describe('renderer state reducer', () => {
     });
   });
 
+  it('rebuilds active Inspector and timeline metrics from a reloaded snapshot', () => {
+    const app = useApp();
+    const persistedMetrics = {
+      modelProfileId: 'model-1',
+      modelName: 'Model 1',
+      reasoningRequested: 'enabled' as const,
+      reasoningProtocol: 'qwen' as const,
+      reasoningObserved: true,
+      durationMs: 2_000,
+      completionTokens: 40,
+      tokensPerSecond: 20,
+      speedSource: 'client' as const,
+      usageSource: 'server' as const,
+      finishReason: 'stop',
+    };
+    app.state.value = reduceEvent(app.state.value, {
+      type: 'snapshot',
+      snapshot: {
+        ...emptyState().snapshot,
+        groups: [{
+          id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
+        }],
+        threads: [{
+          id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'ready', modelProfileId: 'model-1',
+          createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:03.000Z',
+        }],
+        turns: [{
+          id: 'turn-1', threadId: 'thread-1', modelProfileId: 'model-1', status: 'completed',
+          createdAt: '2026-08-17T00:00:00.000Z', completedAt: '2026-08-17T00:00:03.000Z',
+          incomplete: false, metrics: persistedMetrics,
+        }],
+      },
+    });
+
+    expect(app.activeTurns.value).toHaveLength(1);
+    expect(app.activeTurns.value[0]?.metrics).toEqual(persistedMetrics);
+    expect(createTimelineEntries([], [], app.activeTurns.value)).toContainEqual({
+      id: 'model.metrics-turn-1-persisted',
+      kind: 'metrics',
+      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
+    });
+  });
+
   it('treats scroll positions within 80px of the bottom as pinned', () => {
     expect(isNearBottom({ scrollTop: 920, clientHeight: 500, scrollHeight: 1500 })).toBe(true);
     expect(isNearBottom({ scrollTop: 819, clientHeight: 500, scrollHeight: 1500 })).toBe(false);

@@ -235,6 +235,43 @@ describe('sqlite app database', () => {
     db.close();
   });
 
+  it('persists completed model metrics in the terminal transaction and returns them after reopen', () => {
+    const path = createDbPath();
+    const first = openDatabase(path);
+    const finalMetrics = {
+      modelProfileId: 'model-1',
+      modelName: 'Model 1',
+      reasoningRequested: 'enabled' as const,
+      reasoningProtocol: 'qwen' as const,
+      reasoningObserved: true,
+      durationMs: 2_000,
+      completionTokens: 40,
+      tokensPerSecond: 20,
+      speedSource: 'client' as const,
+      usageSource: 'server' as const,
+      finishReason: 'stop',
+    };
+    try {
+      const thread = first.createThread('Persisted metrics');
+      first.createTurn(turnRecord('turn-metrics', thread.id, 'model-1', 'running'));
+      first.completeTurn('turn-metrics', '2026-08-17T00:00:03.000Z', finalMetrics);
+      expect(first.getSnapshot().turns).toContainEqual(expect.objectContaining({
+        id: 'turn-metrics', status: 'completed', incomplete: false, metrics: finalMetrics,
+      }));
+    } finally {
+      first.close();
+    }
+
+    const second = openDatabase(path);
+    try {
+      expect(second.getSnapshot().turns).toContainEqual(expect.objectContaining({
+        id: 'turn-metrics', status: 'completed', metrics: finalMetrics,
+      }));
+    } finally {
+      second.close();
+    }
+  });
+
   it('updates only the supplied persisted turn lifecycle fields', () => {
     const db = openDatabase(createDbPath());
     const thread = db.createThread('Turn lifecycle');

@@ -1,4 +1,4 @@
-import type { Item, ModelRunMetrics, ModelRunPhase, ReasoningOutputMode } from '../shared/domain';
+import type { Item, ModelRunMetrics, ModelRunPhase, ReasoningOutputMode, TurnRecord } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
 
 export type TimelineEntry =
@@ -35,7 +35,7 @@ export type TimelineEntry =
       phase: ModelRunPhase;
     };
 
-export function createTimelineEntries(items: Item[], events: AgentEvent[] = []): TimelineEntry[] {
+export function createTimelineEntries(items: Item[], events: AgentEvent[] = [], turns: TurnRecord[] = []): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
   const terminalTurns = new Set(
     events
@@ -43,6 +43,7 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = []):
       .map((event) => event.turnId),
   );
   const progressByTurn = new Map<string, Extract<AgentEvent, { type: 'model.progress' }>>();
+  const liveMetricsTurns = new Set<string>();
 
   for (const item of items) {
     if (item.kind === 'message') {
@@ -99,12 +100,22 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = []):
       });
     }
     if (event.type === 'model.metrics') {
+      liveMetricsTurns.add(event.turnId);
       entries.push({
         id: `${event.type}-${event.turnId}-${event.sequence}`,
         kind: 'metrics',
         text: formatMetrics(event.metrics),
       });
     }
+  }
+
+  for (const turn of turns) {
+    if (!turn.metrics || liveMetricsTurns.has(turn.id)) continue;
+    entries.push({
+      id: `model.metrics-${turn.id}-persisted`,
+      kind: 'metrics',
+      text: formatMetrics(turn.metrics),
+    });
   }
 
   for (const [turnId, event] of progressByTurn) {

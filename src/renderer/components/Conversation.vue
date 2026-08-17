@@ -7,6 +7,7 @@ import type {
   ReasoningItem,
   ThreadRuntimeState,
   ThreadSummary,
+  TurnRecord,
 } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
@@ -27,6 +28,7 @@ import ReasoningPanel from './ReasoningPanel.vue';
 const props = defineProps<{
   thread?: ThreadSummary;
   items: Item[];
+  turns: TurnRecord[];
   events: AgentEvent[];
   activeBusy: boolean;
   activeRuntime?: ThreadRuntimeState;
@@ -47,7 +49,7 @@ const emit = defineEmits<{
   updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
 
-const timelineEntries = computed(() => createTimelineEntries(props.items, props.events));
+const timelineEntries = computed(() => createTimelineEntries(props.items, props.events, props.turns));
 const reasoningGroups = computed(() => groupReasoningItems(
   props.items.filter((item): item is ReasoningItem => item.kind === 'reasoning'),
 ));

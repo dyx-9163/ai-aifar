@@ -101,7 +101,11 @@ describe('worker turn runtime', () => {
     ]));
 
     const snapshot = harness.database.getSnapshot();
-    expect(snapshot.turns.find((turn) => turn.id === turnId)).toMatchObject({ status: 'completed', incomplete: false });
+    expect(snapshot.turns.find((turn) => turn.id === turnId)).toMatchObject({
+      status: 'completed',
+      incomplete: false,
+      metrics: metrics(),
+    });
     expect(snapshot.items[queued.id]).toMatchObject([
       { id: `item-${turnId}-user`, text: 'run' },
       { id: `item-${turnId}-reasoning-raw`, text: 'raw-1raw-2', incomplete: false },
@@ -489,6 +493,7 @@ describe('worker turn runtime', () => {
       id: turnId,
       status: 'completed',
       incomplete: false,
+      metrics: metrics(),
     })));
 
     await capturedHandlers?.onAnswerDelta('late');
