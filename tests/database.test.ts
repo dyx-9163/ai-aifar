@@ -248,7 +248,11 @@ describe('sqlite app database', () => {
       reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'xhigh', display: 'auto' },
       responseSpeed: 'fast',
       capabilities: {
+        text: true,
+        vision: false,
+        longContext: false,
         reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+        concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
         streaming: true,
         usage: { tokens: true, reasoningTokens: true },
       },

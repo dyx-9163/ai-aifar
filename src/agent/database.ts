@@ -8,14 +8,18 @@ import type {
   Item,
   LanguagePreference,
   MessageItem,
-  ModelCapabilities,
-  ModelReasoningSettings,
   ModelProfile,
   ModelProfileInput,
   ModelResponseSpeed,
+  ReasoningProtocol,
   RuntimeSettingsInput,
   ThreadSummary,
 } from '../shared/domain.js';
+import {
+  normalizeMaxConcurrency,
+  normalizeModelCapabilities,
+  normalizeReasoningSettings,
+} from './modelCapabilities.js';
 
 export interface AppDatabase {
   getSnapshot(): AppSnapshot;
@@ -336,7 +340,12 @@ class SqliteAppDatabase implements AppDatabase {
   saveModelProfile(input: ModelProfileInput): ModelProfile {
     const now = new Date().toISOString();
     const existing = input.id ? this.getModelProfileForRuntime(input.id) : undefined;
-    const capabilities = normalizeCapabilities(input.capabilities);
+    const reasoningInput = { ...existing?.reasoning, ...input.reasoning };
+    const capabilities = normalizeModelCapabilities(
+      input.capabilities ?? existing?.capabilities,
+      reasoningInput.protocol ?? 'none',
+    );
+    const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);
     const profile: RuntimeModelProfile = {
       id: input.id ?? randomUUID(),
       name: requireTrimmed(input.name, 'Model profile name'),
@@ -346,8 +355,11 @@ class SqliteAppDatabase implements AppDatabase {
       apiKey: input.apiKey?.trim() || existing?.apiKey,
       apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
       capabilities,
-      reasoning: normalizeReasoning(input.reasoning ?? existing?.reasoning),
-      maxConcurrency: Math.max(1, input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit),
+      reasoning,
+      maxConcurrency: normalizeMaxConcurrency(
+        input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit,
+        capabilities,
+      ),
       responseSpeed: normalizeResponseSpeed(input.responseSpeed ?? existing?.responseSpeed),
       isDefault: Boolean(input.isDefault),
       createdAt: existing?.createdAt ?? now,
@@ -747,7 +759,9 @@ function mapApproval(row: ApprovalRow): Approval {
 function mapModelProfile(row: ModelProfileRow, includeApiKey: true): RuntimeModelProfile;
 function mapModelProfile(row: ModelProfileRow, includeApiKey: false): ModelProfile;
 function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeModelProfile | ModelProfile {
-  const capabilities = parseCapabilities(row.capabilities);
+  const reasoningInput = parseReasoningInput(row.reasoning);
+  const capabilities = parseCapabilities(row.capabilities, reasoningInput.protocol ?? 'none');
+  const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);
   const profile: RuntimeModelProfile = {
     id: row.id,
     name: row.name,
@@ -757,8 +771,8 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
     apiKey: includeApiKey ? (row.api_key ?? undefined) : undefined,
     apiKeyConfigured: Boolean(row.api_key),
     capabilities,
-    reasoning: parseReasoning(row.reasoning),
-    maxConcurrency: capabilities.concurrency.defaultLimit,
+    reasoning,
+    maxConcurrency: normalizeMaxConcurrency(capabilities.concurrency.defaultLimit, capabilities),
     responseSpeed: normalizeResponseSpeed(row.response_speed),
     isDefault: row.is_default === 1,
     createdAt: row.created_at,
@@ -773,59 +787,22 @@ function redactModelProfile(profile: RuntimeModelProfile): ModelProfile {
   return redacted;
 }
 
-function normalizeCapabilities(input?: ModelProfileInput['capabilities']): ModelCapabilities {
-  const reasoning = input?.reasoning;
-  const concurrency = input?.concurrency;
-  const usage = input?.usage;
-  const defaultLimit = concurrency?.defaultLimit;
-  const maxLimit = concurrency?.maxLimit;
-  return {
-    text: input?.text ?? true,
-    vision: input?.vision ?? false,
-    longContext: input?.longContext ?? false,
-    reasoning: {
-      inputMode:
-        reasoning?.inputMode === 'toggle' || reasoning?.inputMode === 'effort' || reasoning?.inputMode === 'custom'
-          ? reasoning.inputMode
-          : 'unsupported',
-      effortOptions: reasoning?.effortOptions?.filter((option) => option.length > 0) ?? [],
-      outputModes: reasoning?.outputModes?.filter((mode) => mode === 'raw' || mode === 'summary') ?? [],
-      defaultEffort: reasoning?.defaultEffort,
-    },
-    concurrency: {
-      defaultLimit: typeof defaultLimit === 'number' && Number.isInteger(defaultLimit) && defaultLimit >= 1 ? defaultLimit : 1,
-      configurable: concurrency?.configurable ?? true,
-      maxLimit: typeof maxLimit === 'number' && Number.isInteger(maxLimit) && maxLimit >= 1 ? maxLimit : 32,
-    },
-    streaming: input?.streaming ?? true,
-    usage: { tokens: usage?.tokens ?? true, reasoningTokens: usage?.reasoningTokens ?? true },
-  };
-}
-
-function parseCapabilities(value: string): ModelCapabilities {
+function parseCapabilities(value: string, reasoningProtocol: ReasoningProtocol) {
   try {
-    const parsed = JSON.parse(value) as ModelProfileInput['capabilities'];
-    return normalizeCapabilities(parsed);
+    return normalizeModelCapabilities(JSON.parse(value), reasoningProtocol);
   } catch {
-    return normalizeCapabilities();
+    return normalizeModelCapabilities(undefined, reasoningProtocol);
   }
 }
 
-function normalizeReasoning(input?: Partial<ModelReasoningSettings>): ModelReasoningSettings {
-  return {
-    mode: input?.mode === 'auto' || input?.mode === 'enabled' || input?.mode === 'disabled' ? input.mode : 'disabled',
-    protocol:
-      input?.protocol === 'qwen' || input?.protocol === 'openai' || input?.protocol === 'custom' ? input.protocol : 'none',
-    effort: typeof input?.effort === 'string' && input.effort.length > 0 ? input.effort : 'medium',
-    display: input?.display === 'raw' || input?.display === 'summary' ? input.display : 'auto',
-  };
-}
-
-function parseReasoning(value: string | null | undefined): ModelReasoningSettings {
+function parseReasoningInput(value: string | null | undefined): NonNullable<ModelProfileInput['reasoning']> {
   try {
-    return normalizeReasoning(JSON.parse(value || '{}') as Partial<ModelReasoningSettings>);
+    const parsed = JSON.parse(value || '{}');
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as NonNullable<ModelProfileInput['reasoning']>
+      : {};
   } catch {
-    return normalizeReasoning();
+    return {};
   }
 }
 

@@ -4,6 +4,11 @@ import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './data
 import { buildChatMessages } from './chatContext.js';
 import { requiresApproval, runDemoTurn } from './demoAgent.js';
 import { streamChatCompletion, testModelProfile, type ChatMessage } from './modelProvider.js';
+import {
+  normalizeMaxConcurrency,
+  normalizeModelCapabilities,
+  normalizeReasoningSettings,
+} from './modelCapabilities.js';
 
 type ParentPort = {
   postMessage(message: unknown): void;
@@ -211,31 +216,12 @@ async function persistAndPostEvent(event: AgentEvent): Promise<void> {
 
 function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): RuntimeModelProfile {
   const existing = input.id ? db.getModelProfileForRuntime(input.id) : undefined;
-  const capabilityInput = input.capabilities;
-  const reasoningCapabilities = capabilityInput?.reasoning;
-  const concurrency = capabilityInput?.concurrency;
-  const usage = capabilityInput?.usage;
-  const capabilities = {
-    text: capabilityInput?.text ?? existing?.capabilities.text ?? true,
-    vision: capabilityInput?.vision ?? existing?.capabilities.vision ?? false,
-    longContext: capabilityInput?.longContext ?? existing?.capabilities.longContext ?? false,
-    reasoning: {
-      inputMode: reasoningCapabilities?.inputMode ?? existing?.capabilities.reasoning.inputMode ?? 'unsupported',
-      effortOptions: reasoningCapabilities?.effortOptions ?? existing?.capabilities.reasoning.effortOptions ?? [],
-      outputModes: reasoningCapabilities?.outputModes ?? existing?.capabilities.reasoning.outputModes ?? [],
-      defaultEffort: reasoningCapabilities?.defaultEffort ?? existing?.capabilities.reasoning.defaultEffort,
-    },
-    concurrency: {
-      defaultLimit: concurrency?.defaultLimit ?? existing?.capabilities.concurrency.defaultLimit ?? 1,
-      configurable: concurrency?.configurable ?? existing?.capabilities.concurrency.configurable ?? true,
-      maxLimit: concurrency?.maxLimit ?? existing?.capabilities.concurrency.maxLimit ?? 32,
-    },
-    streaming: capabilityInput?.streaming ?? existing?.capabilities.streaming ?? true,
-    usage: {
-      tokens: usage?.tokens ?? existing?.capabilities.usage.tokens ?? true,
-      reasoningTokens: usage?.reasoningTokens ?? existing?.capabilities.usage.reasoningTokens ?? true,
-    },
-  };
+  const reasoningInput = { ...existing?.reasoning, ...input.reasoning };
+  const capabilities = normalizeModelCapabilities(
+    input.capabilities ?? existing?.capabilities,
+    reasoningInput.protocol ?? 'none',
+  );
+  const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);
   return {
     id: input.id ?? 'unsaved-test-profile',
     name: input.name.trim(),
@@ -245,13 +231,11 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
     apiKey: input.apiKey?.trim() || existing?.apiKey,
     apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
     capabilities,
-    reasoning: {
-      mode: input.reasoning?.mode ?? existing?.reasoning.mode ?? 'disabled',
-      protocol: input.reasoning?.protocol ?? existing?.reasoning.protocol ?? 'none',
-      effort: input.reasoning?.effort ?? existing?.reasoning.effort ?? 'medium',
-      display: input.reasoning?.display ?? existing?.reasoning.display ?? 'auto',
-    },
-    maxConcurrency: input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit,
+    reasoning,
+    maxConcurrency: normalizeMaxConcurrency(
+      input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit,
+      capabilities,
+    ),
     responseSpeed: input.responseSpeed ?? existing?.responseSpeed ?? 'standard',
     isDefault: input.isDefault ?? existing?.isDefault ?? false,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
