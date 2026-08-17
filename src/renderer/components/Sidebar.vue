@@ -86,7 +86,12 @@ function runtimeActive(thread: ThreadSummary): boolean {
         >
           <button class="thread-button" type="button" @click="$emit('selectThread', thread.id)">
             <span class="thread-title">{{ thread.title }}</span>
-            <span class="thread-status" data-testid="thread-runtime-status">
+            <span
+              class="thread-status"
+              data-testid="thread-runtime-status"
+              :data-runtime-status="runtimeByThread[thread.id]?.status ?? thread.status"
+              :data-queue-position="runtimeByThread[thread.id]?.queuePosition"
+            >
               <span v-if="runtimeActive(thread)" class="thread-runtime-dot" aria-hidden="true"></span>
               {{ runtimeText(thread) }}
             </span>

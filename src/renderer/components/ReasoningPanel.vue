@@ -59,7 +59,12 @@ async function copySelectedReasoning(): Promise<void> {
         class="reasoning-content"
         data-testid="reasoning-content"
       >{{ selection.text }}</pre>
-      <p v-else-if="selection.availability === 'unsupported'" class="reasoning-unavailable">
+      <p
+        v-else-if="selection.availability === 'unsupported'"
+        class="reasoning-unavailable"
+        data-testid="reasoning-unavailable"
+        :data-reasoning-mode="selection.mode"
+      >
         {{ unavailableCopy }}
       </p>
       <p v-else class="reasoning-unavailable">

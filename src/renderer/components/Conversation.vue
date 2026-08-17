@@ -343,7 +343,12 @@ function nextAnimationFrame(): Promise<void> {
         >
           {{ t('customReasoningWarning') }}
         </button>
-        <span class="runtime-pill" data-testid="active-runtime-status">{{ runtimeStatus }}</span>
+        <span
+          class="runtime-pill"
+          data-testid="active-runtime-status"
+          :data-runtime-status="activeRuntime?.status ?? 'idle'"
+          :data-queue-position="activeRuntime?.queuePosition"
+        >{{ runtimeStatus }}</span>
         <span v-if="runtimeError" class="runtime-control-error" :title="runtimeError">{{ runtimeError }}</span>
       </div>
     </header>
@@ -376,6 +381,9 @@ function nextAnimationFrame(): Promise<void> {
           />
           <article
             v-if="entry.kind !== 'reasoning'"
+            :data-testid="entry.kind === 'message' ? `${entry.role}-message` : entry.kind === 'metrics' ? 'turn-metrics' : undefined"
+            :data-item-kind="entry.kind"
+            :data-message-role="entry.kind === 'message' ? entry.role : undefined"
             :class="
               entry.kind === 'message'
                 ? ['message-row', `role-${entry.role}`, { live: entry.live }]
@@ -388,8 +396,13 @@ function nextAnimationFrame(): Promise<void> {
           >
             <template v-if="entry.kind === 'message'">
               <span class="message-role">{{ entry.role === 'assistant' ? t('assistant') : entry.role === 'user' ? t('user') : entry.role }}</span>
-              <div v-if="entry.role === 'assistant'" class="message-content markdown-body" v-html="renderMarkdown(entry.text)"></div>
-              <p v-else class="message-content">{{ entry.text }}</p>
+              <div
+                v-if="entry.role === 'assistant'"
+                class="message-content markdown-body"
+                data-testid="assistant-message-content"
+                v-html="renderMarkdown(entry.text)"
+              ></div>
+              <p v-else class="message-content" :data-testid="`${entry.role}-message-content`">{{ entry.text }}</p>
             </template>
             <span v-else-if="entry.kind === 'progress'" class="progress-label">
               <span class="progress-dot" aria-hidden="true"></span>
