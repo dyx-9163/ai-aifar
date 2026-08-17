@@ -1,5 +1,6 @@
 import type { Item, ModelRunMetrics, ModelRunPhase, ReasoningOutputMode, TurnRecord } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
+import { createTranslator, type Translator } from './i18n';
 
 export type TimelineEntry =
   | {
@@ -27,6 +28,7 @@ export type TimelineEntry =
   | {
       id: string;
       kind: 'metrics';
+      metrics: ModelRunMetrics;
       text: string;
     }
   | {
@@ -35,7 +37,12 @@ export type TimelineEntry =
       phase: ModelRunPhase;
     };
 
-export function createTimelineEntries(items: Item[], events: AgentEvent[] = [], turns: TurnRecord[] = []): TimelineEntry[] {
+export function createTimelineEntries(
+  items: Item[],
+  events: AgentEvent[] = [],
+  turns: TurnRecord[] = [],
+  t: Translator = createTranslator('en-US'),
+): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
   const terminalTurns = new Set(
     events
@@ -104,7 +111,8 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = [], 
       entries.push({
         id: `${event.type}-${event.turnId}-${event.sequence}`,
         kind: 'metrics',
-        text: formatMetrics(event.metrics),
+        metrics: event.metrics,
+        text: formatMetrics(event.metrics, t),
       });
     }
   }
@@ -114,7 +122,8 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = [], 
     entries.push({
       id: `model.metrics-${turn.id}-persisted`,
       kind: 'metrics',
-      text: formatMetrics(turn.metrics),
+      metrics: turn.metrics,
+      text: formatMetrics(turn.metrics, t),
     });
   }
 
@@ -127,14 +136,12 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = [], 
   return entries;
 }
 
-function formatMetrics(metrics: ModelRunMetrics): string {
-  const reasoning =
-    metrics.reasoningRequested && metrics.reasoningProtocol
-      ? `${metrics.reasoningRequested}/${metrics.reasoningProtocol}`
-      : metrics.thinkingEnabled
-        ? '开'
-        : '关';
-  const parts = [`思考：${reasoning}`, `${(metrics.durationMs / 1000).toFixed(1)}s`];
+function formatMetrics(metrics: ModelRunMetrics, t: Translator): string {
+  const reasoning = `${metrics.reasoningRequested}/${metrics.reasoningProtocol}`;
+  const parts = [
+    t('metricsReasoningFormat').replace('{reasoning}', reasoning),
+    `${(metrics.durationMs / 1000).toFixed(1)}s`,
+  ];
   if (typeof metrics.tokensPerSecond === 'number') {
     parts.push(`${metrics.tokensPerSecond.toFixed(1)} tok/s (${metrics.speedSource ?? 'unavailable'})`);
   }

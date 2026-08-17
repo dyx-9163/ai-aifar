@@ -49,7 +49,7 @@ const emit = defineEmits<{
   updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
 
-const timelineEntries = computed(() => createTimelineEntries(props.items, props.events, props.turns));
+const timelineEntries = computed(() => createTimelineEntries(props.items, props.events, props.turns, props.t));
 const reasoningGroups = computed(() => groupReasoningItems(
   props.items.filter((item): item is ReasoningItem => item.kind === 'reasoning'),
 ));

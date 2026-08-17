@@ -276,6 +276,27 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
       });
     }
 
+    await page.evaluate(() => {
+      const rejectingWrite = () => Promise.reject(new Error('clipboard denied'));
+      if (navigator.clipboard) {
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          configurable: true,
+          value: rejectingWrite,
+        });
+        return;
+      }
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: rejectingWrite },
+      });
+    });
+    const reasoningCopy = rawPanel.getByTestId('reasoning-copy');
+    await reasoningCopy.click();
+    await expect(reasoningCopy).toHaveAttribute('data-copy-state', 'failed');
+    await expect(rawPanel.getByTestId('reasoning-copy-error')).toHaveText(
+      'Could not copy reasoning. Try again.',
+    );
+
     eventFixture = await page.evaluate(() => JSON.stringify((
       window as typeof window & { __task9Events?: unknown[] }
     ).__task9Events ?? []));

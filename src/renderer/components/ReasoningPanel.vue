@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onUnmounted, ref } from 'vue';
 import type { ReasoningDisplayMode, ReasoningItem, ReasoningOutputMode } from '../../shared/domain';
 import type { Translator } from '../i18n';
-import { selectReasoningContent } from '../modelControls';
+import { copyTextWithFeedback, selectReasoningContent } from '../modelControls';
 
 const props = defineProps<{
   raw?: ReasoningItem;
@@ -14,7 +14,8 @@ const props = defineProps<{
   t: Translator;
 }>();
 
-const copied = ref(false);
+const copyState = ref<'idle' | 'copied' | 'failed'>('idle');
+let resetCopyStateTimer: number | undefined;
 const selection = computed(() => selectReasoningContent(
   props.preference,
   [props.raw, props.summary].filter((item): item is ReasoningItem => Boolean(item)),
@@ -39,12 +40,24 @@ async function copySelectedReasoning(): Promise<void> {
   if (selection.value.availability !== 'available') {
     return;
   }
-  await navigator.clipboard.writeText(selection.value.text);
-  copied.value = true;
-  window.setTimeout(() => {
-    copied.value = false;
+  copyState.value = await copyTextWithFeedback(
+    (text) => navigator.clipboard.writeText(text),
+    selection.value.text,
+  );
+  if (resetCopyStateTimer !== undefined) {
+    window.clearTimeout(resetCopyStateTimer);
+  }
+  resetCopyStateTimer = window.setTimeout(() => {
+    copyState.value = 'idle';
+    resetCopyStateTimer = undefined;
   }, 1_500);
 }
+
+onUnmounted(() => {
+  if (resetCopyStateTimer !== undefined) {
+    window.clearTimeout(resetCopyStateTimer);
+  }
+});
 </script>
 
 <template>
@@ -82,10 +95,19 @@ async function copySelectedReasoning(): Promise<void> {
         type="button"
         class="reasoning-copy"
         data-testid="reasoning-copy"
+        :data-copy-state="copyState"
         @click="copySelectedReasoning"
       >
-        {{ copied ? t('copied') : t('copyReasoning') }}
+        {{ copyState === 'copied' ? t('copied') : t('copyReasoning') }}
       </button>
+      <p
+        v-if="copyState === 'failed'"
+        class="reasoning-unavailable"
+        data-testid="reasoning-copy-error"
+        role="status"
+      >
+        {{ t('copyReasoningFailed') }}
+      </p>
     </div>
   </details>
 </template>

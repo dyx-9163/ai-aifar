@@ -26,6 +26,7 @@ import {
 } from '../src/renderer/modelProfileForm';
 import {
   composerAction,
+  copyTextWithFeedback,
   groupReasoningItems,
   reasoningControls,
   reasoningMenuCommand,
@@ -438,6 +439,19 @@ describe('renderer state reducer', () => {
       mode: 'raw',
       text: '',
     });
+  });
+
+  it('returns localized failure feedback instead of rejecting when clipboard access fails', async () => {
+    await expect(copyTextWithFeedback(
+      async () => { throw new Error('clipboard denied'); },
+      'private reasoning',
+    )).resolves.toBe('failed');
+
+    const writeText = vi.fn(async () => undefined);
+    await expect(copyTextWithFeedback(writeText, 'private reasoning')).resolves.toBe('copied');
+    expect(writeText).toHaveBeenCalledWith('private reasoning');
+    expect(createTranslator('en-US')('copyReasoningFailed')).toBe('Could not copy reasoning. Try again.');
+    expect(createTranslator('zh-CN')('copyReasoningFailed')).toBe('复制思考内容失败，请重试。');
   });
 
   it('keeps an unavailable explicit reasoning choice visible and auto mode phase-only while running', () => {
@@ -1508,6 +1522,18 @@ describe('renderer state reducer', () => {
   });
 
   it('renders model run metrics as a compact timeline row', () => {
+    const runMetrics = {
+      reasoningRequested: 'enabled' as const,
+      reasoningProtocol: 'qwen' as const,
+      reasoningObserved: true,
+      responseSpeed: 'fast' as const,
+      durationMs: 2_000,
+      completionTokens: 40,
+      tokensPerSecond: 20,
+      speedSource: 'client' as const,
+      usageSource: 'server' as const,
+      finishReason: 'stop',
+    };
     expect(
       createTimelineEntries([], [
         {
@@ -1515,25 +1541,24 @@ describe('renderer state reducer', () => {
           threadId: 'thread-1',
           turnId: 'turn-1',
           sequence: 3,
-          metrics: {
-            reasoningRequested: 'enabled',
-            reasoningProtocol: 'qwen',
-            reasoningObserved: true,
-            responseSpeed: 'fast',
-            durationMs: 2_000,
-            completionTokens: 40,
-            tokensPerSecond: 20,
-            speedSource: 'client',
-            usageSource: 'server',
-            finishReason: 'stop',
-          },
+          metrics: runMetrics,
         },
-      ]),
+      ], [], createTranslator('en-US')),
     ).toContainEqual({
       id: 'model.metrics-turn-1-3',
       kind: 'metrics',
-      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
+      metrics: runMetrics,
+      text: 'Reasoning: enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
     });
+    expect(createTimelineEntries([], [{
+      type: 'model.metrics',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      sequence: 3,
+      metrics: runMetrics,
+    }], [], createTranslator('zh-CN'))[0]?.text).toBe(
+      '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
+    );
   });
 
   it('rebuilds active Inspector and timeline metrics from a reloaded snapshot', () => {
@@ -1572,10 +1597,11 @@ describe('renderer state reducer', () => {
 
     expect(app.activeTurns.value).toHaveLength(1);
     expect(app.activeTurns.value[0]?.metrics).toEqual(persistedMetrics);
-    expect(createTimelineEntries([], [], app.activeTurns.value)).toContainEqual({
+    expect(createTimelineEntries([], [], app.activeTurns.value, createTranslator('en-US'))).toContainEqual({
       id: 'model.metrics-turn-1-persisted',
       kind: 'metrics',
-      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
+      metrics: persistedMetrics,
+      text: 'Reasoning: enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
     });
   });
 

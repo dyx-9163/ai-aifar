@@ -86,6 +86,18 @@ export function selectReasoningContent(
   return { availability: 'empty', text: '' };
 }
 
+export async function copyTextWithFeedback(
+  writeText: (text: string) => Promise<void>,
+  text: string,
+): Promise<'copied' | 'failed'> {
+  try {
+    await writeText(text);
+    return 'copied';
+  } catch {
+    return 'failed';
+  }
+}
+
 export function reasoningMenuCommand(key: string): 'close' | 'keep' {
   return key === 'Escape' ? 'close' : 'keep';
 }
