@@ -412,6 +412,144 @@ describe('ModelTurnScheduler', () => {
     await flushMicrotasks();
   });
 
+  it('requeues all excess reservations when the live limit drops to one', async () => {
+    let limit = 1;
+    let blockNextEmptyModelOneSnapshot = false;
+    const blocker = deferred<void>();
+    const second = deferred<void>();
+    const third = deferred<void>();
+    const promotionWindow = deferred<void>();
+    const started: string[] = [];
+    const ran: string[] = [];
+    const queued: string[] = [];
+    const cancelled: Array<[string, boolean]> = [];
+    const positions: Array<Array<[string, number]>> = [];
+    const scheduler = new ModelTurnScheduler(() => limit, {
+      onQueued: (turn) => queued.push(turn.turnId),
+      onStarted: (turn) => started.push(turn.turnId),
+      onCancelled: (turn, wasRunning) => cancelled.push([turn.turnId, wasRunning]),
+      onQueuePositions: async (modelProfileId, snapshot) => {
+        if (modelProfileId !== 'model-1') return;
+        if (blockNextEmptyModelOneSnapshot && snapshot.size === 0) {
+          blockNextEmptyModelOneSnapshot = false;
+          await promotionWindow.promise;
+        }
+        positions.push([...snapshot.entries()]);
+      },
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => {
+      ran.push('turn-2');
+      await second.promise;
+    }));
+    scheduler.enqueue(task('turn-3', 'thread-3', 'model-1', async () => {
+      ran.push('turn-3');
+      await third.promise;
+    }));
+    await flushMicrotasks();
+
+    blockNextEmptyModelOneSnapshot = true;
+    limit = 3;
+    scheduler.updateLimit('model-1');
+    limit = 1;
+    scheduler.updateLimit('model-1');
+    scheduler.enqueue(task('model-2-turn', 'thread-model-2', 'model-2', async () => undefined));
+    await flushMicrotasks();
+
+    expect(started).toEqual(['blocker', 'model-2-turn']);
+
+    promotionWindow.resolve();
+    await flushMicrotasks();
+
+    expect(started).toEqual(['blocker', 'model-2-turn']);
+    expect(ran).toEqual([]);
+    expect(positions.at(-1)).toEqual([['turn-2', 1], ['turn-3', 2]]);
+    expect(queued).toEqual(['turn-2', 'turn-3']);
+    expect(cancelled).toEqual([]);
+    expect(scheduler.hasActiveThread('thread-2')).toBe(true);
+    expect(scheduler.hasActiveThread('thread-3')).toBe(true);
+    expect(() => scheduler.enqueue(
+      task('duplicate', 'thread-2', 'model-2', async () => undefined),
+    )).toThrow(/thread.*active/i);
+
+    limit = 3;
+    scheduler.updateLimit('model-1');
+    await flushMicrotasks();
+    expect(started).toEqual(['blocker', 'model-2-turn', 'turn-2', 'turn-3']);
+    expect(ran).toEqual(['turn-2', 'turn-3']);
+    expect(queued).toEqual(['turn-2', 'turn-3']);
+    expect(cancelled).toEqual([]);
+
+    blocker.resolve();
+    second.resolve();
+    third.resolve();
+    await flushMicrotasks();
+  });
+
+  it('starts only live capacity after a reservation-window limit drop to two', async () => {
+    let limit = 1;
+    let blockNextEmptySnapshot = false;
+    const blocker = deferred<void>();
+    const second = deferred<void>();
+    const third = deferred<void>();
+    const promotionWindow = deferred<void>();
+    const started: string[] = [];
+    const ran: string[] = [];
+    const queued: string[] = [];
+    const cancelled: Array<[string, boolean]> = [];
+    const positions: Array<Array<[string, number]>> = [];
+    const scheduler = new ModelTurnScheduler(() => limit, {
+      onQueued: (turn) => queued.push(turn.turnId),
+      onStarted: (turn) => started.push(turn.turnId),
+      onCancelled: (turn, wasRunning) => cancelled.push([turn.turnId, wasRunning]),
+      onQueuePositions: async (_modelProfileId, snapshot) => {
+        if (blockNextEmptySnapshot && snapshot.size === 0) {
+          blockNextEmptySnapshot = false;
+          await promotionWindow.promise;
+        }
+        positions.push([...snapshot.entries()]);
+      },
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => {
+      ran.push('turn-2');
+      await second.promise;
+    }));
+    scheduler.enqueue(task('turn-3', 'thread-3', 'model-1', async () => {
+      ran.push('turn-3');
+      await third.promise;
+    }));
+    await flushMicrotasks();
+
+    blockNextEmptySnapshot = true;
+    limit = 3;
+    scheduler.updateLimit('model-1');
+    limit = 2;
+    scheduler.updateLimit('model-1');
+    promotionWindow.resolve();
+    await flushMicrotasks();
+
+    expect(started).toEqual(['blocker', 'turn-2']);
+    expect(ran).toEqual(['turn-2']);
+    expect(positions.at(-1)).toEqual([['turn-3', 1]]);
+    expect(queued).toEqual(['turn-2', 'turn-3']);
+    expect(cancelled).toEqual([]);
+    expect(scheduler.hasActiveThread('thread-3')).toBe(true);
+
+    blocker.resolve();
+    await flushMicrotasks();
+    expect(started).toEqual(['blocker', 'turn-2', 'turn-3']);
+    expect(ran).toEqual(['turn-2', 'turn-3']);
+    expect(queued).toEqual(['turn-2', 'turn-3']);
+    expect(cancelled).toEqual([]);
+
+    second.resolve();
+    third.resolve();
+    await flushMicrotasks();
+  });
+
   it('does not bypass an asynchronous onQueued callback during reentrant limit updates', async () => {
     let limit = 1;
     const blocker = deferred<void>();

@@ -170,8 +170,16 @@ export class ModelTurnScheduler {
     }
 
     await this.notifyQueuePositions(modelProfileId);
+    const excess: ScheduledTurn[] = [];
     for (const slot of promoted) {
       if (this.reserved.get(slot.turn.turnId) !== slot) {
+        continue;
+      }
+
+      if (this.runningCount(modelProfileId) >= this.effectiveLimit(modelProfileId)) {
+        this.reserved.delete(slot.turn.turnId);
+        this.releaseSlot(slot.turn);
+        excess.push(slot.turn);
         continue;
       }
 
@@ -179,6 +187,11 @@ export class ModelTurnScheduler {
       this.running.set(slot.turn.turnId, slot);
       await this.invoke(() => this.callbacks.onStarted(slot.turn));
       void this.execute(slot);
+    }
+
+    if (excess.length > 0) {
+      this.queueFor(modelProfileId).unshift(...excess);
+      await this.notifyQueuePositions(modelProfileId);
     }
   }
 
@@ -197,6 +210,16 @@ export class ModelTurnScheduler {
     if (turnIds?.size === 0) {
       this.runningByModel.delete(turn.modelProfileId);
     }
+  }
+
+  private runningCount(modelProfileId: string): number {
+    let count = 0;
+    for (const { turn } of this.running.values()) {
+      if (turn.modelProfileId === modelProfileId) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   private async execute(slot: TurnSlot): Promise<void> {
