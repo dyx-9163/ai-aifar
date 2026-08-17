@@ -1,7 +1,7 @@
 import { ReadableStream } from 'node:stream/web';
 import { describe, expect, it } from 'vitest';
 import { buildChatMessages } from '../src/agent/chatContext';
-import { streamChatCompletion } from '../src/agent/modelProvider';
+import { streamChatCompletion, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import type { RuntimeModelProfile } from '../src/agent/database';
 
 const profile: RuntimeModelProfile = {
@@ -29,8 +29,15 @@ const profile: RuntimeModelProfile = {
   updatedAt: '2026-08-17T00:00:00.000Z',
 };
 
+const ignoreHandlers: ModelStreamHandlers = {
+  onAnswerDelta: () => undefined,
+  onRawReasoningDelta: () => undefined,
+  onReasoningSummaryDelta: () => undefined,
+  onPhase: () => undefined,
+};
+
 describe('OpenAI-compatible model provider', () => {
-  it('streams chat completion deltas and requests thinking off by default', async () => {
+  it('streams answer deltas without inventing reasoning parameters for an unsupported profile', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
       'data: {"choices":[{"delta":{"content":" there"}}]}\n\n',
@@ -49,7 +56,7 @@ describe('OpenAI-compatible model provider', () => {
     const metrics = await streamChatCompletion(
       profile,
       [{ role: 'user', content: 'hello' }],
-      (delta) => deltas.push(delta),
+      { ...ignoreHandlers, onAnswerDelta: (delta) => deltas.push(delta) },
       new AbortController().signal,
       fetchImpl,
       () => 1_000,
@@ -66,10 +73,13 @@ describe('OpenAI-compatible model provider', () => {
     });
     expect(requests[0]?.url).toBe('http://127.0.0.1:8080/v1/chat/completions');
     expect((requests[0]?.init.headers as Record<string, string>).Authorization).toBe('Bearer local-not-used');
-    expect(JSON.parse(String(requests[0]?.init.body)).chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(JSON.parse(String(requests[0]?.init.body)).chat_template_kwargs).toBeUndefined();
   });
 
-  it('sends qwen thinking parameters only when the profile enables qwen reasoning', async () => {
+  it.each([
+    ['enabled', true],
+    ['disabled', false],
+  ] as const)('maps qwen toggle mode %s to enable_thinking=%s', async (mode, enableThinking) => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       requests.push(init ?? {});
@@ -83,18 +93,18 @@ describe('OpenAI-compatible model provider', () => {
       {
         ...profile,
         capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
+        reasoning: { mode, protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
-      () => undefined,
+      ignoreHandlers,
       new AbortController().signal,
       fetchImpl,
     );
 
-    expect(JSON.parse(String(requests[0]?.body)).chat_template_kwargs).toEqual({ enable_thinking: true });
+    expect(JSON.parse(String(requests[0]?.body)).chat_template_kwargs).toEqual({ enable_thinking: enableThinking });
   });
 
-  it('sends openai reasoning effort only when the profile enables openai reasoning', async () => {
+  it('sends any declared openai reasoning effort including max', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       requests.push(init ?? {});
@@ -107,16 +117,37 @@ describe('OpenAI-compatible model provider', () => {
     await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'effort', effortOptions: ['low', 'medium', 'high'], outputModes: ['summary'] } },
-        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'high', display: 'auto' },
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'effort', effortOptions: ['low', 'medium', 'high', 'max'], outputModes: ['summary'] } },
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'max', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
-      () => undefined,
+      ignoreHandlers,
       new AbortController().signal,
       fetchImpl,
     );
 
-    expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('high');
+    expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('max');
+  });
+
+  it('rejects an undeclared reasoning effort before fetch', async () => {
+    let fetchCalls = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      fetchCalls += 1;
+      return new Response(null, { status: 200 });
+    };
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'effort', effortOptions: ['low', 'high'], outputModes: ['summary'] } },
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'max', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow('does not support reasoning effort "max"');
+    expect(fetchCalls).toBe(0);
   });
 
   it('records requested fast response speed without inventing provider timing', async () => {
@@ -129,7 +160,7 @@ describe('OpenAI-compatible model provider', () => {
     const metrics = await streamChatCompletion(
       { ...profile, responseSpeed: 'fast' },
       [{ role: 'user', content: 'hello' }],
-      () => undefined,
+      ignoreHandlers,
       new AbortController().signal,
       fetchImpl,
     );
@@ -140,7 +171,7 @@ describe('OpenAI-compatible model provider', () => {
     });
   });
 
-  it('emits a safe visible notice when a reasoning model returns no displayable content', async () => {
+  it('keeps raw reasoning out of the answer when the provider returns no answer', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"reasoning_content":"hidden chain of thought"}}]}\n\n',
       'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
@@ -148,7 +179,8 @@ describe('OpenAI-compatible model provider', () => {
     ];
     const fetchImpl = async (): Promise<Response> =>
       new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
-    const deltas: string[] = [];
+    const answers: string[] = [];
+    const raw: string[] = [];
 
     const metrics = await streamChatCompletion(
       {
@@ -157,25 +189,32 @@ describe('OpenAI-compatible model provider', () => {
         reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
-      (delta) => deltas.push(delta),
+      {
+        ...ignoreHandlers,
+        onAnswerDelta: (delta) => answers.push(delta),
+        onRawReasoningDelta: (delta) => raw.push(delta),
+      },
       new AbortController().signal,
       fetchImpl,
     );
 
-    expect(deltas.join('')).toContain('模型只返回了思考内容');
-    expect(deltas.join('')).not.toContain('hidden chain of thought');
+    expect(answers).toEqual([]);
+    expect(raw).toEqual(['hidden chain of thought']);
     expect(metrics.reasoningObserved).toBe(true);
   });
 
-  it('reports reasoning and answering phases without exposing hidden reasoning text', async () => {
+  it('streams raw reasoning, native summary, and answer through independent handlers', async () => {
     const chunks = [
-      'data: {"choices":[{"delta":{"reasoning_content":"private thought"}}]}\n\n',
-      'data: {"choices":[{"delta":{"content":"visible answer"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"检查输入"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_summary":"已检查输入"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"最终答案"}}]}\n\n',
       'data: [DONE]\n\n',
     ];
     const fetchImpl = async (): Promise<Response> =>
       new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
-    const deltas: string[] = [];
+    const answer: string[] = [];
+    const raw: string[] = [];
+    const summary: string[] = [];
     const phases: string[] = [];
 
     await streamChatCompletion(
@@ -185,23 +224,62 @@ describe('OpenAI-compatible model provider', () => {
         reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
-      (delta) => deltas.push(delta),
+      {
+        onAnswerDelta: (delta) => answer.push(delta),
+        onRawReasoningDelta: (delta) => raw.push(delta),
+        onReasoningSummaryDelta: (delta) => summary.push(delta),
+        onPhase: (phase) => phases.push(phase),
+      },
       new AbortController().signal,
       fetchImpl,
       () => 1_000,
-      (phase) => phases.push(phase),
     );
 
     expect(phases).toEqual(['reasoning', 'answering']);
-    expect(deltas).toEqual(['visible answer']);
+    expect(raw).toEqual(['检查输入']);
+    expect(summary).toEqual(['已检查输入']);
+    expect(answer).toEqual(['最终答案']);
   });
 
-  it('retries once without optional usage and reasoning parameters when rejected', async () => {
+  it('does not retry a rejected reasoning parameter without reasoning', async () => {
+    const requests: RequestInit[] = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(init ?? {});
+      return new Response('reasoning_effort is unsupported; Authorization: Bearer local-not-used', { status: 400 });
+    };
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: {
+          ...profile.capabilities,
+          reasoning: { inputMode: 'effort', effortOptions: ['max'], outputModes: ['summary'] },
+          usage: { tokens: true, reasoningTokens: true },
+        },
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'max', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain('HTTP 400');
+      expect(message).toContain('reasoning_effort is unsupported');
+      expect(message).not.toContain('local-not-used');
+      expect(message).not.toContain('Bearer');
+      return true;
+    });
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('max');
+  });
+
+  it('retries once without stream_options while preserving reasoning parameters', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       requests.push(init ?? {});
       if (requests.length === 1) {
-        return new Response('unsupported parameter', { status: 400 });
+        return new Response('unsupported parameter: stream_options.include_usage', { status: 400 });
       }
       return new Response(
         ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
@@ -220,7 +298,7 @@ describe('OpenAI-compatible model provider', () => {
         reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
-      () => undefined,
+      ignoreHandlers,
       new AbortController().signal,
       fetchImpl,
     );
@@ -230,8 +308,38 @@ describe('OpenAI-compatible model provider', () => {
     const secondBody = JSON.parse(String(requests[1]?.body));
     expect(firstBody.chat_template_kwargs).toEqual({ enable_thinking: true });
     expect(firstBody.stream_options).toEqual({ include_usage: true });
-    expect(secondBody.chat_template_kwargs).toBeUndefined();
+    expect(secondBody.chat_template_kwargs).toEqual({ enable_thinking: true });
     expect(secondBody.stream_options).toBeUndefined();
+  });
+
+  it('supports the reasoning field alias without mixing it into the answer', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"reasoning":"raw alias"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const raw: string[] = [];
+    const answer: string[] = [];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      {
+        ...ignoreHandlers,
+        onRawReasoningDelta: (delta) => raw.push(delta),
+        onAnswerDelta: (delta) => answer.push(delta),
+      },
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(raw).toEqual(['raw alias']);
+    expect(answer).toEqual([]);
   });
 
   it('extracts finish reason and token speed from streamed provider metadata', async () => {
@@ -251,7 +359,7 @@ describe('OpenAI-compatible model provider', () => {
     const metrics = await streamChatCompletion(
       profile,
       [{ role: 'user', content: 'hello' }],
-      () => undefined,
+      ignoreHandlers,
       new AbortController().signal,
       fetchImpl,
       nowMs,
@@ -288,7 +396,7 @@ describe('OpenAI-compatible model provider', () => {
         reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
-      () => undefined,
+      ignoreHandlers,
       new AbortController().signal,
       fetchImpl,
     );

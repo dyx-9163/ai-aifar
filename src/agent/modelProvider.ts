@@ -1,5 +1,6 @@
 import type { RuntimeModelProfile } from './database.js';
 import type { MetricSource, ModelRunMetrics, ModelRunPhase } from '../shared/domain.js';
+import { validateReasoningSelection } from './modelCapabilities.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -8,19 +9,34 @@ export interface ChatMessage {
 
 export type FetchLike = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+export interface ModelStreamHandlers {
+  onAnswerDelta(text: string): Promise<void> | void;
+  onRawReasoningDelta(text: string): Promise<void> | void;
+  onReasoningSummaryDelta(text: string): Promise<void> | void;
+  onPhase(phase: ModelRunPhase): Promise<void> | void;
+}
+
 type StreamedMetrics = Partial<ModelRunMetrics> & {
   serverTokensPerSecond?: number;
+};
+
+type ParsedStreamChunk = {
+  answerDelta?: string;
+  rawReasoningDelta?: string;
+  reasoningSummaryDelta?: string;
+  finishReason?: string;
+  usage?: StreamedMetrics;
 };
 
 export async function streamChatCompletion(
   profile: RuntimeModelProfile,
   messages: ChatMessage[],
-  emitDelta: (delta: string) => void | Promise<void>,
+  handlers: ModelStreamHandlers,
   signal: AbortSignal,
   fetchImpl: FetchLike = fetch,
   nowMs: () => number = () => Date.now(),
-  emitProgress: (phase: ModelRunPhase) => void | Promise<void> = () => undefined,
 ): Promise<ModelRunMetrics> {
+  validateReasoningSelection(profile);
   const startedAt = nowMs();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -32,32 +48,33 @@ export async function streamChatCompletion(
 
   const response = await requestChatCompletion(profile, messages, headers, signal, fetchImpl);
 
-  if (!response.ok) {
-    throw new Error(`Model request failed with HTTP ${response.status}.`);
-  }
-
   if (!response.body) {
     throw new Error('Model response did not include a readable stream.');
   }
 
   let firstTokenAt: number | undefined;
-  let visibleDeltaCount = 0;
+  const trackFirstToken = () => {
+    firstTokenAt ??= nowMs();
+  };
   const streamedMetrics = await readSseDeltas(
     response.body,
-    async (delta) => {
-      firstTokenAt ??= nowMs();
-      visibleDeltaCount += 1;
-      await emitDelta(delta);
+    {
+      onAnswerDelta: async (text) => {
+        trackFirstToken();
+        await handlers.onAnswerDelta(text);
+      },
+      onRawReasoningDelta: async (text) => {
+        trackFirstToken();
+        await handlers.onRawReasoningDelta(text);
+      },
+      onReasoningSummaryDelta: async (text) => {
+        trackFirstToken();
+        await handlers.onReasoningSummaryDelta(text);
+      },
+      onPhase: handlers.onPhase,
     },
     signal,
-    emitProgress,
   );
-  if (visibleDeltaCount === 0 && streamedMetrics.reasoningObserved) {
-    firstTokenAt ??= nowMs();
-    await emitDelta(
-      '模型只返回了思考内容，没有返回可展示回答。请先关闭思考强度，或在模型服务中确认该私有化模型的模板会输出 content 字段。',
-    );
-  }
   const durationMs = Math.max(1, nowMs() - startedAt);
   const completionTokens = streamedMetrics.completionTokens;
   const serverRate = streamedMetrics.serverTokensPerSecond;
@@ -99,9 +116,8 @@ export async function testModelProfile(profile: RuntimeModelProfile, fetchImpl: 
 
 async function readSseDeltas(
   body: ReadableStream<Uint8Array>,
-  emitDelta: (delta: string) => void | Promise<void>,
+  handlers: ModelStreamHandlers,
   signal: AbortSignal,
-  emitProgress: (phase: ModelRunPhase) => void | Promise<void>,
 ): Promise<StreamedMetrics> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -131,30 +147,36 @@ async function readSseDeltas(
         continue;
       }
 
-      const chunkMetrics = parseMetrics(data);
-      if (chunkMetrics.reasoningObserved && currentPhase === 'connecting') {
+      const chunk = parseStreamChunk(data);
+      const hasReasoning = chunk.rawReasoningDelta !== undefined || chunk.reasoningSummaryDelta !== undefined;
+      if (hasReasoning && currentPhase === 'connecting') {
         currentPhase = 'reasoning';
-        await emitProgress(currentPhase);
+        await handlers.onPhase(currentPhase);
       }
-      const delta = parseDelta(data);
-      if (delta) {
+      if (chunk.rawReasoningDelta !== undefined) {
+        await handlers.onRawReasoningDelta(chunk.rawReasoningDelta);
+      }
+      if (chunk.reasoningSummaryDelta !== undefined) {
+        await handlers.onReasoningSummaryDelta(chunk.reasoningSummaryDelta);
+      }
+      if (chunk.answerDelta !== undefined) {
         if (currentPhase !== 'answering') {
           currentPhase = 'answering';
-          await emitProgress(currentPhase);
+          await handlers.onPhase(currentPhase);
         }
-        await emitDelta(delta);
+        await handlers.onAnswerDelta(chunk.answerDelta);
       }
-      Object.assign(metrics, chunkMetrics);
+      if (hasReasoning) {
+        metrics.reasoningObserved = true;
+      }
+      if (chunk.finishReason !== undefined) {
+        metrics.finishReason = chunk.finishReason;
+      }
+      Object.assign(metrics, chunk.usage);
     }
   }
 
   return metrics;
-}
-
-function parseDelta(data: string): string | undefined {
-  const parsed = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
-  const content = parsed.choices?.[0]?.delta?.content;
-  return typeof content === 'string' ? content : undefined;
 }
 
 async function requestChatCompletion(
@@ -164,28 +186,35 @@ async function requestChatCompletion(
   signal: AbortSignal,
   fetchImpl: FetchLike,
 ): Promise<Response> {
-  const send = (includeUsage: boolean, includeReasoning: boolean) =>
+  const send = (includeUsage: boolean) =>
     fetchImpl(`${profile.baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers,
       signal,
-      body: JSON.stringify(buildChatCompletionBody(profile, messages, includeUsage, includeReasoning)),
+      body: JSON.stringify(buildChatCompletionBody(profile, messages, includeUsage)),
     });
 
-  const first = await send(true, true);
-  if (first.ok || (first.status !== 400 && first.status !== 422)) {
+  const first = await send(true);
+  if (first.ok) {
     return first;
   }
 
-  const retry = await send(false, false);
-  return retry.ok ? retry : first;
+  const firstBody = await readErrorBody(first);
+  if (profile.capabilities.usage.tokens && isStreamUsageCompatibilityError(first.status, firstBody)) {
+    const retry = await send(false);
+    if (retry.ok) {
+      return retry;
+    }
+    throw await modelRequestError(retry, profile.apiKey);
+  }
+
+  throw modelRequestErrorFromBody(first.status, firstBody, profile.apiKey);
 }
 
 function buildChatCompletionBody(
   profile: RuntimeModelProfile,
   messages: ChatMessage[],
   includeUsage: boolean,
-  includeReasoning: boolean,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: profile.model,
@@ -198,32 +227,31 @@ function buildChatCompletionBody(
     body.stream_options = { include_usage: true };
   }
 
-  if (includeReasoning) {
-    if (profile.reasoning.mode === 'disabled') {
-      body.chat_template_kwargs = { enable_thinking: false };
-    } else if (shouldSendReasoning(profile)) {
-      if (profile.reasoning.protocol === 'qwen') {
-        body.chat_template_kwargs = { enable_thinking: true };
-      }
-      if (profile.reasoning.protocol === 'openai') {
-        body.reasoning_effort = profile.reasoning.effort;
-      }
-    }
+  if (profile.capabilities.reasoning.inputMode === 'toggle' && profile.reasoning.protocol === 'qwen') {
+    body.chat_template_kwargs = { enable_thinking: profile.reasoning.mode !== 'disabled' };
+  }
+  if (
+    profile.capabilities.reasoning.inputMode === 'effort'
+    && profile.reasoning.protocol === 'openai'
+    && profile.reasoning.mode !== 'disabled'
+  ) {
+    body.reasoning_effort = profile.reasoning.effort;
   }
 
   return body;
 }
 
-function shouldSendReasoning(profile: RuntimeModelProfile): boolean {
-  if (profile.capabilities.reasoning.inputMode === 'unsupported' || profile.reasoning.protocol === 'none' || profile.reasoning.protocol === 'custom') {
-    return false;
-  }
-  return profile.reasoning.mode === 'enabled' || profile.reasoning.mode === 'auto';
-}
-
-function parseMetrics(data: string): StreamedMetrics {
+function parseStreamChunk(data: string): ParsedStreamChunk {
   const parsed = JSON.parse(data) as {
-    choices?: Array<{ delta?: { reasoning_content?: string; reasoning?: string }; finish_reason?: string | null }>;
+    choices?: Array<{
+      delta?: {
+        content?: string;
+        reasoning_content?: string;
+        reasoning?: string;
+        reasoning_summary?: string;
+      };
+      finish_reason?: string | null;
+    }>;
     usage?: {
       prompt_tokens?: number;
       completion_tokens?: number;
@@ -237,31 +265,66 @@ function parseMetrics(data: string): StreamedMetrics {
     };
   };
 
-  const metrics: StreamedMetrics = {};
+  const usage: StreamedMetrics = {};
   const delta = parsed.choices?.[0]?.delta;
-  if (typeof delta?.reasoning_content === 'string' || typeof delta?.reasoning === 'string') {
-    metrics.reasoningObserved = true;
-  }
+  const chunk: ParsedStreamChunk = {};
+  if (typeof delta?.content === 'string') chunk.answerDelta = delta.content;
+  if (typeof delta?.reasoning_content === 'string') chunk.rawReasoningDelta = delta.reasoning_content;
+  else if (typeof delta?.reasoning === 'string') chunk.rawReasoningDelta = delta.reasoning;
+  if (typeof delta?.reasoning_summary === 'string') chunk.reasoningSummaryDelta = delta.reasoning_summary;
   const finishReason = parsed.choices?.[0]?.finish_reason;
   if (typeof finishReason === 'string') {
-    metrics.finishReason = finishReason;
+    chunk.finishReason = finishReason;
   }
   if (typeof parsed.usage?.prompt_tokens === 'number') {
-    metrics.promptTokens = parsed.usage.prompt_tokens;
+    usage.promptTokens = parsed.usage.prompt_tokens;
   }
   if (typeof parsed.usage?.completion_tokens === 'number') {
-    metrics.completionTokens = parsed.usage.completion_tokens;
+    usage.completionTokens = parsed.usage.completion_tokens;
   }
   if (typeof parsed.usage?.total_tokens === 'number') {
-    metrics.totalTokens = parsed.usage.total_tokens;
+    usage.totalTokens = parsed.usage.total_tokens;
   }
   if (typeof parsed.usage?.completion_tokens_details?.reasoning_tokens === 'number') {
-    metrics.reasoningTokens = parsed.usage.completion_tokens_details.reasoning_tokens;
+    usage.reasoningTokens = parsed.usage.completion_tokens_details.reasoning_tokens;
   }
   if (typeof parsed.timings?.predicted_per_second === 'number') {
-    metrics.serverTokensPerSecond = parsed.timings.predicted_per_second;
+    usage.serverTokensPerSecond = parsed.timings.predicted_per_second;
   }
-  return metrics;
+  if (Object.keys(usage).length > 0) chunk.usage = usage;
+  return chunk;
+}
+
+async function modelRequestError(response: Response, apiKey: string | undefined): Promise<Error> {
+  return modelRequestErrorFromBody(response.status, await readErrorBody(response), apiKey);
+}
+
+function modelRequestErrorFromBody(status: number, body: string, apiKey: string | undefined): Error {
+  const excerpt = redactResponseExcerpt(body, apiKey);
+  return new Error(`Model request failed with HTTP ${status}${excerpt ? `: ${excerpt}` : '.'}`);
+}
+
+async function readErrorBody(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch {
+    return '';
+  }
+}
+
+function isStreamUsageCompatibilityError(status: number, body: string): boolean {
+  if (status !== 400 && status !== 422) return false;
+  const normalized = body.toLowerCase();
+  return normalized.includes('stream_options') || normalized.includes('include_usage');
+}
+
+function redactResponseExcerpt(body: string, apiKey: string | undefined): string {
+  let redacted = body.replace(/\s+/g, ' ').trim();
+  if (apiKey) redacted = redacted.split(apiKey).join('[REDACTED]');
+  redacted = redacted
+    .replace(/authorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi, '[REDACTED]')
+    .replace(/bearer\s+[^\s,;]+/gi, '[REDACTED]');
+  return redacted.slice(0, 320);
 }
 
 function throwIfAborted(signal: AbortSignal): void {

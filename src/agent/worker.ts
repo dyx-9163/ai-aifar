@@ -191,11 +191,13 @@ async function runModelTurn(
         },
         ...history,
       ],
-      async (delta) => next({ type: 'message.delta', text: delta }),
+      {
+        onAnswerDelta: async (delta) => next({ type: 'message.delta', text: delta }),
+        onRawReasoningDelta: () => undefined,
+        onReasoningSummaryDelta: () => undefined,
+        onPhase: async (phase) => next({ type: 'model.progress', phase }),
+      },
       signal,
-      undefined,
-      undefined,
-      async (phase) => next({ type: 'model.progress', phase }),
     );
     await next({ type: 'model.metrics', metrics });
     await next({ type: 'turn.completed' });
