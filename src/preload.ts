@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.invoke('desktop:request', { type: 'thread.setModel', threadId, modelProfileId }),
   startTurn: (threadId: string, text: string, modelProfileId?: string) =>
     ipcRenderer.invoke('desktop:request', { type: 'turn.start', threadId, text, modelProfileId }),
+  cancelTurn: (threadId: string, turnId: string) => ipcRenderer.invoke('desktop:request', { type: 'turn.cancel', threadId, turnId }),
   respondApproval: (approvalId: string, approved: boolean) =>
     ipcRenderer.invoke('desktop:request', { type: 'approval.respond', approvalId, approved }),
   setLanguage: (language: LanguagePreference) => ipcRenderer.invoke('desktop:request', { type: 'language.set', language }),

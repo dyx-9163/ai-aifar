@@ -56,6 +56,25 @@ describe('renderer state reducer', () => {
     expect(second.events).toHaveLength(2);
   });
 
+  it('tracks the active running turn and clears it after completion', () => {
+    const running = reduceEvent(emptyState(), {
+      type: 'turn.started',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      sequence: 1,
+      title: 'run',
+    });
+    expect(running.activeTurnId).toBe('turn-1');
+
+    const completed = reduceEvent(running, {
+      type: 'turn.completed',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      sequence: 2,
+    });
+    expect(completed.activeTurnId).toBeUndefined();
+  });
+
   it('marks a required approval as pending', () => {
     const state = reduceEvent(emptyState(), approvalEvent());
 
@@ -154,6 +173,52 @@ describe('renderer state reducer', () => {
     ]);
   });
 
+  it('does not duplicate a live assistant message when the same turn already has persisted assistant text', () => {
+    const items: Item[] = [
+      {
+        id: 'item-turn-1-assistant-1',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: '收到。',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      },
+      {
+        id: 'item-turn-1-assistant-live',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: '收到。',
+        createdAt: '2026-08-17T00:00:02.000Z',
+      },
+    ];
+
+    expect(createTimelineEntries(items, []).filter((entry) => entry.kind === 'message')).toMatchObject([
+      { role: 'assistant', text: '收到。' },
+    ]);
+  });
+
+  it('renders turn failures in the conversation timeline', () => {
+    expect(
+      createTimelineEntries([], [
+        {
+          type: 'turn.failed',
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          sequence: 3,
+          error: 'Model endpoint returned HTTP 503.',
+        },
+      ]),
+    ).toContainEqual({
+      id: 'turn.failed-turn-1-3',
+      kind: 'tool',
+      status: 'failed',
+      text: 'Model endpoint returned HTTP 503.',
+    });
+  });
+
   it('exposes runtime settings updates that refresh the local snapshot', async () => {
     const originalWindow = globalThis.window;
     const snapshot = {
@@ -195,6 +260,38 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('cancels the active running turn through the desktop bridge', async () => {
+    const originalWindow = globalThis.window;
+    let cancelled: { threadId: string; turnId: string } | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          cancelTurn: async (threadId: string, turnId: string) => {
+            cancelled = { threadId, turnId };
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+        activeTurnId: 'turn-1',
+        busy: true,
+      };
+
+      await app.cancelTurn();
+
+      expect(cancelled).toEqual({ threadId: 'thread-1', turnId: 'turn-1' });
+      expect(app.state.value.busy).toBe(false);
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('renders model run metrics as a compact timeline row', () => {
     expect(
       createTimelineEntries([], [
@@ -204,10 +301,14 @@ describe('renderer state reducer', () => {
           turnId: 'turn-1',
           sequence: 3,
           metrics: {
-            thinkingEnabled: false,
+            reasoningRequested: 'enabled',
+            reasoningProtocol: 'qwen',
+            reasoningObserved: true,
             durationMs: 2_000,
             completionTokens: 40,
             tokensPerSecond: 20,
+            speedSource: 'client',
+            usageSource: 'server',
             finishReason: 'stop',
           },
         },
@@ -215,7 +316,7 @@ describe('renderer state reducer', () => {
     ).toContainEqual({
       id: 'model.metrics-turn-1-3',
       kind: 'metrics',
-      text: '思考：关 · 2.0s · 20.0 tok/s · 40 tokens · stop',
+      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
     });
   });
 

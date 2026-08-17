@@ -23,6 +23,7 @@ declare global {
       deleteThread(threadId: string): Promise<void>;
       setThreadModel(threadId: string, modelProfileId?: string): Promise<void>;
       startTurn(threadId: string, text: string, modelProfileId?: string): Promise<{ turnId: string }>;
+      cancelTurn(threadId: string, turnId: string): Promise<void>;
       respondApproval(approvalId: string, approved: boolean): Promise<void>;
       setLanguage(language: LanguagePreference): Promise<void>;
       updateSettings(settings: RuntimeSettingsInput): Promise<AppSettings>;

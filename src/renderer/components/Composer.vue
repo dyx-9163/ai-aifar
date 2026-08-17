@@ -1,17 +1,24 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import type { Translator } from '../i18n';
 
-defineProps<{
+const props = defineProps<{
   busy: boolean;
+  t: Translator;
 }>();
 
 const emit = defineEmits<{
   submit: [text: string];
+  cancel: [];
 }>();
 
 const text = ref('');
 
 function submit(): void {
+  if (props.busy) {
+    emit('cancel');
+    return;
+  }
   const value = text.value.trim();
   if (!value) {
     return;
@@ -35,13 +42,13 @@ function handleKeydown(event: KeyboardEvent): void {
       class="composer-input"
       data-testid="composer-input"
       rows="3"
-      placeholder="Ask the local agent..."
-      :disabled="busy"
-      @keydown="handleKeydown"
-    />
-    <button class="send-button" type="submit" data-testid="composer-send" :disabled="busy || !text.trim()" title="Send prompt">
-      <span aria-hidden="true">></span>
-      <span>Send</span>
+      :placeholder="t('askPlaceholder')"
+    :disabled="busy"
+    @keydown="handleKeydown"
+  />
+    <button class="send-button" type="submit" data-testid="composer-send" :disabled="!busy && !text.trim()" :title="busy ? t('stop') : t('send')">
+      <span aria-hidden="true">{{ busy ? '■' : '>' }}</span>
+      <span>{{ busy ? t('stop') : t('send') }}</span>
     </button>
   </form>
 </template>

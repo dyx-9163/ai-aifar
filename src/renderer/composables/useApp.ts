@@ -82,6 +82,16 @@ export function useApp() {
     state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
   }
 
+  async function cancelTurn(): Promise<void> {
+    const threadId = state.value.activeThreadId;
+    const turnId = state.value.activeTurnId;
+    if (!threadId || !turnId) {
+      return;
+    }
+    await window.desktop.cancelTurn(threadId, turnId);
+    state.value = { ...state.value, busy: false, activeTurnId: undefined };
+  }
+
   async function respondApproval(approved: boolean): Promise<void> {
     const approval = state.value.pendingApproval;
     if (!approval) {
@@ -138,6 +148,7 @@ export function useApp() {
     createThread,
     deleteThread,
     startTurn,
+    cancelTurn,
     respondApproval,
     saveModelProfile,
     deleteModelProfile,
