@@ -6,9 +6,19 @@ import { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot, emptyState,
 import { createTranslator, isLanguagePreference } from '../src/renderer/i18n';
 import { renderMarkdown } from '../src/renderer/markdown';
 import {
+  buildModelProfileInput,
+  connectionTestStateForFingerprint,
+  effortValidationIssue,
+  modelProfileFormFingerprint,
+  reconcileEffortSelection,
+  runModelProfileSave,
+  type ModelProfileFormValues,
+} from '../src/renderer/modelProfileForm';
+import {
   composerAction,
   groupReasoningItems,
   reasoningControls,
+  reasoningMenuCommand,
   selectReasoningContent,
   shouldShowReasoningPanel,
   threadRuntimePresentation,
@@ -81,6 +91,165 @@ afterEach(() => {
 });
 
 describe('renderer state reducer', () => {
+  it('patches only exposed model fields while preserving existing custom capabilities', () => {
+    const existing: ModelProfile = {
+      ...modelProfileFixture({
+        text: true,
+        vision: true,
+        longContext: true,
+        reasoning: {
+          inputMode: 'custom',
+          effortOptions: ['vendor-low', 'vendor-max'],
+          outputModes: ['raw'],
+          defaultEffort: 'vendor-low',
+        },
+        concurrency: { defaultLimit: 3, configurable: false, maxLimit: 9 },
+        streaming: false,
+        usage: { tokens: false, reasoningTokens: false },
+      }),
+      reasoning: { mode: 'enabled', protocol: 'custom', effort: 'vendor-low', display: 'raw' },
+      maxConcurrency: 3,
+      responseSpeed: 'quality',
+    };
+    const form: ModelProfileFormValues = {
+      id: existing.id,
+      name: 'Custom endpoint',
+      baseUrl: existing.baseUrl,
+      model: existing.model,
+      apiKey: '',
+      isDefault: existing.isDefault,
+      reasoningMode: 'enabled',
+      reasoningProtocol: 'custom',
+      reasoningEffort: 'vendor-max',
+      profileReasoningDisplay: 'raw',
+      reasoningInputMode: 'custom',
+      effortOptions: ['vendor-low', 'vendor-max'],
+      defaultEffort: 'vendor-low',
+      rawOutput: true,
+      summaryOutput: true,
+      maxConcurrency: 4,
+    };
+
+    const input = buildModelProfileInput(form, existing);
+
+    expect(input).toMatchObject({
+      provider: existing.provider,
+      capabilities: {
+        text: true,
+        vision: true,
+        longContext: true,
+        reasoning: {
+          inputMode: 'custom',
+          effortOptions: ['vendor-low', 'vendor-max'],
+          outputModes: ['raw', 'summary'],
+          defaultEffort: 'vendor-low',
+        },
+        concurrency: { defaultLimit: 3, configurable: false, maxLimit: 9 },
+        streaming: false,
+        usage: { tokens: false, reasoningTokens: false },
+      },
+      reasoning: { mode: 'enabled', protocol: 'custom', effort: 'vendor-max', display: 'raw' },
+      maxConcurrency: 4,
+      responseSpeed: 'quality',
+    });
+    expect(input.apiKey).toBeUndefined();
+    (input.capabilities?.reasoning?.effortOptions as string[]).push('mutated');
+    expect(existing.capabilities.reasoning.effortOptions).toEqual(['vendor-low', 'vendor-max']);
+  });
+
+  it('uses canonical hidden capability defaults only for a new profile', () => {
+    const input = buildModelProfileInput({
+      name: 'New endpoint',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'new-model',
+      apiKey: '',
+      isDefault: true,
+      reasoningMode: 'disabled',
+      reasoningProtocol: 'none',
+      reasoningEffort: '',
+      profileReasoningDisplay: 'auto',
+      reasoningInputMode: 'unsupported',
+      effortOptions: [],
+      defaultEffort: '',
+      rawOutput: false,
+      summaryOutput: false,
+      maxConcurrency: 1,
+    });
+
+    expect(input.capabilities).toMatchObject({
+      text: true,
+      vision: false,
+      longContext: false,
+      concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
+      streaming: true,
+      usage: { tokens: true, reasoningTokens: true },
+    });
+  });
+
+  it('selects a persisted fallback when effort options remove the current and default values', () => {
+    expect(reconcileEffortSelection({
+      reasoningMode: 'enabled',
+      inputMode: 'effort',
+      options: ['max'],
+      currentEffort: 'medium',
+      defaultEffort: 'medium',
+    })).toEqual({ currentEffort: 'max', defaultEffort: 'max' });
+    expect(reconcileEffortSelection({
+      reasoningMode: 'auto',
+      inputMode: 'effort',
+      options: ['minimal', 'max'],
+      currentEffort: '',
+      defaultEffort: 'max',
+    })).toEqual({ currentEffort: 'max', defaultEffort: 'max' });
+  });
+
+  it('rejects incomplete or invalid active effort configuration', () => {
+    expect(effortValidationIssue({
+      reasoningMode: 'enabled', inputMode: 'effort', options: [], currentEffort: '', defaultEffort: '',
+    })).toBe('effortOptionsRequired');
+    expect(effortValidationIssue({
+      reasoningMode: 'enabled', inputMode: 'effort', options: ['max'], currentEffort: 'max', defaultEffort: 'medium',
+    })).toBe('defaultEffortInvalid');
+    expect(effortValidationIssue({
+      reasoningMode: 'auto', inputMode: 'effort', options: ['max'], currentEffort: 'medium', defaultEffort: 'max',
+    })).toBe('currentEffortInvalid');
+    expect(effortValidationIssue({
+      reasoningMode: 'disabled', inputMode: 'effort', options: [], currentEffort: '', defaultEffort: '',
+    })).toBeUndefined();
+  });
+
+  it('awaits model profile persistence and converts rejection into an explicit result', async () => {
+    const input = buildModelProfileInput({
+      name: 'New endpoint', baseUrl: 'http://localhost/v1', model: 'm', apiKey: '', isDefault: true,
+      reasoningMode: 'disabled', reasoningProtocol: 'none', reasoningEffort: '', profileReasoningDisplay: 'auto',
+      reasoningInputMode: 'unsupported', effortOptions: [], defaultEffort: '', rawOutput: false, summaryOutput: false,
+      maxConcurrency: 1,
+    });
+    const saved = modelProfileFixture(openAiCapabilities([]));
+    let resolveSave: ((profile: ModelProfile) => void) | undefined;
+    let settled = false;
+    const operation = runModelProfileSave(input, () => new Promise<ModelProfile>((resolve) => {
+      resolveSave = resolve;
+    })).then((result) => {
+      settled = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveSave?.(saved);
+    await expect(operation).resolves.toEqual({ ok: true, profile: saved });
+    await expect(runModelProfileSave(input, async () => {
+      throw new Error('save rejected');
+    })).resolves.toMatchObject({ ok: false, error: new Error('save rejected') });
+  });
+
+  it('resets a connection result when any tested profile input changes', () => {
+    const first = { name: 'A', maxConcurrency: 1 };
+    const tested = modelProfileFormFingerprint(first);
+    expect(connectionTestStateForFingerprint('connected', tested, modelProfileFormFingerprint(first))).toBe('connected');
+    expect(connectionTestStateForFingerprint('connected', tested, modelProfileFormFingerprint({ ...first, maxConcurrency: 2 }))).toBe('untested');
+  });
+
   it('derives reasoning controls only from the selected profile capabilities', () => {
     expect(reasoningControls(modelProfileFixture(qwenCapabilities()))).toEqual({ kind: 'toggle' });
     expect(reasoningControls(modelProfileFixture(openAiCapabilities(['minimal', 'high', 'max'])))).toEqual({
@@ -133,6 +302,24 @@ describe('renderer state reducer', () => {
     expect(shouldShowReasoningPanel('auto', [], false)).toBe(false);
   });
 
+  it('keeps declared explicit reasoning pending until a running turn can emit its first delta', () => {
+    expect(selectReasoningContent('summary', [], { running: true, outputModes: ['summary'] })).toEqual({
+      availability: 'empty',
+      mode: 'summary',
+      text: '',
+    });
+    expect(selectReasoningContent('summary', [], { running: false, outputModes: ['summary'] })).toEqual({
+      availability: 'unsupported',
+      mode: 'summary',
+      text: '',
+    });
+  });
+
+  it('closes the effort menu only for explicit close commands', () => {
+    expect(reasoningMenuCommand('Escape')).toBe('close');
+    expect(reasoningMenuCommand('ArrowDown')).toBe('keep');
+  });
+
   it('maps only the active chat runtime to the composer action', () => {
     expect(composerAction({ threadId: 'thread-1', status: 'queued', queuePosition: 2 })).toBe('cancel');
     expect(composerAction({ threadId: 'thread-1', status: 'running' })).toBe('stop');
@@ -158,6 +345,10 @@ describe('renderer state reducer', () => {
       active: false,
     });
     expect(threadRuntimePresentation(undefined, 'failed')).toEqual({ key: 'failed', active: false });
+    expect(threadRuntimePresentation({ threadId: 'thread-1', status: 'queued' }, 'ready')).toEqual({
+      key: 'queued',
+      active: true,
+    });
   });
 
   it('deduplicates events by thread and sequence', () => {

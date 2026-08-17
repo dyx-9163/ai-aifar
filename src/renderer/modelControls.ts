@@ -19,6 +19,11 @@ export interface ReasoningContentSelection {
   text: string;
 }
 
+export interface ReasoningSelectionContext {
+  running: boolean;
+  outputModes: ReasoningOutputMode[];
+}
+
 export type ComposerAction = 'send' | 'cancel' | 'stop';
 
 export interface ReasoningItemGroup {
@@ -29,7 +34,7 @@ export interface ReasoningItemGroup {
 }
 
 export interface ThreadRuntimePresentation {
-  key: 'ready' | 'queuedPosition' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  key: 'ready' | 'queued' | 'queuedPosition' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   queuePosition?: number;
   active: boolean;
 }
@@ -51,6 +56,7 @@ export function reasoningControls(profile: ModelProfile): ReasoningControl {
 export function selectReasoningContent(
   preference: ReasoningDisplayMode,
   items: ReasoningItem[],
+  context?: ReasoningSelectionContext,
 ): ReasoningContentSelection {
   const itemByMode = (mode: ReasoningOutputMode) => items.find((item) => item.mode === mode && item.text.length > 0);
   const selected = preference === 'auto'
@@ -61,9 +67,16 @@ export function selectReasoningContent(
     return { availability: 'available', mode: selected.mode, text: selected.text };
   }
   if (preference !== 'auto') {
+    if (context?.running && context.outputModes.includes(preference)) {
+      return { availability: 'empty', mode: preference, text: '' };
+    }
     return { availability: 'unsupported', mode: preference, text: '' };
   }
   return { availability: 'empty', text: '' };
+}
+
+export function reasoningMenuCommand(key: string): 'close' | 'keep' {
+  return key === 'Escape' ? 'close' : 'keep';
 }
 
 export function shouldShowReasoningPanel(
@@ -101,7 +114,9 @@ export function threadRuntimePresentation(
 ): ThreadRuntimePresentation {
   const status = runtime && runtime.status !== 'idle' ? runtime.status : fallback;
   if (status === 'queued') {
-    return { key: 'queuedPosition', queuePosition: runtime?.queuePosition, active: true };
+    return typeof runtime?.queuePosition === 'number' && runtime.queuePosition >= 1
+      ? { key: 'queuedPosition', queuePosition: runtime.queuePosition, active: true }
+      : { key: 'queued', active: true };
   }
   if (status === 'running' || status === 'cancelling') {
     return { key: status, active: true };

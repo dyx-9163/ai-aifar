@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import type {
   Item,
   ModelProfile,
@@ -14,6 +14,7 @@ import { renderMarkdown } from '../markdown';
 import {
   groupReasoningItems,
   reasoningControls,
+  reasoningMenuCommand,
   shouldShowReasoningPanel,
   type ReasoningItemGroup,
 } from '../modelControls';
@@ -82,6 +83,9 @@ const isPinnedToBottom = ref(true);
 const hasUnreadBelow = ref(false);
 const isAutoScrolling = ref(false);
 const reasoningMenuOpen = ref(false);
+const reasoningMenuRef = ref<HTMLElement>();
+const reasoningTriggerRef = ref<HTMLButtonElement>();
+const reasoningMenuId = 'reasoning-effort-menu';
 
 const scrollSignature = computed(() =>
   timelineEntries.value
@@ -99,8 +103,7 @@ const reasoningControl = computed(() =>
 );
 const activeReasoningEffort = computed(() =>
   props.activeModelProfile?.reasoning.effort
-    ?? props.activeModelProfile?.capabilities.reasoning.defaultEffort
-    ?? (reasoningControl.value.kind === 'effort' ? reasoningControl.value.options[0] : undefined),
+    ?? props.activeModelProfile?.capabilities.reasoning.defaultEffort,
 );
 const reasoningSummary = computed(() => {
   if (!props.activeModelProfile || props.activeModelProfile.reasoning.mode === 'disabled') {
@@ -149,6 +152,37 @@ function toggleReasoningMenu(): void {
   }
   reasoningMenuOpen.value = !reasoningMenuOpen.value;
 }
+
+function closeReasoningMenu(): void {
+  reasoningMenuOpen.value = false;
+}
+
+function handleReasoningMenuKeydown(event: KeyboardEvent): void {
+  if (reasoningMenuCommand(event.key) !== 'close') {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  closeReasoningMenu();
+  void nextTick(() => reasoningTriggerRef.value?.focus());
+}
+
+function handleReasoningFocusOut(event: FocusEvent): void {
+  const next = event.relatedTarget;
+  if (!(next instanceof Node) || !reasoningMenuRef.value?.contains(next)) {
+    closeReasoningMenu();
+  }
+}
+
+function handleDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target;
+  if (reasoningMenuOpen.value && target instanceof Node && !reasoningMenuRef.value?.contains(target)) {
+    closeReasoningMenu();
+  }
+}
+
+onMounted(() => document.addEventListener('pointerdown', handleDocumentPointerDown));
+onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPointerDown));
 
 function isReasoningRunning(group: ReasoningItemGroup): boolean {
   return props.activeRuntime?.turnId === group.turnId
@@ -256,21 +290,35 @@ function nextAnimationFrame(): Promise<void> {
             <strong>{{ reasoningSummary }}</strong>
           </button>
         </div>
-        <div v-else-if="reasoningControl.kind === 'effort'" class="runtime-menu" data-testid="reasoning-runtime-menu">
+        <div
+          v-else-if="reasoningControl.kind === 'effort'"
+          ref="reasoningMenuRef"
+          class="runtime-menu"
+          data-testid="reasoning-runtime-menu"
+          @keydown="handleReasoningMenuKeydown"
+          @focusout="handleReasoningFocusOut"
+        >
           <button
+            :id="`${reasoningMenuId}-trigger`"
+            ref="reasoningTriggerRef"
             type="button"
             class="runtime-menu-trigger"
             data-testid="reasoning-runtime-trigger"
+            aria-haspopup="menu"
+            :aria-expanded="reasoningMenuOpen"
+            :aria-controls="reasoningMenuId"
             @click="toggleReasoningMenu"
           >
             <span>{{ t('reasoningEffort') }}</span>
             <strong>{{ reasoningSummary }}</strong>
           </button>
-          <div v-if="reasoningMenuOpen" class="runtime-menu-panel">
+          <div v-if="reasoningMenuOpen" :id="reasoningMenuId" class="runtime-menu-panel" role="menu" :aria-labelledby="`${reasoningMenuId}-trigger`">
             <button
               v-for="effort in reasoningControl.options"
               :key="effort"
               type="button"
+              role="menuitemradio"
+              :aria-checked="activeModelProfile?.reasoning.mode !== 'disabled' && activeReasoningEffort === effort"
               :data-testid="`reasoning-runtime-${effort}`"
               :class="{ active: activeModelProfile?.reasoning.mode !== 'disabled' && activeReasoningEffort === effort }"
               :disabled="!activeModelProfile"
@@ -303,6 +351,7 @@ function nextAnimationFrame(): Promise<void> {
           v-if="standaloneReasoningGroup"
           :preference="reasoningDisplayMode"
           :running="true"
+          :output-modes="activeModelProfile?.capabilities.reasoning.outputModes"
           :t="t"
         />
 
@@ -316,6 +365,7 @@ function nextAnimationFrame(): Promise<void> {
             :summary="reasoningPanelByEntryId.get(entry.id)?.summary"
             :preference="reasoningDisplayMode"
             :running="isReasoningRunning(reasoningPanelByEntryId.get(entry.id)!)"
+            :output-modes="activeModelProfile?.capabilities.reasoning.outputModes"
             :t="t"
           />
           <article

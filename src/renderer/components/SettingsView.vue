@@ -12,6 +12,16 @@ import type {
   RuntimeSettingsInput,
 } from '../../shared/domain';
 import type { Translator } from '../i18n';
+import {
+  buildModelProfileInput,
+  connectionTestStateForFingerprint,
+  effortValidationIssue,
+  modelProfileFormFingerprint,
+  reconcileEffortSelection,
+  runModelProfileSave,
+  type ConnectionTestState,
+  type ModelProfileFormValues,
+} from '../modelProfileForm';
 
 const props = defineProps<{
   modelProfiles: ModelProfile[];
@@ -19,13 +29,13 @@ const props = defineProps<{
   language: LanguagePreference;
   settings: AppSettings;
   t: Translator;
+  saveModelProfile: (profile: ModelProfileInput) => Promise<ModelProfile>;
+  testModelProfile: (profile: ModelProfileInput) => Promise<{ ok: boolean; message: string }>;
 }>();
 
 const emit = defineEmits<{
   back: [];
-  saveModelProfile: [profile: ModelProfileInput];
   deleteModelProfile: [id: string];
-  testModelProfile: [profile: ModelProfileInput, report: (message: string, ok: boolean) => void];
   selectModelProfile: [id?: string];
   setLanguage: [language: LanguagePreference];
   updateSettings: [settings: RuntimeSettingsInput];
@@ -33,7 +43,9 @@ const emit = defineEmits<{
 
 const modelStatus = ref(props.t('apiKeyNotice'));
 const activeSection = ref<'general' | 'models' | 'runtime'>('models');
-const capabilityTestState = ref<'untested' | 'testing' | 'verified' | 'failed'>('untested');
+const connectionTestState = ref<ConnectionTestState>('untested');
+const testedFingerprint = ref<string>();
+const saving = ref(false);
 const form = reactive({
   id: '',
   name: 'Private model endpoint',
@@ -51,7 +63,6 @@ const form = reactive({
   rawOutput: false,
   summaryOutput: false,
   maxConcurrency: 1,
-  maxConcurrencyLimit: 32,
 });
 
 const effortOptions = computed(() => [...new Set(
@@ -60,17 +71,20 @@ const effortOptions = computed(() => [...new Set(
     .map((value) => value.trim())
     .filter(Boolean),
 )]);
+const editingProfile = computed(() => props.modelProfiles.find((profile) => profile.id === form.id));
+const maxConcurrencyLimit = computed(() => editingProfile.value?.capabilities.concurrency.maxLimit ?? 32);
 const capabilityError = computed(() => {
-  if (!Number.isInteger(form.maxConcurrency) || form.maxConcurrency < 1 || form.maxConcurrency > form.maxConcurrencyLimit) {
-    return props.t('maxConcurrencyError').replace('{max}', String(form.maxConcurrencyLimit));
+  if (!Number.isInteger(form.maxConcurrency) || form.maxConcurrency < 1 || form.maxConcurrency > maxConcurrencyLimit.value) {
+    return props.t('maxConcurrencyError').replace('{max}', String(maxConcurrencyLimit.value));
   }
-  if (form.reasoningInputMode === 'effort' && effortOptions.value.length === 0) {
-    return props.t('effortOptionsRequired');
-  }
-  if (form.reasoningInputMode === 'effort' && form.defaultEffort && !effortOptions.value.includes(form.defaultEffort)) {
-    return props.t('defaultEffortInvalid');
-  }
-  return '';
+  const issue = effortValidationIssue({
+    reasoningMode: form.reasoningMode,
+    inputMode: form.reasoningInputMode,
+    options: effortOptions.value,
+    currentEffort: form.reasoningEffort,
+    defaultEffort: form.defaultEffort,
+  });
+  return issue ? props.t(issue) : '';
 });
 
 const activeReasoningLabel = computed(() => {
@@ -92,6 +106,23 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => [form.reasoningMode, form.reasoningInputMode, form.effortOptionsText] as const,
+  synchronizeEffortSelection,
+  { flush: 'sync' },
+);
+
+watch(
+  () => modelProfileFormFingerprint(inputFromForm()),
+  (fingerprint) => {
+    connectionTestState.value = connectionTestStateForFingerprint(
+      connectionTestState.value,
+      testedFingerprint.value,
+      fingerprint,
+    );
+  },
+);
+
 function loadProfile(profile: ModelProfile): void {
   form.id = profile.id;
   form.name = profile.name;
@@ -109,8 +140,9 @@ function loadProfile(profile: ModelProfile): void {
   form.rawOutput = profile.capabilities.reasoning.outputModes.includes('raw');
   form.summaryOutput = profile.capabilities.reasoning.outputModes.includes('summary');
   form.maxConcurrency = profile.maxConcurrency;
-  form.maxConcurrencyLimit = profile.capabilities.concurrency.maxLimit ?? 32;
-  capabilityTestState.value = 'untested';
+  synchronizeEffortSelection();
+  testedFingerprint.value = undefined;
+  connectionTestState.value = 'untested';
   modelStatus.value = profile.apiKeyConfigured ? props.t('savedProfileLoadedKeepKey') : props.t('savedProfileLoaded');
 }
 
@@ -131,70 +163,81 @@ function resetForm(): void {
   form.rawOutput = false;
   form.summaryOutput = false;
   form.maxConcurrency = 1;
-  form.maxConcurrencyLimit = 32;
-  capabilityTestState.value = 'untested';
+  synchronizeEffortSelection();
+  testedFingerprint.value = undefined;
+  connectionTestState.value = 'untested';
   modelStatus.value = props.t('readyToAddModel');
 }
 
 function inputFromForm(): ModelProfileInput {
-  return {
+  const values: ModelProfileFormValues = {
     id: form.id || undefined,
     name: form.name,
-    provider: 'openai-compatible',
     baseUrl: form.baseUrl,
     model: form.model,
-    apiKey: form.apiKey || undefined,
+    apiKey: form.apiKey,
     isDefault: form.isDefault,
-    capabilities: {
-      text: true,
-      vision: false,
-      longContext: false,
-      reasoning: {
-        inputMode: form.reasoningInputMode,
-        effortOptions: effortOptions.value,
-        outputModes: [
-          ...(form.rawOutput ? ['raw' as const] : []),
-          ...(form.summaryOutput ? ['summary' as const] : []),
-        ],
-        defaultEffort: form.defaultEffort || undefined,
-      },
-      concurrency: { defaultLimit: 1, configurable: true, maxLimit: form.maxConcurrencyLimit },
-      streaming: true,
-      usage: { tokens: true, reasoningTokens: true },
-    },
-    reasoning: {
-      mode: form.reasoningMode,
-      protocol: form.reasoningProtocol,
-      effort: form.reasoningInputMode === 'effort'
-        ? (effortOptions.value.includes(form.reasoningEffort) ? form.reasoningEffort : form.defaultEffort || undefined)
-        : form.reasoningEffort || undefined,
-      display: form.profileReasoningDisplay,
-    },
+    reasoningMode: form.reasoningMode,
+    reasoningProtocol: form.reasoningProtocol,
+    reasoningEffort: form.reasoningEffort,
+    profileReasoningDisplay: form.profileReasoningDisplay,
+    reasoningInputMode: form.reasoningInputMode,
+    effortOptions: effortOptions.value,
+    defaultEffort: form.defaultEffort,
+    rawOutput: form.rawOutput,
+    summaryOutput: form.summaryOutput,
     maxConcurrency: form.maxConcurrency,
   };
+  return buildModelProfileInput(values, editingProfile.value);
 }
 
-function saveProfile(): void {
+async function saveProfile(): Promise<void> {
   if (capabilityError.value) {
     modelStatus.value = capabilityError.value;
     return;
   }
-  emit('saveModelProfile', inputFromForm());
+  saving.value = true;
+  const result = await runModelProfileSave(inputFromForm(), props.saveModelProfile);
+  saving.value = false;
+  if (!result.ok) {
+    modelStatus.value = `${props.t('saveModelProfileFailed')} ${result.error.message}`;
+    return;
+  }
+  loadProfile(result.profile);
   modelStatus.value = props.t('savedModelProfile');
 }
 
-function testProfile(): void {
+async function testProfile(): Promise<void> {
   if (capabilityError.value) {
     modelStatus.value = capabilityError.value;
-    capabilityTestState.value = 'failed';
+    connectionTestState.value = 'failed';
     return;
   }
   modelStatus.value = props.t('testingModelEndpoint');
-  capabilityTestState.value = 'testing';
-  emit('testModelProfile', inputFromForm(), (message, ok) => {
-    modelStatus.value = message;
-    capabilityTestState.value = ok ? 'verified' : 'failed';
+  const input = inputFromForm();
+  const fingerprint = modelProfileFormFingerprint(input);
+  testedFingerprint.value = fingerprint;
+  connectionTestState.value = 'testing';
+  const result = await props.testModelProfile(input);
+  if (modelProfileFormFingerprint(inputFromForm()) !== fingerprint) {
+    connectionTestState.value = 'untested';
+    modelStatus.value = props.t('connectionTestStale');
+    return;
+  }
+  connectionTestState.value = result.ok ? 'connected' : 'failed';
+  modelStatus.value = result.ok ? props.t('connectionSucceededCapabilitiesUnverified') : result.message;
+}
+
+function synchronizeEffortSelection(): void {
+  const reconciled = reconcileEffortSelection({
+    reasoningMode: form.reasoningMode,
+    inputMode: form.reasoningInputMode,
+    options: effortOptions.value,
+    currentEffort: form.reasoningEffort,
+    defaultEffort: form.defaultEffort,
   });
+  form.reasoningEffort = reconciled.currentEffort;
+  form.defaultEffort = reconciled.defaultEffort;
 }
 
 function deleteProfile(): void {
@@ -352,8 +395,8 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
             <div class="settings-subsection">
               <div class="capability-heading">
                 <h3>{{ t('reasoningCapabilities') }}</h3>
-                <span class="capability-status" :data-state="capabilityTestState" data-testid="capability-test-status">
-                  {{ t(capabilityTestState) }}
+                <span class="capability-status" :data-state="connectionTestState" data-testid="capability-test-status">
+                  {{ t(connectionTestState) }}
                 </span>
               </div>
               <label class="field-stack">
@@ -392,9 +435,14 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                 />
               </label>
               <label v-if="form.reasoningInputMode === 'effort'" class="field-stack">
+                <span>{{ t('currentEffort') }}</span>
+                <select v-model="form.reasoningEffort" data-testid="current-effort-select" class="model-select wide">
+                  <option v-for="effort in effortOptions" :key="effort" :value="effort">{{ effort }}</option>
+                </select>
+              </label>
+              <label v-if="form.reasoningInputMode === 'effort'" class="field-stack">
                 <span>{{ t('defaultEffort') }}</span>
                 <select v-model="form.defaultEffort" data-testid="default-effort-select" class="model-select wide">
-                  <option value="">{{ t('none') }}</option>
                   <option v-for="effort in effortOptions" :key="effort" :value="effort">{{ effort }}</option>
                 </select>
               </label>
@@ -414,7 +462,8 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                   data-testid="max-concurrency-input"
                   type="number"
                   min="1"
-                  :max="form.maxConcurrencyLimit"
+                  :max="maxConcurrencyLimit"
+                  :disabled="editingProfile?.capabilities.concurrency.configurable === false"
                 />
               </label>
               <p v-if="form.reasoningInputMode === 'custom'" class="settings-warning capability-wide">
@@ -431,8 +480,10 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
 
         <div class="approval-actions">
           <button type="button" class="secondary-button compact" :disabled="!form.id" @click="deleteProfile">{{ t('delete') }}</button>
-          <button type="button" class="secondary-button compact" @click="testProfile">{{ t('test') }}</button>
-          <button type="button" class="primary-action compact" @click="saveProfile">{{ t('save') }}</button>
+          <button type="button" class="secondary-button compact" :disabled="saving" @click="testProfile">{{ t('testConnection') }}</button>
+          <button type="button" class="primary-action compact" :disabled="saving || Boolean(capabilityError)" @click="saveProfile">
+            {{ saving ? t('saving') : t('save') }}
+          </button>
         </div>
       </section>
 

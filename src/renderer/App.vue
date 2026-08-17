@@ -65,12 +65,12 @@ function toggleTheme(): void {
   document.documentElement.dataset.theme = theme.value;
 }
 
-async function testModelProfile(profile: ModelProfileInput, report: (message: string, ok: boolean) => void): Promise<void> {
+async function testModelProfile(profile: ModelProfileInput): Promise<{ ok: boolean; message: string }> {
   try {
     const result = await app.testModelProfile(profile);
-    report(result.message, true);
+    return { ok: true, message: result.message };
   } catch (error) {
-    report(error instanceof Error ? error.message : t.value('modelConnectionFailed'), false);
+    return { ok: false, message: error instanceof Error ? error.message : t.value('modelConnectionFailed') };
   }
 }
 
@@ -146,10 +146,10 @@ async function updateModelRuntime(patch: {
       :language="app.state.value.snapshot.settings.language"
       :settings="app.state.value.snapshot.settings"
       :t="t"
+      :save-model-profile="app.saveModelProfile"
+      :test-model-profile="testModelProfile"
       @back="view = 'chat'"
-      @save-model-profile="app.saveModelProfile"
       @delete-model-profile="app.deleteModelProfile"
-      @test-model-profile="testModelProfile"
       @select-model-profile="app.selectModelProfile"
       @set-language="app.setLanguage"
       @update-settings="app.updateSettings"

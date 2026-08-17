@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import type { ReasoningDisplayMode, ReasoningItem } from '../../shared/domain';
+import type { ReasoningDisplayMode, ReasoningItem, ReasoningOutputMode } from '../../shared/domain';
 import type { Translator } from '../i18n';
 import { selectReasoningContent } from '../modelControls';
 
@@ -9,6 +9,7 @@ const props = defineProps<{
   summary?: ReasoningItem;
   preference: ReasoningDisplayMode;
   running: boolean;
+  outputModes?: ReasoningOutputMode[];
   t: Translator;
 }>();
 
@@ -16,6 +17,7 @@ const copied = ref(false);
 const selection = computed(() => selectReasoningContent(
   props.preference,
   [props.raw, props.summary].filter((item): item is ReasoningItem => Boolean(item)),
+  { running: props.running, outputModes: props.outputModes ?? [] },
 ));
 const title = computed(() => {
   if (selection.value.mode === 'summary') {

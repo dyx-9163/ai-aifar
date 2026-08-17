@@ -977,9 +977,9 @@ textarea:disabled {
   font-size: 11px;
 }
 
-.capability-status[data-state="verified"] {
-  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
-  color: var(--success);
+.capability-status[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  color: var(--warning);
 }
 
 .capability-status[data-state="failed"] {
