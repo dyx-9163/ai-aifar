@@ -1,7 +1,7 @@
 import { ReadableStream } from 'node:stream/web';
 import { describe, expect, it } from 'vitest';
 import { buildChatMessages } from '../src/agent/chatContext';
-import { streamChatCompletion, type ModelStreamHandlers } from '../src/agent/modelProvider';
+import { streamChatCompletion, testModelProfile, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import type { RuntimeModelProfile } from '../src/agent/database';
 
 const profile: RuntimeModelProfile = {
@@ -37,6 +37,96 @@ const ignoreHandlers: ModelStreamHandlers = {
 };
 
 describe('OpenAI-compatible model provider', () => {
+  it('uses only a bounded structured provider message and redacts every API-key representation', async () => {
+    const specialKey = ['unit-key-', '"', '\\', '?/'].join('');
+    const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({
+      error: {
+        message: `request rejected for ${specialKey}; encoded=${encodeURIComponent(specialKey)}`,
+        code: 'authentication_failed',
+      },
+      provider_internal_diagnostic: specialKey,
+    }), { status: 401 });
+
+    const error = await streamChatCompletion(
+      { ...profile, apiKey: specialKey },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    ).then(() => undefined, (caught: unknown) => caught);
+    const message = error instanceof Error ? error.message : String(error);
+
+    expect(message).toContain('request rejected');
+    expect(message).not.toContain('provider_internal_diagnostic');
+    expect(containsSecretRepresentation(message, specialKey)).toBe(false);
+    expect(message.length).toBeLessThanOrEqual(380);
+  });
+
+  it('times out connection testing even when the fetch implementation ignores abort', async () => {
+    let resolveFetch!: (response: Response) => void;
+    let requestSignal: AbortSignal | undefined;
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      });
+    };
+    const completion = testModelProfile(profile, fetchImpl, 20);
+
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      completion.then(
+        () => ({ type: 'completed' as const }),
+        (error: unknown) => ({ type: 'rejected' as const, error }),
+      ),
+      new Promise<{ type: 'timed-out' }>((resolve) => {
+        guard = setTimeout(() => resolve({ type: 'timed-out' }), 125);
+      }),
+    ]);
+    if (guard) clearTimeout(guard);
+    resolveFetch(new Response(null, { status: 200 }));
+    if (outcome.type === 'timed-out') await completion;
+
+    expect(outcome).toMatchObject({
+      type: 'rejected',
+      error: expect.objectContaining({ message: 'Model connection test timed out after 20ms.' }),
+    });
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('redacts encoded API-key forms from connection-test transport errors', async () => {
+    const specialKey = ['connection-key-', '"', '\\', '?/'].join('');
+    const fetchImpl = async (): Promise<Response> => {
+      throw new Error(`transport escaped=${JSON.stringify(specialKey).slice(1, -1)} encoded=${encodeURIComponent(specialKey)}`);
+    };
+
+    const error = await testModelProfile({ ...profile, apiKey: specialKey }, fetchImpl)
+      .then(() => undefined, (caught: unknown) => caught);
+    const message = error instanceof Error ? error.message : String(error);
+
+    expect(message).toContain('transport');
+    expect(containsSecretRepresentation(message, specialKey)).toBe(false);
+  });
+
+  it('redacts encoded API-key forms from streaming transport errors', async () => {
+    const specialKey = ['stream-key-', '"', '\\', '?/'].join('');
+    const fetchImpl = async (): Promise<Response> => {
+      throw new Error(`stream escaped=${JSON.stringify(specialKey).slice(1, -1)} encoded=${encodeURIComponent(specialKey)}`);
+    };
+
+    const error = await streamChatCompletion(
+      { ...profile, apiKey: specialKey },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    ).then(() => undefined, (caught: unknown) => caught);
+    const message = error instanceof Error ? error.message : String(error);
+
+    expect(message).toContain('stream');
+    expect(containsSecretRepresentation(message, specialKey)).toBe(false);
+  });
+
   it('stops at the DONE sentinel and releases a provider stream that remains open', async () => {
     let sourceController!: ReadableStreamDefaultController<Uint8Array>;
     let cancelCalls = 0;
@@ -735,3 +825,8 @@ describe('OpenAI-compatible model provider', () => {
     ]);
   });
 });
+
+function containsSecretRepresentation(text: string, secret: string): boolean {
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  return [secret, jsonEscaped, encodeURIComponent(secret)].some((candidate) => text.includes(candidate));
+}

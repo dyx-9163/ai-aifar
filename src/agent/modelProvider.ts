@@ -1,5 +1,6 @@
 import type { RuntimeModelProfile } from './database.js';
 import type { MetricSource, ModelRunMetrics, ModelRunPhase } from '../shared/domain.js';
+import { safeErrorText } from '../shared/redaction.js';
 import { validateReasoningSelection } from './modelCapabilities.js';
 
 export interface ChatMessage {
@@ -29,6 +30,7 @@ type ParsedStreamChunk = {
 };
 
 const DEFAULT_MODEL_RUN_TIMEOUT_MS = 5 * 60 * 1_000;
+const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 10_000;
 
 export async function streamChatCompletion(
   profile: RuntimeModelProfile,
@@ -107,19 +109,45 @@ export async function streamChatCompletion(
     if (requestSignal.timedOut() && !signal.aborted) {
       throw new Error(`Model request timed out after ${timeoutMs}ms.`);
     }
-    throw error;
+    if (signal.aborted) throw error;
+    throw new Error(safeErrorText(error, profile.apiKey ? [profile.apiKey] : [], 500));
   } finally {
     requestSignal.dispose();
   }
 }
 
-export async function testModelProfile(profile: RuntimeModelProfile, fetchImpl: FetchLike = fetch): Promise<{ ok: true; message: string }> {
+export async function testModelProfile(
+  profile: RuntimeModelProfile,
+  fetchImpl: FetchLike = fetch,
+  timeoutMs = DEFAULT_CONNECTION_TEST_TIMEOUT_MS,
+): Promise<{ ok: true; message: string }> {
   const headers: Record<string, string> = {};
   if (profile.apiKey) {
     headers.Authorization = `Bearer ${profile.apiKey}`;
   }
 
-  const response = await fetchImpl(`${profile.baseUrl.replace(/\/$/, '')}/models`, { headers });
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException('Model connection test timed out.', 'TimeoutError'));
+      reject(new Error(`Model connection test timed out after ${timeoutMs}ms.`));
+    }, Math.max(1, timeoutMs));
+  });
+  let response: Response;
+  try {
+    response = await Promise.race([
+      fetchImpl(`${profile.baseUrl.replace(/\/$/, '')}/models`, { headers, signal: controller.signal }),
+      timeout,
+    ]);
+  } catch (error) {
+    if (timedOut) throw new Error(`Model connection test timed out after ${timeoutMs}ms.`);
+    throw new Error(safeErrorText(error, profile.apiKey ? [profile.apiKey] : [], 500));
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!response.ok) {
     throw new Error(`Model endpoint returned HTTP ${response.status}.`);
   }
@@ -380,7 +408,7 @@ async function modelRequestError(response: Response, apiKey: string | undefined)
 }
 
 function modelRequestErrorFromBody(status: number, body: string, apiKey: string | undefined): Error {
-  const excerpt = redactResponseExcerpt(body, apiKey);
+  const excerpt = redactResponseExcerpt(parseStructuredProviderError(body)?.message ?? body, apiKey);
   return new Error(`Model request failed with HTTP ${status}${excerpt ? `: ${excerpt}` : '.'}`);
 }
 
@@ -442,12 +470,7 @@ function nonEmptyStreamText(value: unknown): string | undefined {
 }
 
 function redactResponseExcerpt(body: string, apiKey: string | undefined): string {
-  let redacted = body.replace(/\s+/g, ' ').trim();
-  if (apiKey) redacted = redacted.split(apiKey).join('[REDACTED]');
-  redacted = redacted
-    .replace(/authorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi, '[REDACTED]')
-    .replace(/bearer\s+[^\s,;]+/gi, '[REDACTED]');
-  return redacted.slice(0, 320);
+  return safeErrorText(body, apiKey ? [apiKey] : [], 320, '');
 }
 
 function throwIfAborted(signal: AbortSignal): void {

@@ -13,6 +13,7 @@ import {
   type DesktopRequest,
   type SequencedAgentEvent,
 } from '../shared/protocol.js';
+import { safeErrorText } from '../shared/redaction.js';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './database.js';
 import { buildChatMessages } from './chatContext.js';
 import {
@@ -554,15 +555,7 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 function safeErrorMessage(error: unknown, secrets: string[] = []): string {
-  let message = error instanceof Error ? error.message : 'Agent request failed.';
-  for (const secret of secrets) {
-    if (secret) message = message.split(secret).join('[REDACTED]');
-  }
-  message = message
-    .replace(/authorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi, '[REDACTED]')
-    .replace(/bearer\s+[^\s,;]+/gi, '[REDACTED]')
-    .trim();
-  return (message || 'Agent request failed.').slice(0, 500);
+  return safeErrorText(error, secrets, 500);
 }
 
 function unwrapParentMessage(value: unknown): { data: unknown; ports: WorkerPort[] } {

@@ -459,6 +459,24 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('keeps quote and backslash API-key encodings out of SQLite and renderer events', async () => {
+    const specialKey = ['worker-key-', '"', '\\', '?/'].join('');
+    const escapedKey = JSON.stringify(specialKey).slice(1, -1);
+    const harness = createHarness(async () => {
+      throw new Error(`provider rejected escaped=${escapedKey}; encoded=${encodeURIComponent(specialKey)}`);
+    }, specialKey);
+    const thread = harness.database.createThread('Encoded failure');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'fail', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+
+    const persistedAndEmitted = JSON.stringify({ snapshot: harness.database.getSnapshot(), events: harness.events });
+    expect(containsSecretRepresentation(persistedAndEmitted, specialKey)).toBe(false);
+    expect(persistedAndEmitted).toContain('[REDACTED]');
+    harness.database.close();
+  });
+
   it('treats an internal AbortError as a failed turn when the scheduler signal is active', async () => {
     const harness = createHarness(async () => {
       throw abortError();
@@ -676,4 +694,9 @@ async function eventually(assertion: () => void): Promise<void> {
       await flushMicrotasks();
     }
   }
+}
+
+function containsSecretRepresentation(text: string, secret: string): boolean {
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  return [secret, jsonEscaped, encodeURIComponent(secret)].some((candidate) => text.includes(candidate));
 }
