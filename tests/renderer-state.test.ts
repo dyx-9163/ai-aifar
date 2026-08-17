@@ -562,9 +562,77 @@ describe('renderer state reducer', () => {
   });
 
   it('marks a required approval as pending', () => {
-    const state = reduceEvent(emptyState(), approvalEvent());
+    const state = reduceEvent({ ...emptyState(), activeThreadId: 'thread-1' }, approvalEvent());
 
     expect(state.pendingApproval?.status).toBe('pending');
+  });
+
+  it('derives the Inspector approval from the selected chat', () => {
+    const app = useApp();
+    app.state.value = {
+      ...app.state.value,
+      activeThreadId: 'thread-1',
+      snapshot: {
+        ...app.state.value.snapshot,
+        approvals: [
+          {
+            id: 'approval-1', threadId: 'thread-1', turnId: 'turn-1', title: 'First', description: 'First approval',
+            status: 'pending', createdAt: '2026-08-17T00:00:00.000Z',
+          },
+          {
+            id: 'approval-2', threadId: 'thread-2', turnId: 'turn-2', title: 'Second', description: 'Second approval',
+            status: 'pending', createdAt: '2026-08-17T00:00:01.000Z',
+          },
+        ],
+      },
+    };
+
+    expect(app.activePendingApproval.value?.id).toBe('approval-1');
+    app.state.value.activeThreadId = 'thread-2';
+    expect(app.activePendingApproval.value?.id).toBe('approval-2');
+  });
+
+  it('responds to the explicit approval ID instead of ambient pending state', async () => {
+    const originalWindow = globalThis.window;
+    let response: { approvalId: string; approved: boolean } | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          respondApproval: async (approvalId: string, approved: boolean) => {
+            response = { approvalId, approved };
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-2',
+        pendingApproval: {
+          id: 'approval-1', threadId: 'thread-1', turnId: 'turn-1', title: 'First', description: 'First approval',
+          status: 'pending', createdAt: '2026-08-17T00:00:00.000Z',
+        },
+        snapshot: {
+          ...app.state.value.snapshot,
+          approvals: [{
+            id: 'approval-2', threadId: 'thread-2', turnId: 'turn-2', title: 'Second', description: 'Second approval',
+            status: 'pending', createdAt: '2026-08-17T00:00:01.000Z',
+          }],
+        },
+      };
+
+      await app.respondApproval('approval-2', false);
+
+      expect(response).toEqual({ approvalId: 'approval-2', approved: false });
+      expect(app.state.value.snapshot.approvals).toContainEqual(expect.objectContaining({
+        id: 'approval-2', status: 'rejected', respondedAt: expect.any(String),
+      }));
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
   });
 
   it('translates app chrome in English and Chinese', () => {

@@ -140,13 +140,13 @@ async function updateModelRuntime(patch: {
 
     <Inspector
       v-if="view === 'chat'"
-      :pending-approval="app.state.value.pendingApproval"
+      :pending-approval="app.activePendingApproval.value"
       :events="app.visibleEvents.value"
       :settings="app.state.value.snapshot.settings"
       :busy="app.activeBusy.value"
       :t="t"
-      @approve="app.respondApproval(true)"
-      @reject="app.respondApproval(false)"
+      @approve="app.respondApproval($event, true)"
+      @reject="app.respondApproval($event, false)"
     />
 
     <SettingsView

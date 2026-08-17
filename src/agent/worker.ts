@@ -275,17 +275,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     } catch (error) {
       if (signal.aborted) throw abortReason(signal);
       const message = safeErrorMessage(error, profile?.apiKey ? [profile.apiKey] : []);
-      database.updateTurn(turn.turnId, {
-        status: 'failed',
-        completedAt: now(),
-        error: message,
-        incomplete: true,
-      });
-      try {
-        settlePendingApproval(database, turn.turnId, 'rejected', now());
-      } catch {
-        // Approval cleanup must not hide the original execution failure.
-      }
+      database.failTurn(turn.turnId, now(), message);
       try {
         await context.next({ type: 'turn.failed', error: message });
       } finally {
@@ -409,12 +399,22 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
   if (message.type === 'language.set') return database.setLanguage(message.language);
   if (message.type === 'settings.update') return database.updateSettings(message.settings);
   if (message.type === 'approval.respond') {
-    turnRuntime.respondApproval(message.approvalId, message.approved);
+    requireAcceptedApprovalResponse(turnRuntime, message.approvalId, message.approved);
     return undefined;
   }
   if (message.type === 'turn.cancel') return turnRuntime.cancelTurn(message.turnId);
   if (message.type === 'turn.start') return turnRuntime.startTurn(message);
   return undefined;
+}
+
+export function requireAcceptedApprovalResponse(
+  runtime: Pick<WorkerTurnRuntime, 'respondApproval'>,
+  approvalId: string,
+  approved: boolean,
+): void {
+  if (!runtime.respondApproval(approvalId, approved)) {
+    throw new Error(`Approval "${approvalId}" is no longer pending.`);
+  }
 }
 
 function persistStreamEvent(database: AppDatabase, event: SequencedEvent, createdAt: string): void {

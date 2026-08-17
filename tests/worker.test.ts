@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from '../src/agent/database';
 import type { ModelStreamHandlers } from '../src/agent/modelProvider';
-import { createWorkerTurnRuntime, type WorkerTurnRuntime } from '../src/agent/worker';
+import {
+  createWorkerTurnRuntime,
+  requireAcceptedApprovalResponse,
+  type WorkerTurnRuntime,
+} from '../src/agent/worker';
 
 const tempDirectories: string[] = [];
 const openDatabases: AppDatabase[] = [];
@@ -25,6 +29,14 @@ afterEach(() => {
 });
 
 describe('worker turn runtime', () => {
+  it('turns a false approval response into a failed acknowledgement', () => {
+    expect(() => requireAcceptedApprovalResponse(
+      { respondApproval: () => false },
+      'approval-stale',
+      true,
+    )).toThrow('Approval "approval-stale" is no longer pending.');
+  });
+
   it('acknowledges immediately after persisting one queued turn and one user message', () => {
     const harness = createHarness(async () => new Promise(() => undefined));
     const thread = harness.database.createThread('Immediate acknowledgement');
@@ -282,26 +294,33 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
-  it('preserves the original failure when pending approval settlement also fails', async () => {
+  it('leaves failure and approval uncommitted together when atomic persistence fails', async () => {
     const harness = createHarness(async () => metrics(), undefined, true, 'approval.required', true);
     const thread = harness.database.createThread('Approval settlement failure');
     const { turnId } = harness.runtime.startTurn({
       type: 'turn.start', threadId: thread.id, text: '修改清理失败配置', modelProfileId: harness.profile.id,
     });
-    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+    await eventually(() => expect(harness.approvalSettlementAttempts()).toBe(1));
 
-    expect(harness.approvalSettlementAttempts()).toBe(1);
     expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
       id: turnId,
-      status: 'failed',
-      error: 'delivery failed for approval.required',
+      status: 'running',
     }));
-    expect(harness.events).toContainEqual(expect.objectContaining({
-      type: 'turn.failed',
-      turnId,
-      error: 'delivery failed for approval.required',
+    expect(harness.database.getSnapshot().approvals).toContainEqual(expect.objectContaining({
+      id: `approval-${turnId}`,
+      status: 'pending',
     }));
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.failed');
     harness.database.close();
+
+    const reopened = openDatabase(harness.databasePath);
+    openDatabases.push(reopened);
+    expect(reopened.getSnapshot().turns).toContainEqual(expect.objectContaining({ id: turnId, status: 'interrupted' }));
+    expect(reopened.getSnapshot().approvals).toContainEqual(expect.objectContaining({
+      id: `approval-${turnId}`,
+      status: 'rejected',
+    }));
+    reopened.close();
   });
 
   it('cancels a queued turn once and keeps streamed content incomplete', async () => {
@@ -537,6 +556,15 @@ function createHarness(
   let settlementAttempts = 0;
   const runtimeDatabase = new Proxy(database, {
     get(target, property) {
+      if (property === 'failTurn') {
+        return (...args: Parameters<AppDatabase['failTurn']>) => {
+          if (failApprovalSettlement) {
+            settlementAttempts += 1;
+            throw new Error('approval settlement failed');
+          }
+          return target.failTurn(...args);
+        };
+      }
       if (property === 'upsertApproval') {
         return (approval: Parameters<AppDatabase['upsertApproval']>[0]) => {
           if (failApprovalSettlement && approval.status === 'rejected') {

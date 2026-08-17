@@ -103,6 +103,13 @@ export function useApp() {
   });
   const activeBusy = computed(() => ['queued', 'running', 'cancelling'].includes(activeRuntime.value?.status ?? 'idle'));
   const activeTurnId = computed(() => activeRuntime.value?.turnId);
+  const activePendingApproval = computed(() => {
+    const threadId = state.value.activeThreadId;
+    if (!threadId) return undefined;
+    return state.value.snapshot.approvals.find(
+      (approval) => approval.threadId === threadId && approval.status === 'pending',
+    );
+  });
 
   const activeModelProfileId = computed(() => activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId);
   const activeModelProfile = computed(() =>
@@ -216,13 +223,22 @@ export function useApp() {
     }
   }
 
-  async function respondApproval(approved: boolean): Promise<void> {
-    const approval = state.value.pendingApproval;
-    if (!approval) {
-      return;
+  async function respondApproval(approvalId: string, approved: boolean): Promise<void> {
+    const approval = state.value.snapshot.approvals.find((candidate) => candidate.id === approvalId)
+      ?? (state.value.pendingApproval?.id === approvalId ? state.value.pendingApproval : undefined);
+    if (!approval || approval.status !== 'pending') {
+      throw new Error(`Approval "${approvalId}" is no longer pending.`);
     }
-    await window.desktop.respondApproval(approval.id, approved);
-    state.value.pendingApproval = { ...approval, status: approved ? 'approved' : 'rejected', respondedAt: new Date().toISOString() };
+    await window.desktop.respondApproval(approvalId, approved);
+    const settled = { ...approval, status: approved ? 'approved' as const : 'rejected' as const, respondedAt: new Date().toISOString() };
+    state.value = {
+      ...state.value,
+      snapshot: {
+        ...state.value.snapshot,
+        approvals: state.value.snapshot.approvals.map((candidate) => candidate.id === approvalId ? settled : candidate),
+      },
+      pendingApproval: state.value.pendingApproval?.id === approvalId ? settled : state.value.pendingApproval,
+    };
   }
 
   async function saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile> {
@@ -316,6 +332,7 @@ export function useApp() {
     activeRuntime,
     activeBusy,
     activeTurnId,
+    activePendingApproval,
     activeModelProfile,
     activeModelProfileId,
     visibleEvents,

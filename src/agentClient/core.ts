@@ -75,7 +75,9 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
       snapshotTerminalStatusByTurn,
       activeThreadId,
       activeGroupId: activeThread?.groupId ?? state.activeGroupId ?? event.snapshot.groups[0]?.id,
-      pendingApproval: snapshot.approvals.find((approval) => approval.status === 'pending'),
+      pendingApproval: snapshot.approvals.find(
+        (approval) => approval.status === 'pending' && approval.threadId === activeThreadId,
+      ),
     };
   }
 
@@ -123,30 +125,43 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
   }
 
   if (event.type === 'approval.required') {
+    const approval: Approval = {
+      id: event.approvalId,
+      threadId: event.threadId,
+      turnId: event.turnId,
+      title: event.title,
+      description: event.description,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
     nextState = {
       ...nextState,
-      pendingApproval: {
-        id: event.approvalId,
-        threadId: event.threadId,
-        turnId: event.turnId,
-        title: event.title,
-        description: event.description,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
+      snapshot: {
+        ...nextState.snapshot,
+        approvals: upsertApproval(nextState.snapshot.approvals, approval),
       },
+      pendingApproval: event.threadId === nextState.activeThreadId ? approval : nextState.pendingApproval,
     };
   }
 
   if (isTerminalEvent(event)) {
     const terminalStatus = knownTerminalStatus(nextState, event.threadId, event.turnId) ?? eventStatus(event);
+    const snapshot = markTurnContentIncomplete(
+      nextState.snapshot,
+      event.threadId,
+      event.turnId,
+      terminalStatus !== 'completed',
+    );
     nextState = {
       ...nextState,
-      snapshot: markTurnContentIncomplete(
-        nextState.snapshot,
-        event.threadId,
-        event.turnId,
-        terminalStatus !== 'completed',
-      ),
+      snapshot: {
+        ...snapshot,
+        approvals: snapshot.approvals.map((approval) =>
+          approval.threadId === event.threadId && approval.turnId === event.turnId && approval.status === 'pending'
+            ? { ...approval, status: 'rejected' as const, respondedAt: new Date().toISOString() }
+            : approval,
+        ),
+      },
       pendingApproval:
         nextState.pendingApproval?.threadId === event.threadId && nextState.pendingApproval.turnId === event.turnId
           ? undefined
@@ -155,6 +170,12 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
   }
 
   return nextState;
+}
+
+function upsertApproval(approvals: Approval[], approval: Approval): Approval[] {
+  const index = approvals.findIndex((candidate) => candidate.id === approval.id);
+  if (index < 0) return [...approvals, approval];
+  return approvals.map((candidate, candidateIndex) => candidateIndex === index ? approval : candidate);
 }
 
 export function appendOptimisticUserMessage(

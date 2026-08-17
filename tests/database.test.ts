@@ -117,6 +117,71 @@ describe('sqlite app database', () => {
     second.close();
   });
 
+  it('repairs pending approvals that already belong to terminal turns on startup', () => {
+    const path = createDbPath();
+    const first = openDatabase(path);
+    const thread = first.createThread('Terminal approvals');
+    for (const status of ['completed', 'failed', 'cancelled'] as const) {
+      const turnId = `turn-${status}`;
+      first.createTurn({
+        ...turnRecord(turnId, thread.id, 'model-1', status),
+        completedAt: '2026-08-17T00:00:03.000Z',
+        incomplete: status !== 'completed',
+      });
+      first.upsertApproval({
+        id: `approval-${status}`,
+        threadId: thread.id,
+        turnId,
+        title: status,
+        description: 'Stale pending approval',
+        status: 'pending',
+        createdAt: '2026-08-17T00:00:02.000Z',
+      });
+    }
+    first.close();
+
+    const second = openDatabase(path);
+    try {
+      expect(second.getSnapshot().approvals).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'approval-completed', status: 'rejected', respondedAt: expect.any(String) }),
+        expect.objectContaining({ id: 'approval-failed', status: 'rejected', respondedAt: expect.any(String) }),
+        expect.objectContaining({ id: 'approval-cancelled', status: 'rejected', respondedAt: expect.any(String) }),
+      ]));
+    } finally {
+      second.close();
+    }
+  });
+
+  it('rolls back turn failure when rejecting its pending approval cannot commit', () => {
+    const path = createDbPath();
+    const db = openDatabase(path);
+    try {
+      const thread = db.createThread('Atomic failure');
+      db.createTurn(turnRecord('turn-atomic', thread.id, 'model-1', 'running'));
+      db.upsertApproval({
+        id: 'approval-atomic', threadId: thread.id, turnId: 'turn-atomic', title: 'Approve',
+        description: 'Must settle atomically', status: 'pending', createdAt: '2026-08-17T00:00:01.000Z',
+      });
+      const raw = new DatabaseSync(path);
+      raw.exec(`
+        CREATE TRIGGER reject_approval_settlement
+        BEFORE UPDATE ON approvals
+        WHEN OLD.id = 'approval-atomic'
+        BEGIN
+          SELECT RAISE(ABORT, 'forced approval failure');
+        END;
+      `);
+      raw.close();
+
+      expect(() => db.failTurn('turn-atomic', '2026-08-17T00:00:02.000Z', 'provider failed'))
+        .toThrow('forced approval failure');
+      expect(db.getSnapshot().turns).toContainEqual(expect.objectContaining({ id: 'turn-atomic', status: 'running' }));
+      expect(db.getSnapshot().approvals).toContainEqual(expect.objectContaining({ id: 'approval-atomic', status: 'pending' }));
+    } finally {
+      db.close();
+    }
+  });
+
   it('keeps one reasoning and assistant row per streamed turn', () => {
     const db = openDatabase(createDbPath());
     const thread = db.createThread('Bounded stream');

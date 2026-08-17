@@ -141,6 +141,39 @@ describe('Agent Client Core', () => {
     expect(state.snapshot.items['thread-2']).toMatchObject([{ kind: 'message', text: '后台答案' }]);
   });
 
+  it('keeps a background approval scoped away from the active thread inspector', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        threads: [
+          {
+            id: 'thread-1', groupId: 'group-1', title: 'Active', status: 'running',
+            createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
+          },
+          {
+            id: 'thread-2', groupId: 'group-1', title: 'Background', status: 'running',
+            createdAt: '2026-08-17T00:00:01.000Z', updatedAt: '2026-08-17T00:00:01.000Z',
+          },
+        ],
+        approvals: [{
+          id: 'approval-active', threadId: 'thread-1', turnId: 'turn-1', title: 'Active approval',
+          description: 'Visible', status: 'pending', createdAt: '2026-08-17T00:00:02.000Z',
+        }],
+      }),
+    });
+
+    state = reduceAgentEvent(state, {
+      type: 'approval.required', ...envelope('thread-2', 'turn-2', 1), approvalId: 'approval-background',
+      title: 'Background approval', description: 'Must not replace the active approval',
+    });
+
+    expect(state.activeThreadId).toBe('thread-1');
+    expect(state.pendingApproval?.id).toBe('approval-active');
+    expect(state.snapshot.approvals).toContainEqual(expect.objectContaining({
+      id: 'approval-background', threadId: 'thread-2', turnId: 'turn-2', status: 'pending',
+    }));
+  });
+
   it('tracks two running chats independently', () => {
     let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-1', 1));
     state = reduceAgentEvent(state, started('thread-2', 'turn-2', 1));

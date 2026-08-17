@@ -39,6 +39,7 @@ export interface AppDatabase {
     turnId: string,
     patch: Partial<Pick<TurnRecord, 'status' | 'startedAt' | 'completedAt' | 'error' | 'incomplete'>>,
   ): void;
+  failTurn(turnId: string, completedAt: string, error: string): void;
   completeTurn(turnId: string, completedAt: string): void;
   interruptUnfinishedTurns(): void;
   appendItem(item: Item): void;
@@ -385,6 +386,25 @@ class SqliteAppDatabase implements AppDatabase {
     });
   }
 
+  failTurn(turnId: string, completedAt: string, error: string): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE turns
+           SET status = 'failed', completed_at = :completedAt, error = :error, incomplete = 1, updated_at = :completedAt
+           WHERE id = :turnId`,
+        )
+        .run({ turnId, completedAt, error });
+      this.db
+        .prepare(
+          `UPDATE approvals
+           SET status = 'rejected', responded_at = :respondedAt
+           WHERE turn_id = :turnId AND status = 'pending'`,
+        )
+        .run({ turnId, respondedAt: completedAt });
+    });
+  }
+
   completeTurn(turnId: string, completedAt: string): void {
     this.transaction(() => {
       this.db
@@ -423,7 +443,10 @@ class SqliteAppDatabase implements AppDatabase {
           `UPDATE approvals
            SET status = 'rejected', responded_at = :respondedAt
            WHERE status = 'pending'
-             AND turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')`,
+             AND turn_id IN (
+               SELECT id FROM turns
+               WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
+             )`,
         )
         .run({ respondedAt: interruptedAt });
     });

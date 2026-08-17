@@ -13,8 +13,8 @@ const props = defineProps<{
 }>();
 
 defineEmits<{
-  approve: [];
-  reject: [];
+  approve: [approvalId: string];
+  reject: [approvalId: string];
 }>();
 
 const activity = computed(() => props.events.filter((event) => event.type !== 'message.delta').slice(-8).reverse());
@@ -91,8 +91,8 @@ function speedValue(metrics: ModelRunMetrics): string {
       <h2>{{ pendingApproval.title }}</h2>
       <p>{{ pendingApproval.description }}</p>
       <div class="approval-actions">
-        <button type="button" class="secondary-button" :disabled="pendingApproval.status !== 'pending'" @click="$emit('reject')">{{ t('reject') }}</button>
-        <button type="button" class="primary-action compact" :disabled="pendingApproval.status !== 'pending'" @click="$emit('approve')">{{ t('approve') }}</button>
+        <button type="button" class="secondary-button" :disabled="pendingApproval.status !== 'pending'" @click="$emit('reject', pendingApproval.id)">{{ t('reject') }}</button>
+        <button type="button" class="primary-action compact" :disabled="pendingApproval.status !== 'pending'" @click="$emit('approve', pendingApproval.id)">{{ t('approve') }}</button>
       </div>
     </section>
 
