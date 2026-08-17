@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
-import type { Item } from '../src/shared/domain';
+import type { AppSnapshot, Item, ModelCapabilities, ModelProfile, ReasoningItem } from '../src/shared/domain';
+import { openAiCapabilities, qwenCapabilities } from '../src/agent/modelCapabilities';
 import { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot, emptyState, reduceEvent, useApp } from '../src/renderer/composables/useApp';
 import { createTranslator, isLanguagePreference } from '../src/renderer/i18n';
 import { renderMarkdown } from '../src/renderer/markdown';
+import {
+  composerAction,
+  groupReasoningItems,
+  reasoningControls,
+  selectReasoningContent,
+  shouldShowReasoningPanel,
+  threadRuntimePresentation,
+} from '../src/renderer/modelControls';
 import { isNearBottom } from '../src/renderer/scrolling';
 import { createTimelineEntries } from '../src/renderer/timeline';
 
@@ -31,11 +40,126 @@ function approvalEvent(): AgentEvent {
   };
 }
 
+function modelProfileFixture(capabilities: ModelCapabilities): ModelProfile {
+  return {
+    id: 'model-1',
+    name: 'Fixture',
+    provider: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    model: 'fixture',
+    apiKeyConfigured: false,
+    capabilities,
+    reasoning: { mode: 'enabled', protocol: 'none', display: 'auto' },
+    maxConcurrency: 1,
+    responseSpeed: 'standard',
+    isDefault: true,
+    createdAt: '2026-08-17T00:00:00.000Z',
+    updatedAt: '2026-08-17T00:00:00.000Z',
+  };
+}
+
+const rawReasoning: ReasoningItem = {
+  id: 'raw-1',
+  threadId: 'thread-1',
+  turnId: 'turn-1',
+  kind: 'reasoning',
+  mode: 'raw',
+  text: '分析',
+  incomplete: false,
+  createdAt: '2026-08-17T00:00:01.000Z',
+};
+
+const summaryReasoning: ReasoningItem = {
+  ...rawReasoning,
+  id: 'summary-1',
+  mode: 'summary',
+  text: '摘要',
+};
+
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe('renderer state reducer', () => {
+  it('derives reasoning controls only from the selected profile capabilities', () => {
+    expect(reasoningControls(modelProfileFixture(qwenCapabilities()))).toEqual({ kind: 'toggle' });
+    expect(reasoningControls(modelProfileFixture(openAiCapabilities(['minimal', 'high', 'max'])))).toEqual({
+      kind: 'effort',
+      options: ['minimal', 'high', 'max'],
+    });
+    expect(reasoningControls(modelProfileFixture(openAiCapabilities([])))).toEqual({ kind: 'hidden' });
+  });
+
+  it('marks custom reasoning controls as unverified instead of inventing effort options', () => {
+    const profile = modelProfileFixture({
+      ...qwenCapabilities(),
+      reasoning: { inputMode: 'custom', effortOptions: ['vendor-value'], outputModes: ['raw'] },
+    });
+
+    expect(reasoningControls(profile)).toEqual({ kind: 'custom', warning: true });
+  });
+
+  it('selects native summary before raw reasoning in automatic mode', () => {
+    expect(selectReasoningContent('auto', [rawReasoning, summaryReasoning])).toEqual({
+      availability: 'available',
+      mode: 'summary',
+      text: '摘要',
+    });
+    expect(selectReasoningContent('auto', [rawReasoning])).toEqual({
+      availability: 'available',
+      mode: 'raw',
+      text: '分析',
+    });
+    expect(selectReasoningContent('auto', [])).toEqual({ availability: 'empty', text: '' });
+  });
+
+  it('reports an explicitly selected unavailable reasoning mode as unsupported', () => {
+    expect(selectReasoningContent('summary', [rawReasoning])).toEqual({
+      availability: 'unsupported',
+      mode: 'summary',
+      text: '',
+    });
+    expect(selectReasoningContent('raw', [summaryReasoning])).toEqual({
+      availability: 'unsupported',
+      mode: 'raw',
+      text: '',
+    });
+  });
+
+  it('keeps an unavailable explicit reasoning choice visible and auto mode phase-only while running', () => {
+    expect(shouldShowReasoningPanel('summary', [], false)).toBe(true);
+    expect(shouldShowReasoningPanel('raw', [], false)).toBe(true);
+    expect(shouldShowReasoningPanel('auto', [], true)).toBe(true);
+    expect(shouldShowReasoningPanel('auto', [], false)).toBe(false);
+  });
+
+  it('maps only the active chat runtime to the composer action', () => {
+    expect(composerAction({ threadId: 'thread-1', status: 'queued', queuePosition: 2 })).toBe('cancel');
+    expect(composerAction({ threadId: 'thread-1', status: 'running' })).toBe('stop');
+    expect(composerAction({ threadId: 'thread-1', status: 'cancelling' })).toBe('stop');
+    expect(composerAction({ threadId: 'thread-1', status: 'completed' })).toBe('send');
+    expect(composerAction(undefined)).toBe('send');
+  });
+
+  it('groups raw and summary reasoning for one collapsible panel per turn', () => {
+    expect(groupReasoningItems([rawReasoning, summaryReasoning])).toEqual([
+      { turnId: 'turn-1', anchorId: 'raw-1', raw: rawReasoning, summary: summaryReasoning },
+    ]);
+  });
+
+  it('presents queue position and terminal runtime states without falling back to thread status', () => {
+    expect(threadRuntimePresentation({ threadId: 'thread-1', status: 'queued', queuePosition: 3 }, 'ready')).toEqual({
+      key: 'queuedPosition',
+      queuePosition: 3,
+      active: true,
+    });
+    expect(threadRuntimePresentation({ threadId: 'thread-1', status: 'interrupted' }, 'ready')).toEqual({
+      key: 'interrupted',
+      active: false,
+    });
+    expect(threadRuntimePresentation(undefined, 'failed')).toEqual({ key: 'failed', active: false });
+  });
+
   it('deduplicates events by thread and sequence', () => {
     const state = reduceEvent(emptyState(), deltaEvent(1));
 
@@ -759,23 +883,16 @@ describe('renderer state reducer', () => {
     }
   });
 
-  it('updates the active model runtime preferences from the chat header', async () => {
+  it('persists an arbitrary capability-declared effort from the current chat profile', async () => {
     const originalWindow = globalThis.window;
-    const profile = {
-      id: 'model-1',
+    const profile: ModelProfile = {
+      ...modelProfileFixture(openAiCapabilities(['minimal', 'max'])),
       name: 'Private model endpoint',
-      provider: 'openai-compatible' as const,
-      baseUrl: 'http://127.0.0.1:8080/v1',
       model: 'private-model',
       apiKeyConfigured: true,
-      capabilities: { text: true, vision: false, longContext: false, reasoning: true, streamingUsage: true },
-      reasoning: { mode: 'disabled' as const, protocol: 'qwen' as const, effort: 'medium' as const },
-      responseSpeed: 'standard' as const,
-      isDefault: true,
-      createdAt: '2026-08-17T00:00:00.000Z',
-      updatedAt: '2026-08-17T00:00:00.000Z',
+      reasoning: { mode: 'enabled', protocol: 'openai', effort: 'minimal', display: 'auto' },
     };
-    const snapshot = {
+    const snapshot: AppSnapshot = {
       groups: [],
       threads: [
         {
@@ -788,6 +905,7 @@ describe('renderer state reducer', () => {
           updatedAt: '2026-08-17T00:00:00.000Z',
         },
       ],
+      turns: [],
       items: {},
       approvals: [],
       modelProfiles: [profile],
@@ -797,6 +915,7 @@ describe('renderer state reducer', () => {
         activeModelProfileId: 'model-1',
         showModelMetrics: true,
         contextMessageLimit: 20,
+        reasoningDisplayMode: 'auto',
       },
     };
     let savedProfile: unknown;
@@ -826,18 +945,15 @@ describe('renderer state reducer', () => {
       };
 
       const update = app.updateActiveModelRuntime({
-        reasoning: { mode: 'enabled', effort: 'high' },
-        responseSpeed: 'fast',
+        reasoning: { mode: 'enabled', effort: 'max' },
       });
 
       expect(app.activeModelProfile.value).toMatchObject({
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'high' },
-        responseSpeed: 'fast',
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'max' },
       });
       const saved = {
         ...profile,
-        reasoning: { mode: 'enabled' as const, protocol: 'qwen' as const, effort: 'high' as const },
-        responseSpeed: 'fast' as const,
+        reasoning: { mode: 'enabled' as const, protocol: 'openai' as const, effort: 'max', display: 'auto' as const },
       };
       currentSnapshot = { ...currentSnapshot, modelProfiles: [saved] };
       resolveSave?.(saved);
@@ -846,10 +962,10 @@ describe('renderer state reducer', () => {
       expect(savedProfile).toMatchObject({
         id: 'model-1',
         name: 'Private model endpoint',
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'high' },
-        responseSpeed: 'fast',
+        capabilities: { reasoning: { effortOptions: ['minimal', 'max'] } },
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'max' },
       });
-      expect(app.activeModelProfile.value?.responseSpeed).toBe('fast');
+      expect(app.activeModelProfile.value?.reasoning.effort).toBe('max');
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
     }
@@ -900,7 +1016,7 @@ describe('renderer state reducer', () => {
     ).toContainEqual({
       id: 'model.metrics-turn-1-3',
       kind: 'metrics',
-      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 速度：fast · 40 tokens (server) · stop',
+      text: '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
     });
   });
 

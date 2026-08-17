@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
+import type { ThreadRuntimeState } from '../../shared/domain';
 import type { Translator } from '../i18n';
+import { composerAction } from '../modelControls';
 
 const props = defineProps<{
-  busy: boolean;
+  activeBusy: boolean;
+  activeRuntime?: ThreadRuntimeState;
   t: Translator;
 }>();
 
@@ -13,9 +16,19 @@ const emit = defineEmits<{
 }>();
 
 const text = ref('');
+const action = computed(() => composerAction(props.activeRuntime));
+const actionLabel = computed(() => {
+  if (action.value === 'cancel') {
+    return props.t('cancel');
+  }
+  if (action.value === 'stop') {
+    return props.t('stop');
+  }
+  return props.t('send');
+});
 
 function submit(): void {
-  if (props.busy) {
+  if (props.activeBusy) {
     emit('cancel');
     return;
   }
@@ -43,12 +56,19 @@ function handleKeydown(event: KeyboardEvent): void {
       data-testid="composer-input"
       rows="3"
       :placeholder="t('askPlaceholder')"
-    :disabled="busy"
-    @keydown="handleKeydown"
-  />
-    <button class="send-button" type="submit" data-testid="composer-send" :disabled="!busy && !text.trim()" :title="busy ? t('stop') : t('send')">
-      <span aria-hidden="true">{{ busy ? '■' : '>' }}</span>
-      <span>{{ busy ? t('stop') : t('send') }}</span>
+      :disabled="activeBusy"
+      @keydown="handleKeydown"
+    />
+    <button
+      class="send-button"
+      type="submit"
+      data-testid="composer-send"
+      :data-action="action"
+      :disabled="!activeBusy && !text.trim()"
+      :title="actionLabel"
+    >
+      <span aria-hidden="true">{{ activeBusy ? '■' : '>' }}</span>
+      <span>{{ actionLabel }}</span>
     </button>
   </form>
 </template>

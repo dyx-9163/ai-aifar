@@ -1,18 +1,34 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import type { Item, ModelProfile, ModelResponseSpeed, ReasoningEffort, ThreadSummary } from '../../shared/domain';
+import type {
+  Item,
+  ModelProfile,
+  ReasoningDisplayMode,
+  ReasoningItem,
+  ThreadRuntimeState,
+  ThreadSummary,
+} from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
 import { renderMarkdown } from '../markdown';
+import {
+  groupReasoningItems,
+  reasoningControls,
+  shouldShowReasoningPanel,
+  type ReasoningItemGroup,
+} from '../modelControls';
 import { isNearBottom } from '../scrolling';
 import { createTimelineEntries } from '../timeline';
 import Composer from './Composer.vue';
+import ReasoningPanel from './ReasoningPanel.vue';
 
 const props = defineProps<{
   thread?: ThreadSummary;
   items: Item[];
   events: AgentEvent[];
-  busy: boolean;
+  activeBusy: boolean;
+  activeRuntime?: ThreadRuntimeState;
+  reasoningDisplayMode: ReasoningDisplayMode;
   loading: boolean;
   modelProfiles: ModelProfile[];
   activeModelProfileId?: string;
@@ -24,16 +40,48 @@ const props = defineProps<{
 const emit = defineEmits<{
   submit: [text: string];
   cancel: [];
+  openSettings: [];
   selectModel: [modelProfileId?: string];
-  updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: ReasoningEffort }; responseSpeed?: ModelResponseSpeed }];
+  updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
 
 const timelineEntries = computed(() => createTimelineEntries(props.items, props.events));
+const reasoningGroups = computed(() => groupReasoningItems(
+  props.items.filter((item): item is ReasoningItem => item.kind === 'reasoning'),
+));
+const reasoningGroupByTurn = computed(() => new Map(reasoningGroups.value.map((group) => [group.turnId, group])));
+const reasoningPanelByEntryId = computed(() => {
+  const panels = new Map(reasoningGroups.value.map((group) => [group.anchorId, group]));
+  for (const entry of timelineEntries.value) {
+    if (entry.kind !== 'message' || entry.role !== 'assistant' || !entry.turnId || reasoningGroupByTurn.value.has(entry.turnId)) {
+      continue;
+    }
+    const running = props.activeRuntime?.turnId === entry.turnId
+      && (props.activeRuntime.status === 'running' || props.activeRuntime.status === 'cancelling');
+    if (shouldShowReasoningPanel(props.reasoningDisplayMode, [], running)) {
+      panels.set(entry.id, { turnId: entry.turnId, anchorId: entry.id });
+    }
+  }
+  return panels;
+});
+const standaloneReasoningGroup = computed<ReasoningItemGroup | undefined>(() => {
+  const runtime = props.activeRuntime;
+  if (!runtime?.turnId || (runtime.status !== 'running' && runtime.status !== 'cancelling')) {
+    return undefined;
+  }
+  if (reasoningGroupByTurn.value.has(runtime.turnId)) {
+    return undefined;
+  }
+  const hasAssistantAnchor = timelineEntries.value.some(
+    (entry) => entry.kind === 'message' && entry.role === 'assistant' && entry.turnId === runtime.turnId,
+  );
+  return hasAssistantAnchor ? undefined : { turnId: runtime.turnId, anchorId: `reasoning-${runtime.turnId}` };
+});
 const timelineRef = ref<HTMLElement>();
 const isPinnedToBottom = ref(true);
 const hasUnreadBelow = ref(false);
 const isAutoScrolling = ref(false);
-const openRuntimeMenu = ref<'reasoning' | 'speed'>();
+const reasoningMenuOpen = ref(false);
 
 const scrollSignature = computed(() =>
   timelineEntries.value
@@ -46,17 +94,35 @@ function handleModelChange(event: Event): void {
   emit('selectModel', value || undefined);
 }
 
-const activeReasoningEffort = computed(() => props.activeModelProfile?.reasoning.effort ?? 'medium');
-const activeResponseSpeed = computed(() => props.activeModelProfile?.responseSpeed ?? 'standard');
-const reasoningEffortOptions: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
-const responseSpeedOptions: ModelResponseSpeed[] = ['standard', 'fast', 'quality'];
+const reasoningControl = computed(() =>
+  props.activeModelProfile ? reasoningControls(props.activeModelProfile) : { kind: 'hidden' as const },
+);
+const activeReasoningEffort = computed(() =>
+  props.activeModelProfile?.reasoning.effort
+    ?? props.activeModelProfile?.capabilities.reasoning.defaultEffort
+    ?? (reasoningControl.value.kind === 'effort' ? reasoningControl.value.options[0] : undefined),
+);
 const reasoningSummary = computed(() => {
   if (!props.activeModelProfile || props.activeModelProfile.reasoning.mode === 'disabled') {
     return props.t('disabled');
   }
-  return reasoningEffortLabel(activeReasoningEffort.value);
+  if (reasoningControl.value.kind === 'toggle') {
+    return props.t('enabled');
+  }
+  return activeReasoningEffort.value ?? props.t('enabled');
 });
-const speedSummary = computed(() => responseSpeedLabel(activeResponseSpeed.value));
+const runtimeStatus = computed(() => {
+  const runtime = props.activeRuntime;
+  if (!runtime || runtime.status === 'idle') {
+    return props.t('ready');
+  }
+  if (runtime.status === 'queued') {
+    return runtime.queuePosition
+      ? props.t('queuedPosition').replace('{position}', String(runtime.queuePosition))
+      : props.t('queued');
+  }
+  return props.t(runtime.status);
+});
 const progressLabel = (phase: 'connecting' | 'reasoning' | 'answering') => {
   if (phase === 'reasoning') {
     return props.t('modelReasoning');
@@ -67,49 +133,26 @@ const progressLabel = (phase: 'connecting' | 'reasoning' | 'answering') => {
   return props.t('modelConnecting');
 };
 
-function setReasoningEffort(effort: ReasoningEffort): void {
-  openRuntimeMenu.value = undefined;
+function setReasoningEffort(effort: string): void {
+  reasoningMenuOpen.value = false;
   emit('updateModelRuntime', { reasoning: { mode: 'enabled', effort } });
 }
 
-function disableReasoning(): void {
-  openRuntimeMenu.value = undefined;
-  emit('updateModelRuntime', { reasoning: { mode: 'disabled' } });
+function toggleReasoning(): void {
+  const enabled = props.activeModelProfile?.reasoning.mode !== 'disabled';
+  emit('updateModelRuntime', { reasoning: { mode: enabled ? 'disabled' : 'enabled' } });
 }
 
-function setResponseSpeed(responseSpeed: ModelResponseSpeed): void {
-  openRuntimeMenu.value = undefined;
-  emit('updateModelRuntime', { responseSpeed });
-}
-
-function toggleRuntimeMenu(menu: 'reasoning' | 'speed'): void {
-  if (!props.activeModelProfile) {
+function toggleReasoningMenu(): void {
+  if (reasoningControl.value.kind !== 'effort') {
     return;
   }
-  openRuntimeMenu.value = openRuntimeMenu.value === menu ? undefined : menu;
+  reasoningMenuOpen.value = !reasoningMenuOpen.value;
 }
 
-function reasoningEffortLabel(effort: ReasoningEffort): string {
-  if (effort === 'low') {
-    return props.t('low');
-  }
-  if (effort === 'high') {
-    return props.t('high');
-  }
-  if (effort === 'xhigh') {
-    return props.t('xhigh');
-  }
-  return props.t('medium');
-}
-
-function responseSpeedLabel(responseSpeed: ModelResponseSpeed): string {
-  if (responseSpeed === 'fast') {
-    return props.t('fast');
-  }
-  if (responseSpeed === 'quality') {
-    return props.t('quality');
-  }
-  return props.t('standard');
+function isReasoningRunning(group: ReasoningItemGroup): boolean {
+  return props.activeRuntime?.turnId === group.turnId
+    && (props.activeRuntime.status === 'running' || props.activeRuntime.status === 'cancelling');
 }
 
 function scrollToBottomNow(): void {
@@ -169,7 +212,7 @@ watch(
 );
 
 watch(
-  () => props.busy,
+  () => props.activeBusy,
   async (busy) => {
     if (busy) {
       isPinnedToBottom.value = true;
@@ -202,23 +245,30 @@ function nextAnimationFrame(): Promise<void> {
             </option>
           </select>
         </label>
-        <div class="runtime-menu" data-testid="reasoning-runtime-menu" :class="{ disabled: !activeModelProfile }">
-          <button type="button" class="runtime-menu-trigger" data-testid="reasoning-runtime-trigger" @click="toggleRuntimeMenu('reasoning')">
+        <div v-if="reasoningControl.kind === 'toggle'" class="runtime-menu" data-testid="reasoning-runtime-menu">
+          <button
+            type="button"
+            class="runtime-menu-trigger"
+            data-testid="reasoning-runtime-trigger"
+            @click="toggleReasoning"
+          >
+            <span>{{ t('thinkingMode') }}</span>
+            <strong>{{ reasoningSummary }}</strong>
+          </button>
+        </div>
+        <div v-else-if="reasoningControl.kind === 'effort'" class="runtime-menu" data-testid="reasoning-runtime-menu">
+          <button
+            type="button"
+            class="runtime-menu-trigger"
+            data-testid="reasoning-runtime-trigger"
+            @click="toggleReasoningMenu"
+          >
             <span>{{ t('reasoningEffort') }}</span>
             <strong>{{ reasoningSummary }}</strong>
           </button>
-          <div v-if="openRuntimeMenu === 'reasoning'" class="runtime-menu-panel">
+          <div v-if="reasoningMenuOpen" class="runtime-menu-panel">
             <button
-              type="button"
-              data-testid="reasoning-runtime-disabled"
-              :class="{ active: activeModelProfile?.reasoning.mode === 'disabled' }"
-              :disabled="!activeModelProfile"
-              @click="disableReasoning"
-            >
-              {{ t('disabled') }}
-            </button>
-            <button
-              v-for="effort in reasoningEffortOptions"
+              v-for="effort in reasoningControl.options"
               :key="effort"
               type="button"
               :data-testid="`reasoning-runtime-${effort}`"
@@ -226,30 +276,20 @@ function nextAnimationFrame(): Promise<void> {
               :disabled="!activeModelProfile"
               @click="setReasoningEffort(effort)"
             >
-              {{ reasoningEffortLabel(effort) }}
+              {{ effort }}
             </button>
           </div>
         </div>
-        <div class="runtime-menu" data-testid="speed-runtime-menu" :class="{ disabled: !activeModelProfile }">
-          <button type="button" class="runtime-menu-trigger" data-testid="speed-runtime-trigger" @click="toggleRuntimeMenu('speed')">
-            <span>{{ t('responseSpeed') }}</span>
-            <strong>{{ speedSummary }}</strong>
-          </button>
-          <div v-if="openRuntimeMenu === 'speed'" class="runtime-menu-panel">
-            <button
-              v-for="speed in responseSpeedOptions"
-              :key="speed"
-              type="button"
-              :data-testid="`speed-runtime-${speed}`"
-              :class="{ active: activeResponseSpeed === speed }"
-              :disabled="!activeModelProfile"
-              @click="setResponseSpeed(speed)"
-            >
-              {{ responseSpeedLabel(speed) }}
-            </button>
-          </div>
-        </div>
-        <span class="runtime-pill">{{ busy ? t('running') : t('ready') }}</span>
+        <button
+          v-else-if="reasoningControl.kind === 'custom'"
+          type="button"
+          class="capability-warning"
+          data-testid="reasoning-custom-warning"
+          @click="emit('openSettings')"
+        >
+          {{ t('customReasoningWarning') }}
+        </button>
+        <span class="runtime-pill" data-testid="active-runtime-status">{{ runtimeStatus }}</span>
         <span v-if="runtimeError" class="runtime-control-error" :title="runtimeError">{{ runtimeError }}</span>
       </div>
     </header>
@@ -259,34 +299,59 @@ function nextAnimationFrame(): Promise<void> {
         <div v-if="loading" class="empty-state">{{ t('loadingWorkspace') }}</div>
         <div v-else-if="!thread" class="empty-state">{{ t('createTaskHint') }}</div>
 
-        <article
+        <ReasoningPanel
+          v-if="standaloneReasoningGroup"
+          :preference="reasoningDisplayMode"
+          :running="true"
+          :t="t"
+        />
+
+        <template
           v-for="entry in timelineEntries"
           :key="entry.id"
-          :class="
-            entry.kind === 'message'
-              ? ['message-row', `role-${entry.role}`, { live: entry.live }]
-              : entry.kind === 'metrics'
-                ? 'metrics-row'
-                : entry.kind === 'progress'
-                  ? 'progress-row'
-                  : 'tool-row'
-          "
         >
-          <template v-if="entry.kind === 'message'">
-            <span class="message-role">{{ entry.role === 'assistant' ? t('assistant') : entry.role === 'user' ? t('user') : entry.role }}</span>
-            <div v-if="entry.role === 'assistant'" class="message-content markdown-body" v-html="renderMarkdown(entry.text)"></div>
-            <p v-else class="message-content">{{ entry.text }}</p>
-          </template>
-          <span v-else-if="entry.kind === 'progress'" class="progress-label">
-            <span class="progress-dot" aria-hidden="true"></span>
-            {{ progressLabel(entry.phase) }}
-          </span>
-          <span v-else>{{ entry.text }}</span>
-        </article>
+          <ReasoningPanel
+            v-if="reasoningPanelByEntryId.get(entry.id)"
+            :raw="reasoningPanelByEntryId.get(entry.id)?.raw"
+            :summary="reasoningPanelByEntryId.get(entry.id)?.summary"
+            :preference="reasoningDisplayMode"
+            :running="isReasoningRunning(reasoningPanelByEntryId.get(entry.id)!)"
+            :t="t"
+          />
+          <article
+            v-if="entry.kind !== 'reasoning'"
+            :class="
+              entry.kind === 'message'
+                ? ['message-row', `role-${entry.role}`, { live: entry.live }]
+                : entry.kind === 'metrics'
+                  ? 'metrics-row'
+                  : entry.kind === 'progress'
+                    ? 'progress-row'
+                    : 'tool-row'
+            "
+          >
+            <template v-if="entry.kind === 'message'">
+              <span class="message-role">{{ entry.role === 'assistant' ? t('assistant') : entry.role === 'user' ? t('user') : entry.role }}</span>
+              <div v-if="entry.role === 'assistant'" class="message-content markdown-body" v-html="renderMarkdown(entry.text)"></div>
+              <p v-else class="message-content">{{ entry.text }}</p>
+            </template>
+            <span v-else-if="entry.kind === 'progress'" class="progress-label">
+              <span class="progress-dot" aria-hidden="true"></span>
+              {{ progressLabel(entry.phase) }}
+            </span>
+            <span v-else>{{ entry.text }}</span>
+          </article>
+        </template>
       </div>
       <button v-if="hasUnreadBelow" type="button" class="jump-to-bottom" @click="jumpToBottom">↓</button>
     </div>
 
-    <Composer :busy="busy" :t="t" @submit="emit('submit', $event)" @cancel="emit('cancel')" />
+    <Composer
+      :active-busy="activeBusy"
+      :active-runtime="activeRuntime"
+      :t="t"
+      @submit="emit('submit', $event)"
+      @cancel="emit('cancel')"
+    />
   </section>
 </template>

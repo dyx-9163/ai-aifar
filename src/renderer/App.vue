@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import type { ModelProfileInput, ModelResponseSpeed, ReasoningEffort } from '../shared/domain';
+import type { ModelProfileInput } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -65,18 +65,17 @@ function toggleTheme(): void {
   document.documentElement.dataset.theme = theme.value;
 }
 
-async function testModelProfile(profile: ModelProfileInput, report: (message: string) => void): Promise<void> {
+async function testModelProfile(profile: ModelProfileInput, report: (message: string, ok: boolean) => void): Promise<void> {
   try {
     const result = await app.testModelProfile(profile);
-    report(result.message);
+    report(result.message, true);
   } catch (error) {
-    report(error instanceof Error ? error.message : t.value('modelConnectionFailed'));
+    report(error instanceof Error ? error.message : t.value('modelConnectionFailed'), false);
   }
 }
 
 async function updateModelRuntime(patch: {
-  reasoning?: { mode?: 'enabled' | 'disabled'; effort?: ReasoningEffort };
-  responseSpeed?: ModelResponseSpeed;
+  reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string };
 }): Promise<void> {
   runtimeError.value = '';
   try {
@@ -94,6 +93,7 @@ async function updateModelRuntime(patch: {
       :threads="app.state.value.snapshot.threads"
       :active-thread-id="activeThreadId"
       :active-group-id="app.state.value.activeGroupId"
+      :runtime-by-thread="app.state.value.runtimeByThread"
       :loading="app.loading.value"
       :theme="theme"
       :t="t"
@@ -112,7 +112,9 @@ async function updateModelRuntime(patch: {
       :thread="app.activeThread.value"
       :items="app.activeItems.value"
       :events="app.visibleEvents.value"
-      :busy="app.activeBusy.value"
+      :active-busy="app.activeBusy.value"
+      :active-runtime="app.activeRuntime.value"
+      :reasoning-display-mode="app.state.value.snapshot.settings.reasoningDisplayMode"
       :loading="app.loading.value"
       :model-profiles="app.state.value.snapshot.modelProfiles"
       :active-model-profile-id="app.activeModelProfileId.value"
@@ -121,6 +123,7 @@ async function updateModelRuntime(patch: {
       :t="t"
       @submit="app.startTurn"
       @cancel="app.cancelTurn"
+      @open-settings="view = 'settings'"
       @select-model="app.selectModelProfile"
       @update-model-runtime="updateModelRuntime"
     />

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { ChatGroup, ThreadSummary } from '../../shared/domain';
+import type { ChatGroup, ThreadRuntimeState, ThreadSummary } from '../../shared/domain';
 import type { Translator } from '../i18n';
+import { threadRuntimePresentation } from '../modelControls';
 
 const props = defineProps<{
   groups: ChatGroup[];
   threads: ThreadSummary[];
   activeThreadId?: string;
   activeGroupId?: string;
+  runtimeByThread: Record<string, ThreadRuntimeState>;
   loading: boolean;
   theme: 'light' | 'dark';
   t: Translator;
@@ -30,6 +32,18 @@ const groupsWithThreads = computed(() =>
     threads: props.threads.filter((thread) => thread.groupId === group.id),
   })),
 );
+
+function runtimeText(thread: ThreadSummary): string {
+  const presentation = threadRuntimePresentation(props.runtimeByThread[thread.id], thread.status);
+  const label = props.t(presentation.key);
+  return presentation.key === 'queuedPosition' && presentation.queuePosition
+    ? label.replace('{position}', String(presentation.queuePosition))
+    : label;
+}
+
+function runtimeActive(thread: ThreadSummary): boolean {
+  return threadRuntimePresentation(props.runtimeByThread[thread.id], thread.status).active;
+}
 </script>
 
 <template>
@@ -63,18 +77,22 @@ const groupsWithThreads = computed(() =>
           <span class="group-name">{{ entry.group.name }}</span>
           <span class="group-count">{{ entry.threads.length }}</span>
         </button>
-        <div
+        <article
           v-for="thread in entry.threads"
           :key="thread.id"
           class="thread-row"
-          :class="{ active: thread.id === activeThreadId }"
+          :class="{ active: thread.id === activeThreadId, 'runtime-active': runtimeActive(thread) }"
+          :data-testid="`thread-row-${thread.id}`"
         >
           <button class="thread-button" type="button" @click="$emit('selectThread', thread.id)">
             <span class="thread-title">{{ thread.title }}</span>
-            <span class="thread-status">{{ thread.status }}</span>
+            <span class="thread-status" data-testid="thread-runtime-status">
+              <span v-if="runtimeActive(thread)" class="thread-runtime-dot" aria-hidden="true"></span>
+              {{ runtimeText(thread) }}
+            </span>
           </button>
           <button class="delete-chat-button" type="button" :title="t('deleteChat')" @click.stop="$emit('deleteThread', thread.id)">×</button>
-        </div>
+        </article>
       </section>
 
       <p v-if="!loading && threads.length === 0" class="empty-copy">{{ t('noTasksYet') }}</p>

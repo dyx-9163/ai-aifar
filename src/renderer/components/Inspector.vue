@@ -80,10 +80,6 @@ function speedValue(metrics: ModelRunMetrics): string {
           <strong>{{ speedValue(latestMetrics) }}</strong>
         </div>
         <div class="metric-row">
-          <span>{{ t('responseSpeed') }}</span>
-          <strong>{{ latestMetrics.responseSpeed ?? t('standard') }}</strong>
-        </div>
-        <div class="metric-row">
           <span>{{ t('completionTokens') }}</span>
           <strong>{{ latestMetrics.completionTokens ?? '-' }} · {{ latestMetrics.usageSource }}</strong>
         </div>

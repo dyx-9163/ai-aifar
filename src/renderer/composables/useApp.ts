@@ -199,7 +199,16 @@ export function useApp() {
           provider: profile.provider,
           baseUrl: profile.baseUrl,
           model: profile.model,
-          capabilities: { ...profile.capabilities },
+          capabilities: {
+            ...profile.capabilities,
+            reasoning: {
+              ...profile.capabilities.reasoning,
+              effortOptions: [...profile.capabilities.reasoning.effortOptions],
+              outputModes: [...profile.capabilities.reasoning.outputModes],
+            },
+            concurrency: { ...profile.capabilities.concurrency },
+            usage: { ...profile.capabilities.usage },
+          },
           reasoning: optimistic.reasoning,
           responseSpeed: optimistic.responseSpeed,
           isDefault: profile.isDefault,

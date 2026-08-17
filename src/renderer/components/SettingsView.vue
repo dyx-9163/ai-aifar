@@ -5,8 +5,8 @@ import type {
   LanguagePreference,
   ModelProfile,
   ModelProfileInput,
-  ModelResponseSpeed,
-  ReasoningEffort,
+  ReasoningDisplayMode,
+  ReasoningInputMode,
   ReasoningMode,
   ReasoningProtocol,
   RuntimeSettingsInput,
@@ -25,14 +25,15 @@ const emit = defineEmits<{
   back: [];
   saveModelProfile: [profile: ModelProfileInput];
   deleteModelProfile: [id: string];
-  testModelProfile: [profile: ModelProfileInput, report: (message: string) => void];
+  testModelProfile: [profile: ModelProfileInput, report: (message: string, ok: boolean) => void];
   selectModelProfile: [id?: string];
   setLanguage: [language: LanguagePreference];
   updateSettings: [settings: RuntimeSettingsInput];
 }>();
 
 const modelStatus = ref(props.t('apiKeyNotice'));
-const activeSection = ref<'general' | 'models' | 'advanced'>('models');
+const activeSection = ref<'general' | 'models' | 'runtime'>('models');
+const capabilityTestState = ref<'untested' | 'testing' | 'verified' | 'failed'>('untested');
 const form = reactive({
   id: '',
   name: 'Private model endpoint',
@@ -42,8 +43,34 @@ const form = reactive({
   isDefault: true,
   reasoningMode: 'disabled' as ReasoningMode,
   reasoningProtocol: 'none' as ReasoningProtocol,
-  reasoningEffort: 'medium' as ReasoningEffort,
-  responseSpeed: 'standard' as ModelResponseSpeed,
+  reasoningEffort: '',
+  profileReasoningDisplay: 'auto' as ReasoningDisplayMode,
+  reasoningInputMode: 'unsupported' as ReasoningInputMode,
+  effortOptionsText: '',
+  defaultEffort: '',
+  rawOutput: false,
+  summaryOutput: false,
+  maxConcurrency: 1,
+  maxConcurrencyLimit: 32,
+});
+
+const effortOptions = computed(() => [...new Set(
+  form.effortOptionsText
+    .split(/[\n,]/)
+    .map((value) => value.trim())
+    .filter(Boolean),
+)]);
+const capabilityError = computed(() => {
+  if (!Number.isInteger(form.maxConcurrency) || form.maxConcurrency < 1 || form.maxConcurrency > form.maxConcurrencyLimit) {
+    return props.t('maxConcurrencyError').replace('{max}', String(form.maxConcurrencyLimit));
+  }
+  if (form.reasoningInputMode === 'effort' && effortOptions.value.length === 0) {
+    return props.t('effortOptionsRequired');
+  }
+  if (form.reasoningInputMode === 'effort' && form.defaultEffort && !effortOptions.value.includes(form.defaultEffort)) {
+    return props.t('defaultEffortInvalid');
+  }
+  return '';
 });
 
 const activeReasoningLabel = computed(() => {
@@ -74,8 +101,16 @@ function loadProfile(profile: ModelProfile): void {
   form.isDefault = profile.isDefault;
   form.reasoningMode = profile.reasoning.mode;
   form.reasoningProtocol = profile.reasoning.protocol;
-  form.reasoningEffort = profile.reasoning.effort ?? 'medium';
-  form.responseSpeed = profile.responseSpeed;
+  form.reasoningEffort = profile.reasoning.effort ?? '';
+  form.profileReasoningDisplay = profile.reasoning.display;
+  form.reasoningInputMode = profile.capabilities.reasoning.inputMode;
+  form.effortOptionsText = profile.capabilities.reasoning.effortOptions.join(', ');
+  form.defaultEffort = profile.capabilities.reasoning.defaultEffort ?? '';
+  form.rawOutput = profile.capabilities.reasoning.outputModes.includes('raw');
+  form.summaryOutput = profile.capabilities.reasoning.outputModes.includes('summary');
+  form.maxConcurrency = profile.maxConcurrency;
+  form.maxConcurrencyLimit = profile.capabilities.concurrency.maxLimit ?? 32;
+  capabilityTestState.value = 'untested';
   modelStatus.value = profile.apiKeyConfigured ? props.t('savedProfileLoadedKeepKey') : props.t('savedProfileLoaded');
 }
 
@@ -88,8 +123,16 @@ function resetForm(): void {
   form.isDefault = props.modelProfiles.length === 0;
   form.reasoningMode = 'disabled';
   form.reasoningProtocol = 'none';
-  form.reasoningEffort = 'medium';
-  form.responseSpeed = 'standard';
+  form.reasoningEffort = '';
+  form.profileReasoningDisplay = 'auto';
+  form.reasoningInputMode = 'unsupported';
+  form.effortOptionsText = '';
+  form.defaultEffort = '';
+  form.rawOutput = false;
+  form.summaryOutput = false;
+  form.maxConcurrency = 1;
+  form.maxConcurrencyLimit = 32;
+  capabilityTestState.value = 'untested';
   modelStatus.value = props.t('readyToAddModel');
 }
 
@@ -107,32 +150,50 @@ function inputFromForm(): ModelProfileInput {
       vision: false,
       longContext: false,
       reasoning: {
-        inputMode: form.reasoningProtocol === 'none' ? 'unsupported' : 'toggle',
-        effortOptions: [],
-        outputModes: form.reasoningProtocol === 'qwen' ? ['raw'] : [],
+        inputMode: form.reasoningInputMode,
+        effortOptions: effortOptions.value,
+        outputModes: [
+          ...(form.rawOutput ? ['raw' as const] : []),
+          ...(form.summaryOutput ? ['summary' as const] : []),
+        ],
+        defaultEffort: form.defaultEffort || undefined,
       },
+      concurrency: { defaultLimit: 1, configurable: true, maxLimit: form.maxConcurrencyLimit },
       streaming: true,
       usage: { tokens: true, reasoningTokens: true },
     },
     reasoning: {
       mode: form.reasoningMode,
       protocol: form.reasoningProtocol,
-      effort: form.reasoningEffort,
-      display: 'auto',
+      effort: form.reasoningInputMode === 'effort'
+        ? (effortOptions.value.includes(form.reasoningEffort) ? form.reasoningEffort : form.defaultEffort || undefined)
+        : form.reasoningEffort || undefined,
+      display: form.profileReasoningDisplay,
     },
-    responseSpeed: form.responseSpeed,
+    maxConcurrency: form.maxConcurrency,
   };
 }
 
 function saveProfile(): void {
+  if (capabilityError.value) {
+    modelStatus.value = capabilityError.value;
+    return;
+  }
   emit('saveModelProfile', inputFromForm());
   modelStatus.value = props.t('savedModelProfile');
 }
 
 function testProfile(): void {
+  if (capabilityError.value) {
+    modelStatus.value = capabilityError.value;
+    capabilityTestState.value = 'failed';
+    return;
+  }
   modelStatus.value = props.t('testingModelEndpoint');
-  emit('testModelProfile', inputFromForm(), (message) => {
+  capabilityTestState.value = 'testing';
+  emit('testModelProfile', inputFromForm(), (message, ok) => {
     modelStatus.value = message;
+    capabilityTestState.value = ok ? 'verified' : 'failed';
   });
 }
 
@@ -160,6 +221,13 @@ function handleContextLimitChange(event: Event): void {
 
 function handleMetricsChange(event: Event): void {
   emit('updateSettings', { showModelMetrics: (event.target as HTMLInputElement).checked });
+}
+
+function handleReasoningDisplayChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value as ReasoningDisplayMode;
+  if (value === 'auto' || value === 'raw' || value === 'summary') {
+    emit('updateSettings', { reasoningDisplayMode: value });
+  }
 }
 
 function reasoningModeLabel(mode: ReasoningMode): string {
@@ -207,9 +275,9 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
           <span>{{ t('modelProviders') }}</span>
           <small>{{ t('modelProvidersHint') }}</small>
         </button>
-        <button type="button" :class="{ active: activeSection === 'advanced' }" @click="activeSection = 'advanced'">
-          <span>{{ t('advanced') }}</span>
-          <small>{{ t('advancedHint') }}</small>
+        <button type="button" :class="{ active: activeSection === 'runtime' }" @click="activeSection = 'runtime'">
+          <span>{{ t('runtime') }}</span>
+          <small>{{ t('runtimeHint') }}</small>
         </button>
       </nav>
 
@@ -282,7 +350,12 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
               <span>{{ t('defaultModel') }}</span>
             </label>
             <div class="settings-subsection">
-              <h3>{{ t('reasoning') }}</h3>
+              <div class="capability-heading">
+                <h3>{{ t('reasoningCapabilities') }}</h3>
+                <span class="capability-status" :data-state="capabilityTestState" data-testid="capability-test-status">
+                  {{ t(capabilityTestState) }}
+                </span>
+              </div>
               <label class="field-stack">
                 <span>{{ t('reasoningMode') }}</span>
                 <select v-model="form.reasoningMode" data-testid="reasoning-mode-select" class="model-select wide">
@@ -301,22 +374,55 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                 </select>
               </label>
               <label class="field-stack">
-                <span>{{ t('reasoningEffort') }}</span>
-                <select v-model="form.reasoningEffort" class="model-select wide">
-                  <option value="low">{{ t('low') }}</option>
-                  <option value="medium">{{ t('medium') }}</option>
-                  <option value="high">{{ t('high') }}</option>
-                  <option value="xhigh">{{ t('xhigh') }}</option>
+                <span>{{ t('reasoningInputMode') }}</span>
+                <select v-model="form.reasoningInputMode" data-testid="reasoning-input-mode" class="model-select wide">
+                  <option value="unsupported">{{ t('unsupported') }}</option>
+                  <option value="toggle">{{ t('toggle') }}</option>
+                  <option value="effort">{{ t('effortOptions') }}</option>
+                  <option value="custom">{{ t('customUnverified') }}</option>
                 </select>
+              </label>
+              <label v-if="form.reasoningInputMode === 'effort'" class="field-stack capability-wide">
+                <span>{{ t('effortOptions') }}</span>
+                <input
+                  v-model="form.effortOptionsText"
+                  class="text-input"
+                  data-testid="effort-options-input"
+                  :placeholder="t('effortOptionsPlaceholder')"
+                />
+              </label>
+              <label v-if="form.reasoningInputMode === 'effort'" class="field-stack">
+                <span>{{ t('defaultEffort') }}</span>
+                <select v-model="form.defaultEffort" data-testid="default-effort-select" class="model-select wide">
+                  <option value="">{{ t('none') }}</option>
+                  <option v-for="effort in effortOptions" :key="effort" :value="effort">{{ effort }}</option>
+                </select>
+              </label>
+              <label class="check-row capability-check">
+                <input v-model="form.rawOutput" data-testid="raw-output-toggle" type="checkbox" />
+                <span>{{ t('rawReasoning') }}</span>
+              </label>
+              <label class="check-row capability-check">
+                <input v-model="form.summaryOutput" data-testid="summary-output-toggle" type="checkbox" />
+                <span>{{ t('nativeReasoningSummary') }}</span>
               </label>
               <label class="field-stack">
-                <span>{{ t('responseSpeed') }}</span>
-                <select v-model="form.responseSpeed" class="model-select wide">
-                  <option value="standard">{{ t('standard') }}</option>
-                  <option value="fast">{{ t('fast') }}</option>
-                  <option value="quality">{{ t('quality') }}</option>
-                </select>
+                <span>{{ t('maximumConcurrentTurns') }}</span>
+                <input
+                  v-model.number="form.maxConcurrency"
+                  class="text-input"
+                  data-testid="max-concurrency-input"
+                  type="number"
+                  min="1"
+                  :max="form.maxConcurrencyLimit"
+                />
               </label>
+              <p v-if="form.reasoningInputMode === 'custom'" class="settings-warning capability-wide">
+                {{ t('customCapabilityWarning') }}
+              </p>
+              <p v-if="capabilityError" class="field-error capability-wide" data-testid="capability-validation-error">
+                {{ capabilityError }}
+              </p>
             </div>
           </div>
         </div>
@@ -331,8 +437,25 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
       </section>
 
       <section v-else class="settings-card">
-        <p class="pane-label">{{ t('advanced') }}</p>
+        <p class="pane-label">{{ t('runtime') }}</p>
         <h2>{{ t('runtimeBehavior') }}</h2>
+        <label class="field-stack">
+          <span>{{ t('reasoningDisplayPreference') }}</span>
+          <select
+            class="model-select wide"
+            data-testid="reasoning-display-select"
+            :value="settings.reasoningDisplayMode"
+            @change="handleReasoningDisplayChange"
+          >
+            <option value="auto">{{ t('automatic') }}</option>
+            <option value="summary">{{ t('reasoningSummary') }}</option>
+            <option value="raw">{{ t('rawReasoning') }}</option>
+          </select>
+        </label>
+        <div class="runtime-explanation">
+          <strong>{{ t('fifoQueueTitle') }}</strong>
+          <p>{{ t('fifoQueueDescription') }}</p>
+        </div>
         <label class="toggle-row">
           <span>{{ t('metricsDisplay') }}</span>
           <input data-testid="metrics-toggle" type="checkbox" :checked="settings.showModelMetrics" @change="handleMetricsChange" />
