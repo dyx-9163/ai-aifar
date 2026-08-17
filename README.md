@@ -64,7 +64,7 @@ pnpm make
 
 `pnpm test:e2e` packages the app, starts the packaged Windows executable, and runs deterministic Electron acceptance against an in-process fake OpenAI-compatible SSE server. It covers per-profile FIFO/concurrency, background focus isolation, queued/running cancellation, answer/raw/summary separation by item identity, browser selection/copy behavior, restart interruption, bounded SQLite rows, and a controlled provider-error secret scan. Screenshots and Playwright diagnostics are written below ignored `test-results/`.
 
-The live Qwen suite is explicitly opt-in and never substitutes the fake server. Without `PRIVATE_AI_LIVE_MODEL_E2E=1` it skips before probing or launching Electron. When enabled, it probes `${PRIVATE_AI_LIVE_MODEL_BASE_URL}/models` first (default `http://127.0.0.1:8080/v1`) and requires that response to list the configured model name. An unreachable endpoint, non-success response, invalid model list, or model-name mismatch produces an explicit skip reason.
+The live Qwen suite is explicitly opt-in and does not import or start the project's fake E2E server. The operator selects the endpoint. Without `PRIVATE_AI_LIVE_MODEL_E2E=1` the suite skips before probing or launching Electron. When enabled, it probes `${PRIVATE_AI_LIVE_MODEL_BASE_URL}/models` first (default `http://127.0.0.1:8080/v1`) and requires that response to list the configured model name. An unreachable endpoint, non-success response, invalid model list, or model-name mismatch produces an explicit skip reason.
 
 ```powershell
 # Explicit opt-in, followed by endpoint/model values shown at their defaults.

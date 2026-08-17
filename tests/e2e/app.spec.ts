@@ -514,8 +514,12 @@ function verifyPersistedTurn(databasePath: string, turnId: string, apiKey: strin
     expect(items.filter((item) => item.kind === 'message' && item.role === 'user')).toHaveLength(1);
     const assistantItems = items.filter((item) => item.kind === 'message' && item.role === 'assistant');
     expect(assistantItems).toHaveLength(1);
-    expect(assistantItems[0]?.turnId).toBe(turnId);
-    expect(assistantItems[0]?.text?.trim()).not.toBe('');
+    const assistantItem = assistantItems[0];
+    expect(assistantItem).toBeDefined();
+    expect(assistantItem?.turnId).toBe(turnId);
+    expect(assistantItem?.kind).toBe('message');
+    expect(assistantItem?.role).toBe('assistant');
+    expect(assistantItem?.text).toBe('**shared-output**');
     expect(items.filter((item) => item.kind === 'reasoning' && item.mode === 'raw')).toHaveLength(1);
     expect(items.filter((item) => item.kind === 'reasoning' && item.mode === 'summary')).toHaveLength(1);
 
