@@ -50,14 +50,24 @@ async function deleteThread(threadId: string): Promise<void> {
   if (!window.confirm(t.value('deleteChatConfirm'))) {
     return;
   }
-  await app.deleteThread(threadId);
+  runtimeError.value = '';
+  try {
+    await app.deleteThread(threadId);
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : t.value('deleteActiveChatFailed');
+  }
 }
 
 async function deleteGroup(groupId: string): Promise<void> {
   if (!window.confirm(t.value('deleteGroupConfirm'))) {
     return;
   }
-  await app.deleteGroup(groupId);
+  runtimeError.value = '';
+  try {
+    await app.deleteGroup(groupId);
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : t.value('deleteActiveGroupFailed');
+  }
 }
 
 function toggleTheme(): void {

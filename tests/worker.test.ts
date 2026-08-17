@@ -128,6 +128,33 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('rejects deleting a thread or group while either contains authoritative active work', async () => {
+    const release = deferred<void>();
+    const harness = createHarness(async (_profile, _messages, _handlers, signal) => {
+      await abortable(signal, release.promise);
+      return metrics();
+    });
+    const group = harness.database.createGroup('Active group');
+    const thread = harness.database.createThread('Active thread', group.id);
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'hold', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('turn.started'));
+
+    expect(() => harness.runtime.deleteThread(thread.id)).toThrow('active turn');
+    expect(() => harness.runtime.deleteGroup(group.id)).toThrow('active turn');
+    expect(harness.database.getSnapshot().threads.map((candidate) => candidate.id)).toContain(thread.id);
+    expect(harness.database.getSnapshot().groups.map((candidate) => candidate.id)).toContain(group.id);
+
+    expect(harness.runtime.cancelTurn(turnId)).toBe(true);
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.cancelled'));
+    harness.runtime.deleteThread(thread.id);
+    harness.runtime.deleteGroup(group.id);
+    expect(harness.database.getSnapshot().threads.map((candidate) => candidate.id)).not.toContain(thread.id);
+    expect(harness.database.getSnapshot().groups.map((candidate) => candidate.id)).not.toContain(group.id);
+    harness.database.close();
+  });
+
   it('creates distinct default turn ids for starts in the same millisecond', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_797_465_600_000);
     const harness = createHarness(async () => new Promise(() => undefined), undefined, false);

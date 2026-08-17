@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
 import type { AppSnapshot, Item, ModelCapabilities, ModelProfile, ReasoningItem } from '../src/shared/domain';
 import { openAiCapabilities, qwenCapabilities } from '../src/agent/modelCapabilities';
-import { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot, emptyState, reduceEvent, useApp } from '../src/renderer/composables/useApp';
+import {
+  appendOptimisticUserMessage,
+  applyAssistantDeltaToSnapshot,
+  emptyState,
+  reduceEvent,
+  startInitialAgentSync,
+  useApp,
+} from '../src/renderer/composables/useApp';
 import { createTranslator, isLanguagePreference } from '../src/renderer/i18n';
 import { renderMarkdown } from '../src/renderer/markdown';
 import {
@@ -95,6 +102,94 @@ afterEach(() => {
 });
 
 describe('renderer state reducer', () => {
+  it('subscribes before snapshot and replays buffered terminal state without duplicating persisted text', async () => {
+    let state = emptyState();
+    let listener: ((event: AgentEvent) => void) | undefined;
+    const calls: string[] = [];
+    let resolveSnapshot!: (snapshot: AppSnapshot) => void;
+    const snapshotPromise = new Promise<AppSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    const sync = startInitialAgentSync({
+      readState: () => state,
+      writeState: (next) => { state = next; },
+      getSnapshot: () => {
+        calls.push('snapshot');
+        return snapshotPromise;
+      },
+      subscribe: (next) => {
+        calls.push('subscribe');
+        listener = next;
+        return () => calls.push('unsubscribe');
+      },
+      onReady: () => calls.push('ready'),
+    });
+
+    listener?.({
+      type: 'answer.delta', threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 1, text: 'answer',
+    });
+    listener?.({
+      type: 'turn.completed', threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 2,
+    });
+    const base = emptyState().snapshot;
+    resolveSnapshot({
+      ...base,
+      groups: [{ id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z' }],
+      threads: [{
+        id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'running', modelProfileId: 'model-1',
+        createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:01.000Z',
+      }],
+      turns: [{
+        id: 'turn-1', threadId: 'thread-1', modelProfileId: 'model-1', status: 'running',
+        createdAt: '2026-08-17T00:00:00.000Z', incomplete: true,
+      }],
+      items: {
+        'thread-1': [{
+          id: 'item-turn-1-assistant', threadId: 'thread-1', turnId: 'turn-1', kind: 'message', role: 'assistant',
+          text: 'answer', incomplete: true, createdAt: '2026-08-17T00:00:01.000Z',
+        }],
+      },
+    });
+    await sync.ready;
+
+    expect(calls.slice(0, 2)).toEqual(['subscribe', 'snapshot']);
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'completed' });
+    expect(state.snapshot.items['thread-1']).toMatchObject([{ text: 'answer', incomplete: false }]);
+    sync.dispose();
+    const disposedState = state;
+    listener?.({
+      type: 'turn.started', threadId: 'thread-2', turnId: 'turn-2', modelProfileId: 'model-1', sequence: 1, title: 'late',
+    });
+    expect(state).toBe(disposedState);
+    expect(calls).toContain('unsubscribe');
+  });
+
+  it('does not publish a late initial snapshot after disposal', async () => {
+    let state = emptyState();
+    let listener: ((event: AgentEvent) => void) | undefined;
+    let ready = false;
+    let resolveSnapshot!: (snapshot: AppSnapshot) => void;
+    const sync = startInitialAgentSync({
+      readState: () => state,
+      writeState: (next) => { state = next; },
+      getSnapshot: () => new Promise<AppSnapshot>((resolve) => { resolveSnapshot = resolve; }),
+      subscribe: (next) => {
+        listener = next;
+        return () => undefined;
+      },
+      onReady: () => { ready = true; },
+    });
+    sync.dispose();
+    listener?.({
+      type: 'turn.started', threadId: 'thread-late', turnId: 'turn-late', modelProfileId: 'model-1', sequence: 1, title: 'late',
+    });
+    resolveSnapshot(emptyState().snapshot);
+    await sync.ready;
+
+    expect(state).toEqual(emptyState());
+    expect(ready).toBe(false);
+  });
+
   it('patches only exposed model fields while preserving existing custom capabilities', () => {
     const existing: ModelProfile = {
       ...modelProfileFixture({

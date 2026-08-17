@@ -81,6 +81,8 @@ export interface WorkerTurnRuntime {
   cancelTurn(turnId: string): boolean;
   respondApproval(approvalId: string, approved: boolean): boolean;
   updateLimit(modelProfileId: string): void;
+  deleteThread(threadId: string): void;
+  deleteGroup(groupId: string): void;
 }
 
 type ActiveTurnContext = {
@@ -354,6 +356,21 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     updateLimit(modelProfileId) {
       scheduler.updateLimit(modelProfileId);
     },
+    deleteThread(threadId) {
+      if (scheduler.hasActiveThread(threadId)) {
+        throw new Error('Cannot delete a chat while it has an active turn. Stop or cancel the turn first.');
+      }
+      database.deleteThread(threadId);
+    },
+    deleteGroup(groupId) {
+      const activeThread = database.getSnapshot().threads.find(
+        (thread) => thread.groupId === groupId && scheduler.hasActiveThread(thread.id),
+      );
+      if (activeThread) {
+        throw new Error('Cannot delete a group while one of its chats has an active turn. Stop or cancel the turn first.');
+      }
+      database.deleteGroup(groupId);
+    },
   };
 }
 
@@ -372,9 +389,9 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
 
   if (message.type === 'snapshot.get') return database.getSnapshot();
   if (message.type === 'thread.create') return database.createThread(message.title, message.groupId);
-  if (message.type === 'thread.delete') return database.deleteThread(message.threadId);
+  if (message.type === 'thread.delete') return turnRuntime.deleteThread(message.threadId);
   if (message.type === 'group.create') return database.createGroup(message.name);
-  if (message.type === 'group.delete') return database.deleteGroup(message.groupId);
+  if (message.type === 'group.delete') return turnRuntime.deleteGroup(message.groupId);
   if (message.type === 'thread.setModel') return database.setThreadModel(message.threadId, message.modelProfileId || undefined);
   if (message.type === 'modelProfile.save') {
     const profile = database.saveModelProfile(message.profile);

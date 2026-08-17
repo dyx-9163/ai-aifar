@@ -7,6 +7,7 @@ import {
   type AgentClientState,
 } from '../../agentClient/core';
 import type {
+  AppSnapshot,
   ChatGroup,
   Item,
   LanguagePreference,
@@ -20,6 +21,7 @@ import type {
   ThreadRuntimeState,
   ThreadSummary,
 } from '../../shared/domain';
+import type { AgentEvent } from '../../shared/protocol';
 
 export interface ActiveModelRuntimePatch {
   reasoning?: Partial<{
@@ -37,6 +39,48 @@ export { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot };
 
 const TURN_START_ACK_TIMEOUT_MS = 10_000;
 const RUNTIME_SETTINGS_TIMEOUT_MS = 10_000;
+
+export function startInitialAgentSync(options: {
+  readState(): RendererState;
+  writeState(state: RendererState): void;
+  getSnapshot(): Promise<AppSnapshot>;
+  subscribe(listener: (event: AgentEvent) => void): () => void;
+  onReady(): void;
+}): { ready: Promise<void>; dispose(): void } {
+  let disposed = false;
+  let buffering = true;
+  const bufferedEvents: AgentEvent[] = [];
+  const unsubscribe = options.subscribe((event) => {
+    if (disposed) return;
+    if (buffering) {
+      bufferedEvents.push(event);
+      return;
+    }
+    options.writeState(reduceEvent(options.readState(), event));
+  });
+  const ready = (async () => {
+    const snapshot = await options.getSnapshot();
+    if (disposed) return;
+    let next = options.readState();
+    for (const event of bufferedEvents) {
+      next = reduceEvent(next, event);
+    }
+    next = reduceEvent(next, { type: 'snapshot', snapshot });
+    if (disposed) return;
+    options.writeState(next);
+    buffering = false;
+    options.onReady();
+  })();
+
+  return {
+    ready,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      unsubscribe();
+    },
+  };
+}
 
 export function useApp() {
   const state = ref<RendererState>(emptyState());
@@ -72,11 +116,15 @@ export function useApp() {
   let unsubscribe: (() => void) | undefined;
 
   onMounted(async () => {
-    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
-    unsubscribe = window.desktop.subscribe((event) => {
-      state.value = reduceEvent(state.value, event);
+    const sync = startInitialAgentSync({
+      readState: () => state.value,
+      writeState: (next) => { state.value = next; },
+      getSnapshot: () => window.desktop.getSnapshot(),
+      subscribe: (listener) => window.desktop.subscribe(listener),
+      onReady: () => { loading.value = false; },
     });
-    loading.value = false;
+    unsubscribe = sync.dispose;
+    await sync.ready;
   });
 
   onUnmounted(() => {

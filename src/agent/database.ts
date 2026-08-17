@@ -164,7 +164,11 @@ class SqliteAppDatabase implements AppDatabase {
 
     const approvals = this.db
       .prepare(
-        'SELECT id, thread_id, turn_id, title, description, status, created_at, responded_at FROM approvals ORDER BY created_at ASC',
+        `SELECT a.id, a.thread_id, a.turn_id, a.title, a.description, a.status, a.created_at, a.responded_at
+         FROM approvals a
+         INNER JOIN threads t ON t.id = a.thread_id
+         WHERE t.deleted_at IS NULL
+         ORDER BY a.created_at ASC`,
       )
       .all()
       .map((row) => mapApproval(row as ApprovalRow));

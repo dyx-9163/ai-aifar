@@ -419,6 +419,29 @@ describe('sqlite app database', () => {
     db.close();
   });
 
+  it('excludes approvals that belong to a soft-deleted thread', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const thread = db.createThread('Deleted approval');
+      db.createTurn(turnRecord('turn-deleted', thread.id, 'model-1', 'running'));
+      db.upsertApproval({
+        id: 'approval-deleted',
+        threadId: thread.id,
+        turnId: 'turn-deleted',
+        title: 'Approve',
+        description: 'Must not survive in the visible snapshot.',
+        status: 'pending',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      });
+
+      db.deleteThread(thread.id);
+
+      expect(db.getSnapshot().approvals).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('persists normalized model profile concurrency across reopen', () => {
     const dbPath = createDbPath();
     const first = openDatabase(dbPath);
