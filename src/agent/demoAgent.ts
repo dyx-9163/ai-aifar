@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../shared/protocol.js';
+import type { SequencedAgentEvent } from '../shared/protocol.js';
 
 export interface DemoTurnInput {
   threadId: string;
@@ -8,27 +8,22 @@ export interface DemoTurnInput {
   approvalResponse?: Promise<boolean>;
 }
 
-export type EmitAgentEvent = (event: AgentEvent) => void | Promise<void>;
-
-type SequencedEvent = Exclude<AgentEvent, { type: 'snapshot' }>;
 type StripEnvelope<T> = T extends unknown ? Omit<T, 'threadId' | 'turnId' | 'modelProfileId' | 'sequence'> : never;
-type SequencedEventPayload = StripEnvelope<SequencedEvent>;
+export type DemoEventPayload = StripEnvelope<SequencedAgentEvent>;
+export type EmitDemoEvent = (event: DemoEventPayload) => void | Promise<void>;
+export type DemoTurnOutcome = 'completed' | 'awaiting-approval';
 
-export async function runDemoTurn(input: DemoTurnInput, emit: EmitAgentEvent, signal: AbortSignal): Promise<void> {
-  let sequence = 1;
-  const next = async (event: SequencedEventPayload) => {
+export async function runDemoTurn(
+  input: DemoTurnInput,
+  emit: EmitDemoEvent,
+  signal: AbortSignal,
+): Promise<DemoTurnOutcome> {
+  const next = async (event: DemoEventPayload) => {
     throwIfAborted(signal);
-    await emit({
-      ...event,
-      threadId: input.threadId,
-      turnId: input.turnId,
-      modelProfileId: input.modelProfileId ?? '__demo__',
-      sequence: sequence++,
-    } as SequencedEvent);
+    await emit(event);
     await tick(signal);
   };
 
-  await next({ type: 'turn.started', title: titleFromPrompt(input.text) });
   await next({ type: 'tool.started', toolId: `tool-${input.turnId}-plan`, title: 'Plan local task' });
 
   if (requiresApproval(input.text)) {
@@ -45,19 +40,15 @@ export async function runDemoTurn(input: DemoTurnInput, emit: EmitAgentEvent, si
     });
 
     if (!input.approvalResponse) {
-      return;
+      return 'awaiting-approval';
     }
 
-    const approved = await input.approvalResponse;
-    await next(
-      approved
-        ? { type: 'message.delta', text: 'Approval accepted. Demo mode still keeps the filesystem unchanged.' }
-        : { type: 'turn.failed', error: 'Approval rejected by user.' },
-    );
-    if (approved) {
-      await next({ type: 'turn.completed' });
+    const approved = await abortableApproval(input.approvalResponse, signal);
+    if (!approved) {
+      throw new Error('Approval rejected by user.');
     }
-    return;
+    await next({ type: 'message.delta', text: 'Approval accepted. Demo mode still keeps the filesystem unchanged.' });
+    return 'completed';
   }
 
   await next({
@@ -70,14 +61,14 @@ export async function runDemoTurn(input: DemoTurnInput, emit: EmitAgentEvent, si
     await next({ type: 'message.delta', text });
   }
 
-  await next({ type: 'turn.completed' });
+  return 'completed';
 }
 
 export function requiresApproval(text: string): boolean {
   return /修改|删除|write|delete/i.test(text);
 }
 
-function titleFromPrompt(text: string): string {
+export function demoTurnTitle(text: string): string {
   const trimmed = text.trim();
   return trimmed.length > 48 ? `${trimmed.slice(0, 45)}...` : trimmed || 'New task';
 }
@@ -99,4 +90,22 @@ function throwIfAborted(signal: AbortSignal): void {
 async function tick(signal: AbortSignal): Promise<void> {
   throwIfAborted(signal);
   await Promise.resolve();
+}
+
+function abortableApproval(approval: Promise<boolean>, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.reject(new DOMException('Turn was cancelled.', 'AbortError'));
+  return new Promise<boolean>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('Turn was cancelled.', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    void approval.then(
+      (approved) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(approved);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
