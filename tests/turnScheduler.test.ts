@@ -300,6 +300,273 @@ describe('ModelTurnScheduler', () => {
       'started:turn-2',
     ]);
   });
+
+  it('promotes queued turns in FIFO order when their queued callbacks resolve out of order', async () => {
+    let limit = 1;
+    const blocker = deferred<void>();
+    const secondQueued = deferred<void>();
+    const thirdQueued = deferred<void>();
+    const started: string[] = [];
+    const ran: string[] = [];
+    const scheduler = new ModelTurnScheduler(() => limit, {
+      onQueued: (turn) => {
+        if (turn.turnId === 'turn-2') return secondQueued.promise;
+        if (turn.turnId === 'turn-3') return thirdQueued.promise;
+      },
+      onStarted: (turn) => started.push(turn.turnId),
+      onCancelled: () => undefined,
+      onQueuePositions: () => undefined,
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => {
+      ran.push('turn-2');
+    }));
+    scheduler.enqueue(task('turn-3', 'thread-3', 'model-1', async () => {
+      ran.push('turn-3');
+    }));
+    await flushMicrotasks();
+
+    limit = 3;
+    scheduler.updateLimit('model-1');
+    thirdQueued.resolve();
+    await flushMicrotasks();
+
+    expect(started).toEqual(['blocker']);
+    expect(ran).toEqual([]);
+
+    secondQueued.resolve();
+    await flushMicrotasks();
+    expect(started).toEqual(['blocker', 'turn-2', 'turn-3']);
+    expect(ran).toEqual(['turn-2', 'turn-3']);
+
+    blocker.resolve();
+    await flushMicrotasks();
+  });
+
+  it('does not let a blocked model promotion stall another model', async () => {
+    const blocker = deferred<void>();
+    const queuedCallback = deferred<void>();
+    const started: string[] = [];
+    const scheduler = new ModelTurnScheduler(() => 1, {
+      onQueued: (turn) => turn.modelProfileId === 'model-1' ? queuedCallback.promise : undefined,
+      onStarted: (turn) => started.push(turn.turnId),
+      onCancelled: () => undefined,
+      onQueuePositions: () => undefined,
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('model-1-queued', 'thread-1', 'model-1', async () => undefined));
+    scheduler.enqueue(task('model-2-turn', 'thread-2', 'model-2', async () => undefined));
+    await flushMicrotasks();
+
+    expect(started).toEqual(['blocker', 'model-2-turn']);
+
+    queuedCallback.resolve();
+    blocker.resolve();
+    await flushMicrotasks();
+  });
+
+  it('cancels a reserved pre-start turn as queued and drains the released slot', async () => {
+    let limit = 1;
+    let blockPromotedPositions = false;
+    const blocker = deferred<void>();
+    const promotedPositions = deferred<void>();
+    const started: string[] = [];
+    const ran: string[] = [];
+    const cancelled: Array<[string, boolean]> = [];
+    const scheduler = new ModelTurnScheduler(() => limit, {
+      onQueued: () => undefined,
+      onStarted: (turn) => started.push(turn.turnId),
+      onCancelled: (turn, wasRunning) => cancelled.push([turn.turnId, wasRunning]),
+      onQueuePositions: async (_modelProfileId, positions) => {
+        if (blockPromotedPositions && positions.size === 1 && positions.has('turn-3')) {
+          await promotedPositions.promise;
+        }
+      },
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', abortableRun('turn-2', ran)));
+    scheduler.enqueue(task('turn-3', 'thread-3', 'model-1', async () => {
+      ran.push('turn-3');
+    }));
+    await flushMicrotasks();
+
+    blockPromotedPositions = true;
+    limit = 2;
+    scheduler.updateLimit('model-1');
+    expect(scheduler.cancel('turn-2')).toBe(true);
+    expect(scheduler.cancel('turn-2')).toBe(false);
+    await flushMicrotasks();
+
+    promotedPositions.resolve();
+    await flushMicrotasks();
+
+    expect(started).not.toContain('turn-2');
+    expect(ran).not.toContain('turn-2');
+    expect(cancelled).toContainEqual(['turn-2', false]);
+    expect(started).toContain('turn-3');
+
+    blocker.resolve();
+    await flushMicrotasks();
+  });
+
+  it('does not bypass an asynchronous onQueued callback during reentrant limit updates', async () => {
+    let limit = 1;
+    const blocker = deferred<void>();
+    const queuedCallback = deferred<void>();
+    const events: string[] = [];
+    let scheduler!: ModelTurnScheduler;
+    scheduler = new ModelTurnScheduler(() => limit, {
+      onQueued: (turn) => {
+        if (turn.turnId !== 'turn-2') return;
+        events.push('queued:enter');
+        limit = 2;
+        scheduler.updateLimit('model-1');
+        return queuedCallback.promise.then(() => {
+          events.push('queued:exit');
+        });
+      },
+      onStarted: (turn) => events.push(`started:${turn.turnId}`),
+      onCancelled: () => undefined,
+      onQueuePositions: () => undefined,
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => undefined));
+    await flushMicrotasks();
+
+    expect(events).toEqual(['started:blocker', 'queued:enter']);
+
+    queuedCallback.resolve();
+    await flushMicrotasks();
+    expect(events).toEqual([
+      'started:blocker',
+      'queued:enter',
+      'queued:exit',
+      'started:turn-2',
+    ]);
+
+    blocker.resolve();
+    await flushMicrotasks();
+  });
+
+  it('finishes reentrant onQueued before reporting its queued cancellation', async () => {
+    const blocker = deferred<void>();
+    const queuedCallback = deferred<void>();
+    const events: string[] = [];
+    const cancelResults: boolean[] = [];
+    let scheduler!: ModelTurnScheduler;
+    scheduler = new ModelTurnScheduler(() => 1, {
+      onQueued: (turn) => {
+        events.push('queued:enter');
+        cancelResults.push(scheduler.cancel(turn.turnId));
+        return queuedCallback.promise.then(() => {
+          events.push('queued:exit');
+        });
+      },
+      onStarted: (turn) => events.push(`started:${turn.turnId}`),
+      onCancelled: (turn, wasRunning) => events.push(`cancelled:${turn.turnId}:${wasRunning}`),
+      onQueuePositions: () => undefined,
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => undefined));
+    await flushMicrotasks();
+
+    expect(cancelResults).toEqual([true]);
+    expect(events).toEqual(['started:blocker', 'queued:enter']);
+
+    queuedCallback.resolve();
+    await flushMicrotasks();
+    expect(events).toEqual([
+      'started:blocker',
+      'queued:enter',
+      'queued:exit',
+      'cancelled:turn-2:false',
+    ]);
+
+    blocker.resolve();
+    await flushMicrotasks();
+  });
+
+  it('orders a reentrant queue cancellation before its newer position snapshot', async () => {
+    const blocker = deferred<void>();
+    const staleSnapshot = deferred<void>();
+    const applied: Array<Array<[string, number]>> = [];
+    let cancelled = false;
+    let scheduler!: ModelTurnScheduler;
+    scheduler = new ModelTurnScheduler(() => 1, {
+      onQueued: () => undefined,
+      onStarted: () => undefined,
+      onCancelled: () => undefined,
+      onQueuePositions: (_modelProfileId, positions) => {
+        const snapshot = [...positions.entries()];
+        if (!cancelled && positions.has('turn-2')) {
+          cancelled = true;
+          expect(scheduler.cancel('turn-2')).toBe(true);
+          return staleSnapshot.promise.then(() => {
+            applied.push(snapshot);
+          });
+        }
+        applied.push(snapshot);
+      },
+    });
+
+    scheduler.enqueue(task('blocker', 'thread-0', 'model-1', () => blocker.promise));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => undefined));
+    await flushMicrotasks();
+
+    expect(applied).toEqual([[]]);
+
+    staleSnapshot.resolve();
+    await flushMicrotasks();
+    expect(applied).toEqual([
+      [],
+      [['turn-2', 1]],
+      [],
+    ]);
+
+    blocker.resolve();
+    await flushMicrotasks();
+  });
+
+  it('contains callback failures without leaking a slot or an unhandled rejection', async () => {
+    const first = deferred<void>();
+    const started: string[] = [];
+    const ran: string[] = [];
+    const scheduler = new ModelTurnScheduler(() => 1, {
+      onQueued: async () => {
+        throw new Error('queued callback failed');
+      },
+      onStarted: (turn) => {
+        started.push(turn.turnId);
+        throw new Error('started callback failed');
+      },
+      onCancelled: async () => {
+        throw new Error('cancelled callback failed');
+      },
+      onQueuePositions: async () => {
+        throw new Error('positions callback failed');
+      },
+    });
+
+    scheduler.enqueue(task('turn-1', 'thread-1', 'model-1', (signal) => {
+      ran.push('turn-1');
+      return abortable(signal, first.promise);
+    }));
+    scheduler.enqueue(task('turn-2', 'thread-2', 'model-1', async () => {
+      ran.push('turn-2');
+    }));
+    await flushMicrotasks();
+
+    expect(scheduler.cancel('turn-1')).toBe(true);
+    await flushMicrotasks();
+
+    expect(started).toEqual(['turn-1', 'turn-2']);
+    expect(ran).toEqual(['turn-1', 'turn-2']);
+  });
 });
 
 function createHarness(limitFor: (modelProfileId: string) => number) {
@@ -344,8 +611,31 @@ function task(
   return { turnId, threadId, modelProfileId, title: turnId, run };
 }
 
+function abortableRun(turnId: string, ran: string[]): (signal: AbortSignal) => Promise<void> {
+  return (signal) => {
+    ran.push(turnId);
+    return abortable(signal, new Promise<void>(() => undefined));
+  };
+}
+
+function abortable(signal: AbortSignal, promise: Promise<void>): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(abortError());
+  }
+  return new Promise<void>((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(abortError()), { once: true });
+    void promise.then(resolve, reject);
+  });
+}
+
+function abortError(): Error {
+  const error = new Error('aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 25; index += 1) {
+    await Promise.resolve();
+  }
 }
