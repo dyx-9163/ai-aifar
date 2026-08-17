@@ -194,7 +194,7 @@ function buildChatCompletionBody(
     temperature: 0.2,
   };
 
-  if (includeUsage && profile.capabilities.streamingUsage) {
+  if (includeUsage && profile.capabilities.usage.tokens) {
     body.stream_options = { include_usage: true };
   }
 
@@ -215,7 +215,7 @@ function buildChatCompletionBody(
 }
 
 function shouldSendReasoning(profile: RuntimeModelProfile): boolean {
-  if (!profile.capabilities.reasoning || profile.reasoning.protocol === 'none' || profile.reasoning.protocol === 'custom') {
+  if (profile.capabilities.reasoning.inputMode === 'unsupported' || profile.reasoning.protocol === 'none' || profile.reasoning.protocol === 'custom') {
     return false;
   }
   return profile.reasoning.mode === 'enabled' || profile.reasoning.mode === 'auto';

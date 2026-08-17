@@ -12,8 +12,17 @@ const profile: RuntimeModelProfile = {
   model: 'Qwen3.5-9B',
   apiKey: 'local-not-used',
   apiKeyConfigured: true,
-  capabilities: { text: true, vision: false, longContext: false, reasoning: false, streamingUsage: false },
-  reasoning: { mode: 'disabled', protocol: 'none', effort: 'medium' },
+  capabilities: {
+    text: true,
+    vision: false,
+    longContext: false,
+    reasoning: { inputMode: 'unsupported', effortOptions: [], outputModes: [] },
+    concurrency: { defaultLimit: 1, configurable: true, maxLimit: 4 },
+    streaming: true,
+    usage: { tokens: false, reasoningTokens: false },
+  },
+  reasoning: { mode: 'disabled', protocol: 'none', effort: 'medium', display: 'auto' },
+  maxConcurrency: 1,
   responseSpeed: 'standard',
   isDefault: true,
   createdAt: '2026-08-17T00:00:00.000Z',
@@ -73,8 +82,8 @@ describe('OpenAI-compatible model provider', () => {
     await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: true },
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
       () => undefined,
@@ -98,8 +107,8 @@ describe('OpenAI-compatible model provider', () => {
     await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: true },
-        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'high' },
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'effort', effortOptions: ['low', 'medium', 'high'], outputModes: ['summary'] } },
+        reasoning: { mode: 'enabled', protocol: 'openai', effort: 'high', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
       () => undefined,
@@ -144,8 +153,8 @@ describe('OpenAI-compatible model provider', () => {
     const metrics = await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: true },
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
       (delta) => deltas.push(delta),
@@ -172,8 +181,8 @@ describe('OpenAI-compatible model provider', () => {
     await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: true },
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
       (delta) => deltas.push(delta),
@@ -203,8 +212,12 @@ describe('OpenAI-compatible model provider', () => {
     await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: true, streamingUsage: true },
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+        capabilities: {
+          ...profile.capabilities,
+          reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+          usage: { tokens: true, reasoningTokens: true },
+        },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
       () => undefined,
@@ -271,8 +284,8 @@ describe('OpenAI-compatible model provider', () => {
     const metrics = await streamChatCompletion(
       {
         ...profile,
-        capabilities: { ...profile.capabilities, reasoning: true },
-        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
       },
       [{ role: 'user', content: 'hello' }],
       () => undefined,

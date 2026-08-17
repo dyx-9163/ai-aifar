@@ -66,6 +66,67 @@ describe('desktop protocol guards', () => {
     ).toBe(true);
   });
 
+  it('accepts provider-declared capability options', () => {
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        name: 'Local Qwen',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'Qwen3.5-9B',
+        capabilities: {
+          reasoning: {
+            inputMode: 'toggle',
+            effortOptions: [],
+            outputModes: ['raw'],
+          },
+          concurrency: { defaultLimit: 1, configurable: true, maxLimit: 4 },
+          streaming: true,
+          usage: { tokens: true, reasoningTokens: true },
+        },
+        reasoning: { mode: 'enabled', protocol: 'qwen', display: 'auto' },
+      },
+    })).toBe(true);
+  });
+
+  it('rejects invalid provider-declared capability options', () => {
+    const profile = {
+      name: 'Local Qwen',
+      provider: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'Qwen3.5-9B',
+    };
+
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        ...profile,
+        capabilities: { reasoning: { effortOptions: ['high', 'high'] } },
+      },
+    })).toBe(false);
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        ...profile,
+        capabilities: { reasoning: { effortOptions: [' '] } },
+      },
+    })).toBe(false);
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        ...profile,
+        capabilities: { reasoning: { outputModes: ['details'] } },
+      },
+    })).toBe(false);
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        ...profile,
+        capabilities: { concurrency: { defaultLimit: 0 } },
+      },
+    })).toBe(false);
+  });
+
   it('rejects invalid model runtime preferences', () => {
     expect(
       isDesktopRequest({
@@ -120,6 +181,7 @@ describe('desktop protocol guards', () => {
         type: 'message.delta',
         threadId: 't1',
         turnId: 'u1',
+        modelProfileId: 'model-1',
         sequence: 1,
         text: 'Hi',
       }),
@@ -132,6 +194,7 @@ describe('desktop protocol guards', () => {
         type: 'model.progress',
         threadId: 't1',
         turnId: 'u1',
+        modelProfileId: 'model-1',
         sequence: 2,
         phase: 'reasoning',
       }),
@@ -141,6 +204,7 @@ describe('desktop protocol guards', () => {
         type: 'model.progress',
         threadId: 't1',
         turnId: 'u1',
+        modelProfileId: 'model-1',
         sequence: 3,
         phase: 'unknown',
       }),
@@ -153,6 +217,7 @@ describe('desktop protocol guards', () => {
         type: 'model.metrics',
         threadId: 't1',
         turnId: 'u1',
+        modelProfileId: 'model-1',
         sequence: 2,
         metrics: {
           reasoningRequested: 'enabled',
@@ -166,5 +231,25 @@ describe('desktop protocol guards', () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it.each([
+    { type: 'turn.queued', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 1, queuePosition: 2 },
+    { type: 'answer.delta', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 2, text: '答案' },
+    { type: 'reasoning.raw.delta', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 3, text: '分析' },
+    { type: 'reasoning.summary.delta', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 4, text: '摘要' },
+    { type: 'turn.cancelled', threadId: 't1', turnId: 'r1', modelProfileId: 'm1', sequence: 5 },
+  ])('accepts $type', (event) => {
+    expect(isAgentEvent(event)).toBe(true);
+  });
+
+  it('rejects sequenced turn events without a model profile id', () => {
+    expect(isAgentEvent({
+      type: 'answer.delta',
+      threadId: 't1',
+      turnId: 'r1',
+      sequence: 1,
+      text: '答案',
+    })).toBe(false);
   });
 });

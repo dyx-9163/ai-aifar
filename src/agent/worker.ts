@@ -18,7 +18,7 @@ type WorkerPort = {
 };
 
 type SequencedEvent = Exclude<AgentEvent, { type: 'snapshot' }>;
-type StripEnvelope<T> = T extends unknown ? Omit<T, 'threadId' | 'turnId' | 'sequence'> : never;
+type StripEnvelope<T> = T extends unknown ? Omit<T, 'threadId' | 'turnId' | 'modelProfileId' | 'sequence'> : never;
 type SequencedEventPayload = StripEnvelope<SequencedEvent>;
 
 const parentPort = (process as NodeJS.Process & { parentPort?: ParentPort }).parentPort;
@@ -170,7 +170,7 @@ async function runModelTurn(
 ): Promise<void> {
   let sequence = 1;
   const next = async (event: SequencedEventPayload) => {
-    const sequenced = { ...event, threadId, turnId, sequence: sequence++ } as SequencedEvent;
+    const sequenced = { ...event, threadId, turnId, modelProfileId: profile.id, sequence: sequence++ } as SequencedEvent;
     await persistAndPostEvent(sequenced);
   };
 
@@ -211,6 +211,31 @@ async function persistAndPostEvent(event: AgentEvent): Promise<void> {
 
 function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): RuntimeModelProfile {
   const existing = input.id ? db.getModelProfileForRuntime(input.id) : undefined;
+  const capabilityInput = input.capabilities;
+  const reasoningCapabilities = capabilityInput?.reasoning;
+  const concurrency = capabilityInput?.concurrency;
+  const usage = capabilityInput?.usage;
+  const capabilities = {
+    text: capabilityInput?.text ?? existing?.capabilities.text ?? true,
+    vision: capabilityInput?.vision ?? existing?.capabilities.vision ?? false,
+    longContext: capabilityInput?.longContext ?? existing?.capabilities.longContext ?? false,
+    reasoning: {
+      inputMode: reasoningCapabilities?.inputMode ?? existing?.capabilities.reasoning.inputMode ?? 'unsupported',
+      effortOptions: reasoningCapabilities?.effortOptions ?? existing?.capabilities.reasoning.effortOptions ?? [],
+      outputModes: reasoningCapabilities?.outputModes ?? existing?.capabilities.reasoning.outputModes ?? [],
+      defaultEffort: reasoningCapabilities?.defaultEffort ?? existing?.capabilities.reasoning.defaultEffort,
+    },
+    concurrency: {
+      defaultLimit: concurrency?.defaultLimit ?? existing?.capabilities.concurrency.defaultLimit ?? 1,
+      configurable: concurrency?.configurable ?? existing?.capabilities.concurrency.configurable ?? true,
+      maxLimit: concurrency?.maxLimit ?? existing?.capabilities.concurrency.maxLimit ?? 32,
+    },
+    streaming: capabilityInput?.streaming ?? existing?.capabilities.streaming ?? true,
+    usage: {
+      tokens: usage?.tokens ?? existing?.capabilities.usage.tokens ?? true,
+      reasoningTokens: usage?.reasoningTokens ?? existing?.capabilities.usage.reasoningTokens ?? true,
+    },
+  };
   return {
     id: input.id ?? 'unsaved-test-profile',
     name: input.name.trim(),
@@ -219,18 +244,14 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
     model: input.model.trim(),
     apiKey: input.apiKey?.trim() || existing?.apiKey,
     apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
-    capabilities: {
-      text: input.capabilities?.text ?? true,
-      vision: input.capabilities?.vision ?? false,
-      longContext: input.capabilities?.longContext ?? false,
-      reasoning: input.capabilities?.reasoning ?? false,
-      streamingUsage: input.capabilities?.streamingUsage ?? false,
-    },
+    capabilities,
     reasoning: {
       mode: input.reasoning?.mode ?? existing?.reasoning.mode ?? 'disabled',
       protocol: input.reasoning?.protocol ?? existing?.reasoning.protocol ?? 'none',
       effort: input.reasoning?.effort ?? existing?.reasoning.effort ?? 'medium',
+      display: input.reasoning?.display ?? existing?.reasoning.display ?? 'auto',
     },
+    maxConcurrency: input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit,
     responseSpeed: input.responseSpeed ?? existing?.responseSpeed ?? 'standard',
     isDefault: input.isDefault ?? existing?.isDefault ?? false,
     createdAt: existing?.createdAt ?? new Date().toISOString(),

@@ -46,6 +46,10 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = []):
       continue;
     }
 
+    if (item.kind === 'reasoning') {
+      continue;
+    }
+
     entries.push({
       id: item.id,
       kind: 'message',

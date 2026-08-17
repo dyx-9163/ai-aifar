@@ -134,6 +134,7 @@ class SqliteAppDatabase implements AppDatabase {
     return {
       groups,
       threads,
+      turns: [],
       items,
       approvals,
       modelProfiles: this.readModelProfiles(false),
@@ -250,6 +251,9 @@ class SqliteAppDatabase implements AppDatabase {
       if (typeof settings.contextMessageLimit === 'number') {
         this.upsertSetting('contextMessageLimit', String(clampContextLimit(settings.contextMessageLimit)));
       }
+      if (settings.reasoningDisplayMode === 'auto' || settings.reasoningDisplayMode === 'raw' || settings.reasoningDisplayMode === 'summary') {
+        this.upsertSetting('reasoningDisplayMode', settings.reasoningDisplayMode);
+      }
     });
 
     return this.readSettings();
@@ -332,6 +336,7 @@ class SqliteAppDatabase implements AppDatabase {
   saveModelProfile(input: ModelProfileInput): ModelProfile {
     const now = new Date().toISOString();
     const existing = input.id ? this.getModelProfileForRuntime(input.id) : undefined;
+    const capabilities = normalizeCapabilities(input.capabilities);
     const profile: RuntimeModelProfile = {
       id: input.id ?? randomUUID(),
       name: requireTrimmed(input.name, 'Model profile name'),
@@ -340,8 +345,9 @@ class SqliteAppDatabase implements AppDatabase {
       model: requireTrimmed(input.model, 'Model name'),
       apiKey: input.apiKey?.trim() || existing?.apiKey,
       apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
-      capabilities: normalizeCapabilities(input.capabilities),
+      capabilities,
       reasoning: normalizeReasoning(input.reasoning ?? existing?.reasoning),
+      maxConcurrency: Math.max(1, input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit),
       responseSpeed: normalizeResponseSpeed(input.responseSpeed ?? existing?.responseSpeed),
       isDefault: Boolean(input.isDefault),
       createdAt: existing?.createdAt ?? now,
@@ -502,6 +508,7 @@ class SqliteAppDatabase implements AppDatabase {
       INSERT OR IGNORE INTO settings (key, value) VALUES ('activeModelProfileId', '');
       INSERT OR IGNORE INTO settings (key, value) VALUES ('showModelMetrics', 'true');
       INSERT OR IGNORE INTO settings (key, value) VALUES ('contextMessageLimit', '20');
+      INSERT OR IGNORE INTO settings (key, value) VALUES ('reasoningDisplayMode', 'auto');
     `);
     this.ensureColumn('threads', 'model_profile_id', 'ALTER TABLE threads ADD COLUMN model_profile_id TEXT');
     this.ensureColumn('threads', 'group_id', 'ALTER TABLE threads ADD COLUMN group_id TEXT');
@@ -526,6 +533,7 @@ class SqliteAppDatabase implements AppDatabase {
     const language = rows.find((row) => row.key === 'language')?.value;
     const showModelMetrics = rows.find((row) => row.key === 'showModelMetrics')?.value;
     const contextMessageLimit = rows.find((row) => row.key === 'contextMessageLimit')?.value;
+    const reasoningDisplayMode = rows.find((row) => row.key === 'reasoningDisplayMode')?.value;
     const configuredActiveModelProfileId = rows.find((row) => row.key === 'activeModelProfileId')?.value || undefined;
     const activeModelProfileId = configuredActiveModelProfileId || this.defaultModelProfileId();
     return {
@@ -534,6 +542,8 @@ class SqliteAppDatabase implements AppDatabase {
       activeModelProfileId,
       showModelMetrics: showModelMetrics === undefined ? true : showModelMetrics === 'true',
       contextMessageLimit: clampContextLimit(Number.parseInt(contextMessageLimit ?? '20', 10)),
+      reasoningDisplayMode:
+        reasoningDisplayMode === 'raw' || reasoningDisplayMode === 'summary' ? reasoningDisplayMode : 'auto',
     };
   }
 
@@ -737,6 +747,7 @@ function mapApproval(row: ApprovalRow): Approval {
 function mapModelProfile(row: ModelProfileRow, includeApiKey: true): RuntimeModelProfile;
 function mapModelProfile(row: ModelProfileRow, includeApiKey: false): ModelProfile;
 function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeModelProfile | ModelProfile {
+  const capabilities = parseCapabilities(row.capabilities);
   const profile: RuntimeModelProfile = {
     id: row.id,
     name: row.name,
@@ -745,8 +756,9 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
     model: row.model,
     apiKey: includeApiKey ? (row.api_key ?? undefined) : undefined,
     apiKeyConfigured: Boolean(row.api_key),
-    capabilities: parseCapabilities(row.capabilities),
+    capabilities,
     reasoning: parseReasoning(row.reasoning),
+    maxConcurrency: capabilities.concurrency.defaultLimit,
     responseSpeed: normalizeResponseSpeed(row.response_speed),
     isDefault: row.is_default === 1,
     createdAt: row.created_at,
@@ -761,19 +773,38 @@ function redactModelProfile(profile: RuntimeModelProfile): ModelProfile {
   return redacted;
 }
 
-function normalizeCapabilities(input?: Partial<ModelCapabilities>): ModelCapabilities {
+function normalizeCapabilities(input?: ModelProfileInput['capabilities']): ModelCapabilities {
+  const reasoning = input?.reasoning;
+  const concurrency = input?.concurrency;
+  const usage = input?.usage;
+  const defaultLimit = concurrency?.defaultLimit;
+  const maxLimit = concurrency?.maxLimit;
   return {
     text: input?.text ?? true,
     vision: input?.vision ?? false,
     longContext: input?.longContext ?? false,
-    reasoning: input?.reasoning ?? false,
-    streamingUsage: input?.streamingUsage ?? false,
+    reasoning: {
+      inputMode:
+        reasoning?.inputMode === 'toggle' || reasoning?.inputMode === 'effort' || reasoning?.inputMode === 'custom'
+          ? reasoning.inputMode
+          : 'unsupported',
+      effortOptions: reasoning?.effortOptions?.filter((option) => option.length > 0) ?? [],
+      outputModes: reasoning?.outputModes?.filter((mode) => mode === 'raw' || mode === 'summary') ?? [],
+      defaultEffort: reasoning?.defaultEffort,
+    },
+    concurrency: {
+      defaultLimit: typeof defaultLimit === 'number' && Number.isInteger(defaultLimit) && defaultLimit >= 1 ? defaultLimit : 1,
+      configurable: concurrency?.configurable ?? true,
+      maxLimit: typeof maxLimit === 'number' && Number.isInteger(maxLimit) && maxLimit >= 1 ? maxLimit : 32,
+    },
+    streaming: input?.streaming ?? true,
+    usage: { tokens: usage?.tokens ?? true, reasoningTokens: usage?.reasoningTokens ?? true },
   };
 }
 
 function parseCapabilities(value: string): ModelCapabilities {
   try {
-    const parsed = JSON.parse(value) as Partial<ModelCapabilities>;
+    const parsed = JSON.parse(value) as ModelProfileInput['capabilities'];
     return normalizeCapabilities(parsed);
   } catch {
     return normalizeCapabilities();
@@ -785,7 +816,8 @@ function normalizeReasoning(input?: Partial<ModelReasoningSettings>): ModelReaso
     mode: input?.mode === 'auto' || input?.mode === 'enabled' || input?.mode === 'disabled' ? input.mode : 'disabled',
     protocol:
       input?.protocol === 'qwen' || input?.protocol === 'openai' || input?.protocol === 'custom' ? input.protocol : 'none',
-    effort: input?.effort === 'low' || input?.effort === 'high' || input?.effort === 'xhigh' ? input.effort : 'medium',
+    effort: typeof input?.effort === 'string' && input.effort.length > 0 ? input.effort : 'medium',
+    display: input?.display === 'raw' || input?.display === 'summary' ? input.display : 'auto',
   };
 }
 

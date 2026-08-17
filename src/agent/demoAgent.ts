@@ -3,6 +3,7 @@ import type { AgentEvent } from '../shared/protocol.js';
 export interface DemoTurnInput {
   threadId: string;
   turnId: string;
+  modelProfileId?: string;
   text: string;
   approvalResponse?: Promise<boolean>;
 }
@@ -10,7 +11,7 @@ export interface DemoTurnInput {
 export type EmitAgentEvent = (event: AgentEvent) => void | Promise<void>;
 
 type SequencedEvent = Exclude<AgentEvent, { type: 'snapshot' }>;
-type StripEnvelope<T> = T extends unknown ? Omit<T, 'threadId' | 'turnId' | 'sequence'> : never;
+type StripEnvelope<T> = T extends unknown ? Omit<T, 'threadId' | 'turnId' | 'modelProfileId' | 'sequence'> : never;
 type SequencedEventPayload = StripEnvelope<SequencedEvent>;
 
 export async function runDemoTurn(input: DemoTurnInput, emit: EmitAgentEvent, signal: AbortSignal): Promise<void> {
@@ -21,6 +22,7 @@ export async function runDemoTurn(input: DemoTurnInput, emit: EmitAgentEvent, si
       ...event,
       threadId: input.threadId,
       turnId: input.turnId,
+      modelProfileId: input.modelProfileId ?? '__demo__',
       sequence: sequence++,
     } as SequencedEvent);
     await tick(signal);

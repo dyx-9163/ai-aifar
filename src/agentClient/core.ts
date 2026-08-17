@@ -17,10 +17,11 @@ export function emptyAgentClientState(): AgentClientState {
     snapshot: {
       groups: [],
       threads: [],
+      turns: [],
       items: {},
       approvals: [],
       modelProfiles: [],
-      settings: { theme: 'system', language: 'en-US', showModelMetrics: true, contextMessageLimit: 20 },
+      settings: { theme: 'system', language: 'en-US', showModelMetrics: true, contextMessageLimit: 20, reasoningDisplayMode: 'auto' },
     },
     events: [],
     seenSequences: {},

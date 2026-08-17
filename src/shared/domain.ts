@@ -21,7 +21,7 @@ export interface ThreadSummary {
   updatedAt: string;
 }
 
-export type ItemKind = 'message' | 'tool' | 'change';
+export type ItemKind = 'message' | 'reasoning' | 'tool' | 'change';
 
 export interface BaseItem {
   id: string;
@@ -35,6 +35,17 @@ export interface MessageItem extends BaseItem {
   kind: 'message';
   role: 'user' | 'assistant' | 'system';
   text: string;
+  // Existing rows without this field are complete unless their TurnRecord is unfinished.
+  incomplete?: boolean;
+}
+
+export type ReasoningOutputMode = 'raw' | 'summary';
+
+export interface ReasoningItem extends BaseItem {
+  kind: 'reasoning';
+  mode: ReasoningOutputMode;
+  text: string;
+  incomplete: boolean;
 }
 
 export interface ToolItem extends BaseItem {
@@ -51,7 +62,7 @@ export interface ChangeItem extends BaseItem {
   summary: string;
 }
 
-export type Item = MessageItem | ToolItem | ChangeItem;
+export type Item = MessageItem | ReasoningItem | ToolItem | ChangeItem;
 
 export interface Approval {
   id: string;
@@ -70,6 +81,7 @@ export interface AppSettings {
   activeModelProfileId?: string;
   showModelMetrics: boolean;
   contextMessageLimit: number;
+  reasoningDisplayMode: ReasoningDisplayMode;
 }
 
 export type ModelProviderType = 'openai-compatible';
@@ -77,27 +89,62 @@ export type ModelProviderType = 'openai-compatible';
 export type MetricSource = 'server' | 'client' | 'unavailable';
 export type ReasoningMode = 'auto' | 'enabled' | 'disabled';
 export type ReasoningProtocol = 'none' | 'qwen' | 'openai' | 'custom';
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+/** @deprecated Provider profiles declare their own effort strings. */
+export type ReasoningEffort = string;
 export type ModelResponseSpeed = 'standard' | 'fast' | 'quality';
 export type ModelRunPhase = 'connecting' | 'reasoning' | 'answering';
+export type ReasoningInputMode = 'unsupported' | 'toggle' | 'effort' | 'custom';
+export type ReasoningDisplayMode = 'auto' | 'raw' | 'summary';
+export type TurnStatus =
+  | 'idle'
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
 
 export interface ModelReasoningSettings {
   mode: ReasoningMode;
   protocol: ReasoningProtocol;
-  effort: ReasoningEffort;
+  effort?: string;
+  display: ReasoningDisplayMode;
 }
 
 export interface RuntimeSettingsInput {
   showModelMetrics?: boolean;
   contextMessageLimit?: number;
+  reasoningDisplayMode?: ReasoningDisplayMode;
 }
 
 export interface ModelCapabilities {
   text: boolean;
   vision: boolean;
   longContext: boolean;
-  reasoning: boolean;
-  streamingUsage: boolean;
+  reasoning: {
+    inputMode: ReasoningInputMode;
+    effortOptions: string[];
+    outputModes: ReasoningOutputMode[];
+    defaultEffort?: string;
+  };
+  concurrency: {
+    defaultLimit: number;
+    configurable: boolean;
+    maxLimit?: number;
+  };
+  streaming: boolean;
+  usage: { tokens: boolean; reasoningTokens: boolean };
+}
+
+export interface ModelCapabilitiesInput {
+  text?: boolean;
+  vision?: boolean;
+  longContext?: boolean;
+  reasoning?: Partial<ModelCapabilities['reasoning']>;
+  concurrency?: Partial<ModelCapabilities['concurrency']>;
+  streaming?: boolean;
+  usage?: Partial<ModelCapabilities['usage']>;
 }
 
 export interface ModelProfile {
@@ -109,6 +156,8 @@ export interface ModelProfile {
   apiKeyConfigured: boolean;
   capabilities: ModelCapabilities;
   reasoning: ModelReasoningSettings;
+  maxConcurrency: number;
+  /** @deprecated Kept readable for persisted-profile migration only. */
   responseSpeed: ModelResponseSpeed;
   isDefault: boolean;
   createdAt: string;
@@ -122,8 +171,10 @@ export interface ModelProfileInput {
   baseUrl: string;
   model: string;
   apiKey?: string;
-  capabilities?: Partial<ModelCapabilities>;
+  capabilities?: ModelCapabilitiesInput;
   reasoning?: Partial<ModelReasoningSettings>;
+  maxConcurrency?: number;
+  /** @deprecated Kept readable for persisted-profile migration only. */
   responseSpeed?: ModelResponseSpeed;
   isDefault?: boolean;
 }
@@ -134,6 +185,7 @@ export interface ModelRunMetrics {
   reasoningRequested: ReasoningMode;
   reasoningProtocol: ReasoningProtocol;
   reasoningObserved: boolean;
+  /** @deprecated No supported adapter exposes this setting. */
   responseSpeed?: ModelResponseSpeed;
   durationMs: number;
   tokensPerSecond?: number;
@@ -151,8 +203,34 @@ export interface ModelRunMetrics {
 export interface AppSnapshot {
   groups: ChatGroup[];
   threads: ThreadSummary[];
+  turns: TurnRecord[];
   items: Record<string, Item[]>;
   approvals: Approval[];
   modelProfiles: ModelProfile[];
   settings: AppSettings;
+}
+
+export interface TurnRecord {
+  id: string;
+  threadId: string;
+  modelProfileId?: string;
+  status: Exclude<TurnStatus, 'idle'>;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+  incomplete: boolean;
+}
+
+export interface ThreadRuntimeState {
+  threadId: string;
+  turnId?: string;
+  modelProfileId?: string;
+  status: TurnStatus;
+  queuePosition?: number;
+  startedAt?: number;
+  firstTokenAt?: number;
+  completedAt?: number;
+  tokensPerSecond?: number;
+  error?: string;
 }

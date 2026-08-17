@@ -2,12 +2,15 @@ import type {
   AppSnapshot,
   LanguagePreference,
   MetricSource,
+  ModelCapabilitiesInput,
   ModelResponseSpeed,
   ModelRunPhase,
   ModelProfileInput,
   ModelRunMetrics,
-  ReasoningEffort,
+  ReasoningDisplayMode,
+  ReasoningInputMode,
   ReasoningMode,
+  ReasoningOutputMode,
   ReasoningProtocol,
   RuntimeSettingsInput,
   ThemePreference,
@@ -30,16 +33,28 @@ export type DesktopRequest =
   | { type: 'language.set'; language: LanguagePreference }
   | { type: 'theme.set'; theme: ThemePreference };
 
+type SequencedTurnEnvelope = {
+  threadId: string;
+  turnId: string;
+  modelProfileId: string;
+  sequence: number;
+};
+
 export type SequencedAgentEvent =
-  | { type: 'turn.started'; threadId: string; turnId: string; sequence: number; title: string }
-  | { type: 'message.delta'; threadId: string; turnId: string; sequence: number; text: string }
-  | { type: 'model.progress'; threadId: string; turnId: string; sequence: number; phase: ModelRunPhase }
-  | { type: 'tool.started'; threadId: string; turnId: string; sequence: number; toolId: string; title: string }
-  | { type: 'tool.output'; threadId: string; turnId: string; sequence: number; toolId: string; output: string }
-  | { type: 'model.metrics'; threadId: string; turnId: string; sequence: number; metrics: ModelRunMetrics }
-  | { type: 'approval.required'; threadId: string; turnId: string; sequence: number; approvalId: string; title: string; description: string }
-  | { type: 'turn.completed'; threadId: string; turnId: string; sequence: number }
-  | { type: 'turn.failed'; threadId: string; turnId: string; sequence: number; error: string };
+  | ({ type: 'turn.queued'; queuePosition: number } & SequencedTurnEnvelope)
+  | ({ type: 'turn.started'; title: string } & SequencedTurnEnvelope)
+  | ({ type: 'message.delta'; text: string } & SequencedTurnEnvelope)
+  | ({ type: 'answer.delta'; text: string } & SequencedTurnEnvelope)
+  | ({ type: 'reasoning.raw.delta'; text: string } & SequencedTurnEnvelope)
+  | ({ type: 'reasoning.summary.delta'; text: string } & SequencedTurnEnvelope)
+  | ({ type: 'model.progress'; phase: ModelRunPhase } & SequencedTurnEnvelope)
+  | ({ type: 'tool.started'; toolId: string; title: string } & SequencedTurnEnvelope)
+  | ({ type: 'tool.output'; toolId: string; output: string } & SequencedTurnEnvelope)
+  | ({ type: 'model.metrics'; metrics: ModelRunMetrics } & SequencedTurnEnvelope)
+  | ({ type: 'approval.required'; approvalId: string; title: string; description: string } & SequencedTurnEnvelope)
+  | ({ type: 'turn.completed' } & SequencedTurnEnvelope)
+  | ({ type: 'turn.failed'; error: string } & SequencedTurnEnvelope)
+  | ({ type: 'turn.cancelled' } & SequencedTurnEnvelope);
 
 export type AgentEvent = { type: 'snapshot'; snapshot: AppSnapshot } | SequencedAgentEvent;
 
@@ -66,7 +81,7 @@ function hasSequence(record: UnknownRecord): boolean {
 }
 
 function hasThreadTurnAndSequence(record: UnknownRecord): boolean {
-  return hasString(record, 'threadId') && hasString(record, 'turnId') && hasSequence(record);
+  return hasString(record, 'threadId') && hasString(record, 'turnId') && hasString(record, 'modelProfileId') && hasSequence(record);
 }
 
 function isReasoningMode(value: unknown): value is ReasoningMode {
@@ -77,8 +92,20 @@ function isReasoningProtocol(value: unknown): value is ReasoningProtocol {
   return value === 'none' || value === 'qwen' || value === 'openai' || value === 'custom';
 }
 
-function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
+function isReasoningInputMode(value: unknown): value is ReasoningInputMode {
+  return value === 'unsupported' || value === 'toggle' || value === 'effort' || value === 'custom';
+}
+
+function isReasoningOutputMode(value: unknown): value is ReasoningOutputMode {
+  return value === 'raw' || value === 'summary';
+}
+
+function isReasoningDisplayMode(value: unknown): value is ReasoningDisplayMode {
+  return value === 'auto' || value === 'raw' || value === 'summary';
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 1;
 }
 
 function isMetricSource(value: unknown): value is MetricSource {
@@ -104,7 +131,66 @@ function isReasoningInput(value: unknown): boolean {
   return (
     (value.mode === undefined || isReasoningMode(value.mode)) &&
     (value.protocol === undefined || isReasoningProtocol(value.protocol)) &&
-    (value.effort === undefined || isReasoningEffort(value.effort))
+    (value.effort === undefined || hasNonEmptyString(value.effort)) &&
+    (value.display === undefined || isReasoningDisplayMode(value.display))
+  );
+}
+
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isUniqueNonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(hasNonEmptyString) && new Set(value).size === value.length;
+}
+
+function isReasoningOutputModeArray(value: unknown): value is ReasoningOutputMode[] {
+  return Array.isArray(value) && value.every(isReasoningOutputMode) && new Set(value).size === value.length;
+}
+
+function isCapabilitiesInput(value: unknown): value is ModelCapabilitiesInput {
+  if (value === undefined) {
+    return true;
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const reasoning = value.reasoning;
+  const concurrency = value.concurrency;
+  const usage = value.usage;
+  if ((reasoning !== undefined && !isRecord(reasoning)) || (concurrency !== undefined && !isRecord(concurrency)) || (usage !== undefined && !isRecord(usage))) {
+    return false;
+  }
+
+  const validReasoning =
+    reasoning === undefined ||
+    ((reasoning.inputMode === undefined || isReasoningInputMode(reasoning.inputMode)) &&
+      (reasoning.effortOptions === undefined || isUniqueNonEmptyStringArray(reasoning.effortOptions)) &&
+      (reasoning.outputModes === undefined || isReasoningOutputModeArray(reasoning.outputModes)) &&
+      (reasoning.defaultEffort === undefined || hasNonEmptyString(reasoning.defaultEffort)) &&
+      (reasoning.defaultEffort === undefined || reasoning.effortOptions === undefined ||
+        (isUniqueNonEmptyStringArray(reasoning.effortOptions) && reasoning.effortOptions.includes(reasoning.defaultEffort as string))));
+  const validConcurrency =
+    concurrency === undefined ||
+    ((concurrency.defaultLimit === undefined || isPositiveInteger(concurrency.defaultLimit)) &&
+      (concurrency.configurable === undefined || typeof concurrency.configurable === 'boolean') &&
+      (concurrency.maxLimit === undefined || isPositiveInteger(concurrency.maxLimit)) &&
+      (concurrency.defaultLimit === undefined || concurrency.maxLimit === undefined ||
+        (isPositiveInteger(concurrency.defaultLimit) && isPositiveInteger(concurrency.maxLimit) && concurrency.defaultLimit <= concurrency.maxLimit)));
+  const validUsage =
+    usage === undefined ||
+    ((usage.tokens === undefined || typeof usage.tokens === 'boolean') &&
+      (usage.reasoningTokens === undefined || typeof usage.reasoningTokens === 'boolean'));
+
+  return (
+    (value.text === undefined || typeof value.text === 'boolean') &&
+    (value.vision === undefined || typeof value.vision === 'boolean') &&
+    (value.longContext === undefined || typeof value.longContext === 'boolean') &&
+    (value.streaming === undefined || typeof value.streaming === 'boolean') &&
+    validReasoning &&
+    validConcurrency &&
+    validUsage
   );
 }
 
@@ -115,11 +201,13 @@ function isRuntimeSettingsInput(value: unknown): value is RuntimeSettingsInput {
 
   const showModelMetrics = value.showModelMetrics;
   const contextMessageLimit = value.contextMessageLimit;
+  const reasoningDisplayMode = value.reasoningDisplayMode;
 
   return (
     (showModelMetrics === undefined || typeof showModelMetrics === 'boolean') &&
     (contextMessageLimit === undefined ||
-      (Number.isInteger(contextMessageLimit) && Number(contextMessageLimit) >= 1 && Number(contextMessageLimit) <= 200))
+      (Number.isInteger(contextMessageLimit) && Number(contextMessageLimit) >= 1 && Number(contextMessageLimit) <= 200)) &&
+    (reasoningDisplayMode === undefined || isReasoningDisplayMode(reasoningDisplayMode))
   );
 }
 
@@ -135,7 +223,9 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
     hasString(value, 'baseUrl') &&
     hasString(value, 'model') &&
     hasOptionalString(value, 'apiKey') &&
+    isCapabilitiesInput(value.capabilities) &&
     isReasoningInput(value.reasoning) &&
+    (value.maxConcurrency === undefined || isPositiveInteger(value.maxConcurrency)) &&
     (value.responseSpeed === undefined || isModelResponseSpeed(value.responseSpeed)) &&
     (value.isDefault === undefined || typeof value.isDefault === 'boolean')
   );
@@ -195,9 +285,14 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
   }
 
   switch (value.type) {
+    case 'turn.queued':
+      return isPositiveInteger(value.queuePosition);
     case 'turn.started':
       return hasString(value, 'title');
     case 'message.delta':
+    case 'answer.delta':
+    case 'reasoning.raw.delta':
+    case 'reasoning.summary.delta':
       return hasString(value, 'text');
     case 'model.progress':
       return isModelRunPhase(value.phase);
@@ -222,6 +317,8 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
       return true;
     case 'turn.failed':
       return hasString(value, 'error');
+    case 'turn.cancelled':
+      return true;
     default:
       return false;
   }

@@ -74,7 +74,7 @@ function loadProfile(profile: ModelProfile): void {
   form.isDefault = profile.isDefault;
   form.reasoningMode = profile.reasoning.mode;
   form.reasoningProtocol = profile.reasoning.protocol;
-  form.reasoningEffort = profile.reasoning.effort;
+  form.reasoningEffort = profile.reasoning.effort ?? 'medium';
   form.responseSpeed = profile.responseSpeed;
   modelStatus.value = profile.apiKeyConfigured ? props.t('savedProfileLoadedKeepKey') : props.t('savedProfileLoaded');
 }
@@ -106,13 +106,19 @@ function inputFromForm(): ModelProfileInput {
       text: true,
       vision: false,
       longContext: false,
-      reasoning: form.reasoningProtocol !== 'none',
-      streamingUsage: true,
+      reasoning: {
+        inputMode: form.reasoningProtocol === 'none' ? 'unsupported' : 'toggle',
+        effortOptions: [],
+        outputModes: form.reasoningProtocol === 'qwen' ? ['raw'] : [],
+      },
+      streaming: true,
+      usage: { tokens: true, reasoningTokens: true },
     },
     reasoning: {
       mode: form.reasoningMode,
       protocol: form.reasoningProtocol,
       effort: form.reasoningEffort,
+      display: 'auto',
     },
     responseSpeed: form.responseSpeed,
   };
