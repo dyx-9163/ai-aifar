@@ -172,7 +172,60 @@ describe('worker turn runtime', () => {
       text: 'Approval accepted. Demo mode still keeps the filesystem unchanged.',
       incomplete: false,
     }));
+    expect(harness.database.getSnapshot().approvals).toContainEqual(expect.objectContaining({
+      id: `approval-${turnId}`,
+      status: 'approved',
+    }));
     harness.database.close();
+  });
+
+  it('expires approval state for running and queued cancellation before rejecting stale responses', async () => {
+    const harness = createHarness(async () => metrics());
+    const runningThread = harness.database.createThread('Running approval');
+    const queuedThread = harness.database.createThread('Queued approval');
+    const running = harness.runtime.startTurn({
+      type: 'turn.start', threadId: runningThread.id, text: '修改运行配置', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, running.turnId)).toContain('approval.required'));
+    const queued = harness.runtime.startTurn({
+      type: 'turn.start', threadId: queuedThread.id, text: '删除排队配置', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, queued.turnId)).toEqual(['turn.queued']));
+
+    expect(harness.runtime.cancelTurn(queued.turnId)).toBe(true);
+    await eventually(() => expect(typesFor(harness.events, queued.turnId).at(-1)).toBe('turn.cancelled'));
+    expect(harness.runtime.respondApproval(`approval-${queued.turnId}`, true)).toBe(false);
+
+    expect(harness.runtime.cancelTurn(running.turnId)).toBe(true);
+    expect(harness.runtime.respondApproval(`approval-${running.turnId}`, true)).toBe(false);
+    await eventually(() => expect(typesFor(harness.events, running.turnId).at(-1)).toBe('turn.cancelled'));
+    expect(harness.database.getSnapshot().approvals).toContainEqual(expect.objectContaining({
+      id: `approval-${running.turnId}`,
+      status: 'rejected',
+      respondedAt: expect.any(String),
+    }));
+    harness.database.close();
+  });
+
+  it('expires pending approvals when unfinished turns become interrupted on restart', async () => {
+    const harness = createHarness(async () => metrics());
+    const thread = harness.database.createThread('Interrupted approval');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: '修改后重启', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
+    harness.database.close();
+
+    const reopened = openDatabase(harness.databasePath);
+    openDatabases.push(reopened);
+    const snapshot = reopened.getSnapshot();
+    expect(snapshot.turns).toContainEqual(expect.objectContaining({ id: turnId, status: 'interrupted' }));
+    expect(snapshot.approvals).toContainEqual(expect.objectContaining({
+      id: `approval-${turnId}`,
+      status: 'rejected',
+      respondedAt: expect.any(String),
+    }));
+    reopened.close();
   });
 
   it('cancels a queued turn once and keeps streamed content incomplete', async () => {
@@ -249,6 +302,55 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('treats an internal AbortError as a failed turn when the scheduler signal is active', async () => {
+    const harness = createHarness(async () => {
+      throw abortError();
+    });
+    const thread = harness.database.createThread('Internal abort');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'run', modelProfileId: harness.profile.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.cancelled');
+    expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: turnId,
+      status: 'failed',
+      incomplete: true,
+    }));
+    harness.database.close();
+  });
+
+  it('keeps an atomically completed snapshot when terminal event delivery fails', async () => {
+    let capturedHandlers: ModelStreamHandlers | undefined;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      capturedHandlers = handlers;
+      await handlers.onAnswerDelta('completed answer');
+      return metrics();
+    }, undefined, true, 'turn.completed');
+    const thread = harness.database.createThread('Completion delivery failure');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'run', modelProfileId: harness.profile.id,
+    });
+    await eventually(() => expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: turnId,
+      status: 'completed',
+      incomplete: false,
+    })));
+
+    await capturedHandlers?.onAnswerDelta('late');
+    await flushMicrotasks();
+    const snapshot = harness.database.getSnapshot();
+    expect(snapshot.items[thread.id]).toContainEqual(expect.objectContaining({
+      id: `item-${turnId}-assistant`,
+      text: 'completed answer',
+      incomplete: false,
+    }));
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.failed');
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.completed');
+    harness.database.close();
+  });
+
   it('ignores provider deltas and terminals that arrive after completion', async () => {
     let capturedHandlers: ModelStreamHandlers | undefined;
     const harness = createHarness(async (_profile, _messages, handlers) => {
@@ -281,15 +383,18 @@ function createHarness(
   ) => Promise<ReturnType<typeof metrics>>,
   apiKey?: string,
   deterministicIds = true,
+  rejectEventType?: AgentEvent['type'],
 ): {
   database: AppDatabase;
+  databasePath: string;
   profile: RuntimeModelProfile;
   runtime: WorkerTurnRuntime;
   events: AgentEvent[];
 } {
   const directory = mkdtempSync(join(tmpdir(), 'private-ai-worker-'));
   tempDirectories.push(directory);
-  const database = openDatabase(join(directory, 'app.db'));
+  const databasePath = join(directory, 'app.db');
+  const database = openDatabase(databasePath);
   openDatabases.push(database);
   const profile = saveProfile(database, 'model-1', 'Model 1', 1, apiKey);
   const events: AgentEvent[] = [];
@@ -297,12 +402,15 @@ function createHarness(
   let clock = 0;
   const runtime = createWorkerTurnRuntime({
     database,
-    postEvent: (event) => events.push(event),
+    postEvent: (event) => {
+      if (event.type === rejectEventType) throw new Error(`delivery failed for ${event.type}`);
+      events.push(event);
+    },
     streamModel,
     createTurnId: deterministicIds ? () => `turn-${nextTurn++}` : undefined,
     now: () => new Date(Date.UTC(2026, 7, 17, 0, 0, clock++)).toISOString(),
   });
-  return { database, profile: database.getModelProfileForRuntime(profile.id)!, runtime, events };
+  return { database, databasePath, profile: database.getModelProfileForRuntime(profile.id)!, runtime, events };
 }
 
 function saveProfile(database: AppDatabase, id: string, name: string, maxConcurrency: number, apiKey?: string): RuntimeModelProfile {

@@ -176,6 +176,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       onCancelled: async (turn) => {
         const context = active.get(turn.turnId);
         if (!context) return;
+        settlePendingApproval(database, turn.turnId, 'rejected', now());
         database.updateTurn(turn.turnId, {
           status: 'cancelled',
           completedAt: now(),
@@ -256,11 +257,15 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
 
       if (outcome === 'awaiting-approval') return;
       database.completeTurn(turn.turnId, now());
-      await context.next({ type: 'turn.completed' });
+      try {
+        await context.next({ type: 'turn.completed' });
+      } catch {
+        // Completion is already durable and can be reconstructed from the next snapshot.
+      }
       approvalResolvers.delete(`approval-${turn.turnId}`);
       active.delete(turn.turnId);
     } catch (error) {
-      if (isAbortError(error)) throw error;
+      if (isAbortError(error) && signal.aborted) throw error;
       const message = safeErrorMessage(error, profile?.apiKey ? [profile.apiKey] : []);
       database.updateTurn(turn.turnId, {
         status: 'failed',
@@ -323,11 +328,20 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       return { turnId };
     },
     cancelTurn(turnId) {
-      return scheduler.cancel(turnId);
+      const cancelled = scheduler.cancel(turnId);
+      if (cancelled) approvalResolvers.delete(`approval-${turnId}`);
+      return cancelled;
     },
     respondApproval(approvalId, approved) {
       const resolve = approvalResolvers.get(approvalId);
       if (!resolve) return false;
+      const approval = database.getSnapshot().approvals.find((candidate) => candidate.id === approvalId);
+      if (!approval || approval.status !== 'pending') return false;
+      database.upsertApproval({
+        ...approval,
+        status: approved ? 'approved' : 'rejected',
+        respondedAt: now(),
+      });
       approvalResolvers.delete(approvalId);
       resolve(approved);
       return true;
@@ -367,16 +381,7 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
   if (message.type === 'language.set') return database.setLanguage(message.language);
   if (message.type === 'settings.update') return database.updateSettings(message.settings);
   if (message.type === 'approval.respond') {
-    const snapshot = database.getSnapshot();
-    const existing = snapshot.approvals.find((approval) => approval.id === message.approvalId);
-    if (existing) {
-      database.upsertApproval({
-        ...existing,
-        status: message.approved ? 'approved' : 'rejected',
-        respondedAt: new Date().toISOString(),
-      });
-      turnRuntime.respondApproval(message.approvalId, message.approved);
-    }
+    turnRuntime.respondApproval(message.approvalId, message.approved);
     return undefined;
   }
   if (message.type === 'turn.cancel') return turnRuntime.cancelTurn(message.turnId);
@@ -489,6 +494,19 @@ function approvalFromEvent(
     status: 'pending',
     createdAt,
   };
+}
+
+function settlePendingApproval(
+  database: AppDatabase,
+  turnId: string,
+  status: 'approved' | 'rejected',
+  respondedAt: string,
+): void {
+  const approval = database.getSnapshot().approvals.find(
+    (candidate) => candidate.turnId === turnId && candidate.status === 'pending',
+  );
+  if (!approval) return;
+  database.upsertApproval({ ...approval, status, respondedAt });
 }
 
 function isTerminalPayload(payload: SequencedEventPayload): boolean {

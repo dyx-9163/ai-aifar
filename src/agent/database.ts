@@ -405,6 +405,7 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   interruptUnfinishedTurns(): void {
+    const interruptedAt = new Date().toISOString();
     this.transaction(() => {
       this.db
         .prepare(
@@ -412,7 +413,15 @@ class SqliteAppDatabase implements AppDatabase {
            SET status = 'interrupted', updated_at = :updatedAt
            WHERE status IN ('queued', 'running', 'cancelling')`,
         )
-        .run({ updatedAt: new Date().toISOString() });
+        .run({ updatedAt: interruptedAt });
+      this.db
+        .prepare(
+          `UPDATE approvals
+           SET status = 'rejected', responded_at = :respondedAt
+           WHERE status = 'pending'
+             AND turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')`,
+        )
+        .run({ respondedAt: interruptedAt });
     });
   }
 
