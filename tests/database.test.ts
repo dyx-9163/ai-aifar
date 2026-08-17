@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Item } from '../src/shared/domain';
 import { openDatabase } from '../src/agent/database';
@@ -78,6 +79,81 @@ describe('sqlite app database', () => {
       'assistant:hello there',
     ]);
     db.close();
+  });
+
+  it('stores streamed assistant fragments as one snapshot message', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const thread = db.createThread('Streaming');
+      db.appendItem(userItem(thread.id, 'hello'));
+      db.appendItem({
+        id: 'item-turn-1-assistant-1',
+        threadId: thread.id,
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: 'stream ',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      });
+      db.appendItem({
+        id: 'item-turn-1-assistant-2',
+        threadId: thread.id,
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: 'complete',
+        createdAt: '2026-08-17T00:00:02.000Z',
+      });
+
+      const assistantItems = db
+        .getSnapshot()
+        .items[thread.id]?.filter((item) => item.kind === 'message' && item.role === 'assistant');
+      expect(assistantItems).toHaveLength(1);
+      expect(assistantItems?.[0]).toMatchObject({ text: 'stream complete', turnId: 'turn-1' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('compacts legacy assistant fragments when reopening the database', () => {
+    const dbPath = createDbPath();
+    const first = openDatabase(dbPath);
+    const thread = first.createThread('Legacy streaming');
+    first.appendItem(userItem(thread.id, 'hello'));
+    first.appendItem({
+      id: 'legacy-assistant-1',
+      threadId: thread.id,
+      turnId: 'turn-1',
+      kind: 'message',
+      role: 'assistant',
+      text: 'old ',
+      createdAt: '2026-08-17T00:00:01.000Z',
+    });
+    first.close();
+
+    const legacy = new DatabaseSync(dbPath);
+    const legacyItem: Item = {
+      id: 'legacy-assistant-2',
+      threadId: thread.id,
+      turnId: 'turn-1',
+      kind: 'message',
+      role: 'assistant',
+      text: 'fragments',
+      createdAt: '2026-08-17T00:00:02.000Z',
+    };
+    legacy
+      .prepare('INSERT INTO items (id, thread_id, turn_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(legacyItem.id, legacyItem.threadId, legacyItem.turnId, legacyItem.kind, JSON.stringify(legacyItem), legacyItem.createdAt);
+    legacy.prepare('DELETE FROM schema_migrations WHERE version = 2').run();
+    legacy.close();
+
+    const second = openDatabase(dbPath);
+    const assistantItems = second
+      .getSnapshot()
+      .items[thread.id]?.filter((item) => item.kind === 'message' && item.role === 'assistant');
+    expect(assistantItems).toHaveLength(1);
+    expect(assistantItems?.[0]).toMatchObject({ text: 'old fragments', turnId: 'turn-1' });
+    second.close();
   });
 
   it('creates chat groups and hides deleted chats from snapshots and context', () => {

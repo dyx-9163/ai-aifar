@@ -17,6 +17,7 @@ const props = defineProps<{
   modelProfiles: ModelProfile[];
   activeModelProfileId?: string;
   activeModelProfile?: ModelProfile;
+  runtimeError?: string;
   t: Translator;
 }>();
 
@@ -35,7 +36,9 @@ const isAutoScrolling = ref(false);
 const openRuntimeMenu = ref<'reasoning' | 'speed'>();
 
 const scrollSignature = computed(() =>
-  timelineEntries.value.map((entry) => `${entry.id}:${entry.kind === 'message' ? entry.text.length : entry.text.length}`).join('|'),
+  timelineEntries.value
+    .map((entry) => `${entry.id}:${entry.kind === 'progress' ? entry.phase : entry.text.length}`)
+    .join('|'),
 );
 
 function handleModelChange(event: Event): void {
@@ -54,6 +57,15 @@ const reasoningSummary = computed(() => {
   return reasoningEffortLabel(activeReasoningEffort.value);
 });
 const speedSummary = computed(() => responseSpeedLabel(activeResponseSpeed.value));
+const progressLabel = (phase: 'connecting' | 'reasoning' | 'answering') => {
+  if (phase === 'reasoning') {
+    return props.t('modelReasoning');
+  }
+  if (phase === 'answering') {
+    return props.t('modelAnswering');
+  }
+  return props.t('modelConnecting');
+};
 
 function setReasoningEffort(effort: ReasoningEffort): void {
   openRuntimeMenu.value = undefined;
@@ -238,6 +250,7 @@ function nextAnimationFrame(): Promise<void> {
           </div>
         </div>
         <span class="runtime-pill">{{ busy ? t('running') : t('ready') }}</span>
+        <span v-if="runtimeError" class="runtime-control-error" :title="runtimeError">{{ runtimeError }}</span>
       </div>
     </header>
 
@@ -254,7 +267,9 @@ function nextAnimationFrame(): Promise<void> {
               ? ['message-row', `role-${entry.role}`, { live: entry.live }]
               : entry.kind === 'metrics'
                 ? 'metrics-row'
-                : 'tool-row'
+                : entry.kind === 'progress'
+                  ? 'progress-row'
+                  : 'tool-row'
           "
         >
           <template v-if="entry.kind === 'message'">
@@ -262,6 +277,10 @@ function nextAnimationFrame(): Promise<void> {
             <div v-if="entry.role === 'assistant'" class="message-content markdown-body" v-html="renderMarkdown(entry.text)"></div>
             <p v-else class="message-content">{{ entry.text }}</p>
           </template>
+          <span v-else-if="entry.kind === 'progress'" class="progress-label">
+            <span class="progress-dot" aria-hidden="true"></span>
+            {{ progressLabel(entry.phase) }}
+          </span>
           <span v-else>{{ entry.text }}</span>
         </article>
       </div>

@@ -35,6 +35,7 @@ export const reduceEvent = reduceAgentEvent;
 export { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot };
 
 const TURN_START_ACK_TIMEOUT_MS = 10_000;
+const RUNTIME_SETTINGS_TIMEOUT_MS = 10_000;
 
 export function useApp() {
   const state = ref<RendererState>(emptyState());
@@ -145,22 +146,38 @@ export function useApp() {
       return undefined;
     }
 
-    const saved = await window.desktop.saveModelProfile({
-      id: profile.id,
-      name: profile.name,
-      provider: profile.provider,
-      baseUrl: profile.baseUrl,
-      model: profile.model,
-      capabilities: profile.capabilities,
+    const optimistic: ModelProfile = {
+      ...profile,
       reasoning: {
         ...profile.reasoning,
         ...patch.reasoning,
       },
       responseSpeed: patch.responseSpeed ?? profile.responseSpeed,
-      isDefault: profile.isDefault,
-    });
-    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
-    return saved;
+    };
+    state.value = replaceModelProfile(state.value, optimistic);
+
+    try {
+      const saved = await withTimeout(
+        window.desktop.saveModelProfile({
+          id: profile.id,
+          name: profile.name,
+          provider: profile.provider,
+          baseUrl: profile.baseUrl,
+          model: profile.model,
+          capabilities: { ...profile.capabilities },
+          reasoning: optimistic.reasoning,
+          responseSpeed: optimistic.responseSpeed,
+          isDefault: profile.isDefault,
+        }),
+        RUNTIME_SETTINGS_TIMEOUT_MS,
+        'Model runtime setting update timed out after 10s.',
+      );
+      state.value = replaceModelProfile(state.value, saved);
+      return saved;
+    } catch (error) {
+      state.value = replaceModelProfile(state.value, profile);
+      throw error;
+    }
   }
 
   async function deleteModelProfile(id: string): Promise<void> {
@@ -213,6 +230,16 @@ export function useApp() {
     setLanguage,
     updateSettings,
     selectModelProfile,
+  };
+}
+
+function replaceModelProfile(state: RendererState, profile: ModelProfile): RendererState {
+  return {
+    ...state,
+    snapshot: {
+      ...state.snapshot,
+      modelProfiles: state.snapshot.modelProfiles.map((candidate) => (candidate.id === profile.id ? profile : candidate)),
+    },
   };
 }
 

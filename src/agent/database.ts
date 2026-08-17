@@ -296,18 +296,7 @@ class SqliteAppDatabase implements AppDatabase {
           });
       }
 
-      this.db
-        .prepare(
-          'INSERT INTO items (id, thread_id, turn_id, kind, payload, created_at) VALUES (:id, :threadId, :turnId, :kind, :payload, :createdAt)',
-        )
-        .run({
-          id: item.id,
-          threadId: item.threadId,
-          turnId: item.turnId ?? null,
-          kind: item.kind,
-          payload: JSON.stringify(item),
-          createdAt: item.createdAt,
-        });
+      this.insertOrMergeItem(item);
 
       this.db
         .prepare('UPDATE threads SET updated_at = :updatedAt WHERE id = :threadId')
@@ -528,6 +517,7 @@ class SqliteAppDatabase implements AppDatabase {
       "ALTER TABLE model_profiles ADD COLUMN response_speed TEXT NOT NULL DEFAULT 'standard'",
     );
     this.ensureDefaultGroup();
+    this.applyMigration(2, () => this.compactAssistantMessageFragments());
   }
 
   private readSettings(): AppSettings {
@@ -590,6 +580,92 @@ class SqliteAppDatabase implements AppDatabase {
       .run({ key, value });
   }
 
+  private insertOrMergeItem(item: Item): void {
+    if (item.kind === 'message' && item.role === 'assistant' && item.turnId) {
+      const candidates = this.db
+        .prepare(
+          `SELECT id, payload
+           FROM items
+           WHERE thread_id = :threadId AND turn_id = :turnId AND kind = 'message'
+           ORDER BY created_at ASC, id ASC`,
+        )
+        .all({ threadId: item.threadId, turnId: item.turnId }) as Array<{ id: string; payload: string }>;
+      const existing = candidates
+        .map((candidate) => ({ ...candidate, item: parseMessageItem(candidate.payload) }))
+        .find((candidate) => candidate.item?.role === 'assistant');
+      if (existing?.item) {
+        this.db
+          .prepare('UPDATE items SET payload = :payload WHERE id = :id')
+          .run({ id: existing.id, payload: JSON.stringify({ ...existing.item, text: existing.item.text + item.text }) });
+        return;
+      }
+    }
+
+    this.db
+      .prepare(
+        'INSERT INTO items (id, thread_id, turn_id, kind, payload, created_at) VALUES (:id, :threadId, :turnId, :kind, :payload, :createdAt)',
+      )
+      .run({
+        id: item.id,
+        threadId: item.threadId,
+        turnId: item.turnId ?? null,
+        kind: item.kind,
+        payload: JSON.stringify(item),
+        createdAt: item.createdAt,
+      });
+  }
+
+  private applyMigration(version: number, work: () => void): void {
+    const applied = this.db.prepare('SELECT version FROM schema_migrations WHERE version = :version').get({ version });
+    if (applied) {
+      return;
+    }
+
+    this.transaction(() => {
+      work();
+      this.db
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :appliedAt)')
+        .run({ version, appliedAt: new Date().toISOString() });
+    });
+  }
+
+  private compactAssistantMessageFragments(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT id, thread_id, turn_id, payload
+         FROM items
+         WHERE kind = 'message' AND turn_id IS NOT NULL
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all() as Array<{ id: string; thread_id: string; turn_id: string; payload: string }>;
+    const groups = new Map<string, Array<{ id: string; item: MessageItem }>>();
+
+    for (const row of rows) {
+      const item = parseMessageItem(row.payload);
+      if (!item || item.role !== 'assistant') {
+        continue;
+      }
+      const key = `${row.thread_id}\u0000${row.turn_id}`;
+      const group = groups.get(key) ?? [];
+      group.push({ id: row.id, item });
+      groups.set(key, group);
+    }
+
+    const update = this.db.prepare('UPDATE items SET payload = :payload WHERE id = :id');
+    const remove = this.db.prepare('DELETE FROM items WHERE id = :id');
+    for (const group of groups.values()) {
+      if (group.length < 2) {
+        continue;
+      }
+      const [first, ...fragments] = group;
+      const merged = { ...first.item, text: group.map((entry) => entry.item.text).join('') };
+      update.run({ id: first.id, payload: JSON.stringify(merged) });
+      for (const fragment of fragments) {
+        remove.run({ id: fragment.id });
+      }
+    }
+  }
+
   private ensureColumn(table: string, column: string, sql: string): void {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
     if (!rows.some((row) => row.name === column)) {
@@ -611,6 +687,17 @@ class SqliteAppDatabase implements AppDatabase {
 
 export function openDatabase(path: string): AppDatabase {
   return new SqliteAppDatabase(new DatabaseSync(path, { timeout: 5000 }));
+}
+
+function parseMessageItem(payload: string): MessageItem | undefined {
+  try {
+    const item = JSON.parse(payload) as Partial<MessageItem>;
+    return item.kind === 'message' && typeof item.text === 'string' && typeof item.role === 'string'
+      ? (item as MessageItem)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function mapThread(row: ThreadRow): ThreadSummary {

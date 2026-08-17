@@ -1,5 +1,5 @@
 import type { RuntimeModelProfile } from './database.js';
-import type { MetricSource, ModelRunMetrics } from '../shared/domain.js';
+import type { MetricSource, ModelRunMetrics, ModelRunPhase } from '../shared/domain.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -19,6 +19,7 @@ export async function streamChatCompletion(
   signal: AbortSignal,
   fetchImpl: FetchLike = fetch,
   nowMs: () => number = () => Date.now(),
+  emitProgress: (phase: ModelRunPhase) => void | Promise<void> = () => undefined,
 ): Promise<ModelRunMetrics> {
   const startedAt = nowMs();
   const headers: Record<string, string> = {
@@ -49,6 +50,7 @@ export async function streamChatCompletion(
       await emitDelta(delta);
     },
     signal,
+    emitProgress,
   );
   if (visibleDeltaCount === 0 && streamedMetrics.reasoningObserved) {
     firstTokenAt ??= nowMs();
@@ -99,11 +101,13 @@ async function readSseDeltas(
   body: ReadableStream<Uint8Array>,
   emitDelta: (delta: string) => void | Promise<void>,
   signal: AbortSignal,
+  emitProgress: (phase: ModelRunPhase) => void | Promise<void>,
 ): Promise<StreamedMetrics> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   const metrics: StreamedMetrics = {};
+  let currentPhase: ModelRunPhase = 'connecting';
 
   while (true) {
     throwIfAborted(signal);
@@ -127,11 +131,20 @@ async function readSseDeltas(
         continue;
       }
 
+      const chunkMetrics = parseMetrics(data);
+      if (chunkMetrics.reasoningObserved && currentPhase === 'connecting') {
+        currentPhase = 'reasoning';
+        await emitProgress(currentPhase);
+      }
       const delta = parseDelta(data);
       if (delta) {
+        if (currentPhase !== 'answering') {
+          currentPhase = 'answering';
+          await emitProgress(currentPhase);
+        }
         await emitDelta(delta);
       }
-      Object.assign(metrics, parseMetrics(data));
+      Object.assign(metrics, chunkMetrics);
     }
   }
 

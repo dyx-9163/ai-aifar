@@ -126,6 +126,27 @@ describe('desktop protocol guards', () => {
     ).toBe(true);
   });
 
+  it('accepts model progress events for visible turn feedback', () => {
+    expect(
+      isAgentEvent({
+        type: 'model.progress',
+        threadId: 't1',
+        turnId: 'u1',
+        sequence: 2,
+        phase: 'reasoning',
+      }),
+    ).toBe(true);
+    expect(
+      isAgentEvent({
+        type: 'model.progress',
+        threadId: 't1',
+        turnId: 'u1',
+        sequence: 3,
+        phase: 'unknown',
+      }),
+    ).toBe(false);
+  });
+
   it('accepts normalized model metrics events', () => {
     expect(
       isAgentEvent({

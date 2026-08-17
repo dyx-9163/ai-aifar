@@ -188,6 +188,9 @@ async function runModelTurn(
       ],
       async (delta) => next({ type: 'message.delta', text: delta }),
       signal,
+      undefined,
+      undefined,
+      async (phase) => next({ type: 'model.progress', phase }),
     );
     await next({ type: 'model.metrics', metrics });
     await next({ type: 'turn.completed' });

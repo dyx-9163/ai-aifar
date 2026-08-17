@@ -396,23 +396,16 @@ describe('renderer state reducer', () => {
     };
     let savedProfile: unknown;
     let currentSnapshot = snapshot;
+    let resolveSave: ((value: typeof profile) => void) | undefined;
     Object.defineProperty(globalThis, 'window', {
       value: {
         desktop: {
           getSnapshot: async () => currentSnapshot,
-          saveModelProfile: async (input: unknown) => {
-            savedProfile = input;
-            currentSnapshot = {
-              ...currentSnapshot,
-              modelProfiles: [
-                {
-                  ...profile,
-                  reasoning: { mode: 'enabled' as const, protocol: 'qwen' as const, effort: 'high' as const },
-                  responseSpeed: 'fast' as const,
-                },
-              ],
-            };
-            return currentSnapshot.modelProfiles[0];
+          saveModelProfile: (input: unknown) => {
+            savedProfile = structuredClone(input);
+            return new Promise<typeof profile>((resolve) => {
+              resolveSave = resolve;
+            });
           },
         },
       },
@@ -427,10 +420,23 @@ describe('renderer state reducer', () => {
         activeGroupId: 'default-group',
       };
 
-      await app.updateActiveModelRuntime({
+      const update = app.updateActiveModelRuntime({
         reasoning: { mode: 'enabled', effort: 'high' },
         responseSpeed: 'fast',
       });
+
+      expect(app.activeModelProfile.value).toMatchObject({
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'high' },
+        responseSpeed: 'fast',
+      });
+      const saved = {
+        ...profile,
+        reasoning: { mode: 'enabled' as const, protocol: 'qwen' as const, effort: 'high' as const },
+        responseSpeed: 'fast' as const,
+      };
+      currentSnapshot = { ...currentSnapshot, modelProfiles: [saved] };
+      resolveSave?.(saved);
+      await update;
 
       expect(savedProfile).toMatchObject({
         id: 'model-1',
@@ -442,6 +448,20 @@ describe('renderer state reducer', () => {
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
     }
+  });
+
+  it('renders the latest active model progress until the turn finishes', () => {
+    const active = createTimelineEntries([], [
+      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', sequence: 1, phase: 'reasoning' },
+      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', sequence: 2, phase: 'answering' },
+    ] as never);
+    expect(active).toContainEqual({ id: 'model.progress-turn-1', kind: 'progress', phase: 'answering' });
+
+    const finished = createTimelineEntries([], [
+      { type: 'model.progress', threadId: 'thread-1', turnId: 'turn-1', sequence: 1, phase: 'reasoning' },
+      { type: 'turn.completed', threadId: 'thread-1', turnId: 'turn-1', sequence: 2 },
+    ] as never);
+    expect(finished.some((entry) => entry.kind === 'progress')).toBe(false);
   });
 
   it('renders model run metrics as a compact timeline row', () => {

@@ -79,6 +79,7 @@ export type ReasoningMode = 'auto' | 'enabled' | 'disabled';
 export type ReasoningProtocol = 'none' | 'qwen' | 'openai' | 'custom';
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 export type ModelResponseSpeed = 'standard' | 'fast' | 'quality';
+export type ModelRunPhase = 'connecting' | 'reasoning' | 'answering';
 
 export interface ModelReasoningSettings {
   mode: ReasoningMode;

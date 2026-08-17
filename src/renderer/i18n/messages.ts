@@ -100,6 +100,9 @@ export const messages = {
     askPlaceholder: 'Ask the local agent...',
     send: 'Send',
     stop: 'Stop',
+    modelConnecting: 'Connecting to model...',
+    modelReasoning: 'Model is reasoning...',
+    modelAnswering: 'Generating response...',
   },
   'zh-CN': {
     appBrand: 'Private AI',
@@ -202,6 +205,9 @@ export const messages = {
     askPlaceholder: '向本地智能体提问...',
     send: '发送',
     stop: '停止',
+    modelConnecting: '正在连接模型...',
+    modelReasoning: '模型正在思考...',
+    modelAnswering: '正在生成回复...',
   },
 } as const;
 

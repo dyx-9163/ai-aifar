@@ -158,6 +158,35 @@ describe('OpenAI-compatible model provider', () => {
     expect(metrics.reasoningObserved).toBe(true);
   });
 
+  it('reports reasoning and answering phases without exposing hidden reasoning text', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"reasoning_content":"private thought"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"visible answer"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+    const deltas: string[] = [];
+    const phases: string[] = [];
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: true },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      (delta) => deltas.push(delta),
+      new AbortController().signal,
+      fetchImpl,
+      () => 1_000,
+      (phase) => phases.push(phase),
+    );
+
+    expect(phases).toEqual(['reasoning', 'answering']);
+    expect(deltas).toEqual(['visible answer']);
+  });
+
   it('retries once without optional usage and reasoning parameters when rejected', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {

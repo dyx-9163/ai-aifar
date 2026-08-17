@@ -3,6 +3,7 @@ import type {
   LanguagePreference,
   MetricSource,
   ModelResponseSpeed,
+  ModelRunPhase,
   ModelProfileInput,
   ModelRunMetrics,
   ReasoningEffort,
@@ -32,6 +33,7 @@ export type DesktopRequest =
 export type SequencedAgentEvent =
   | { type: 'turn.started'; threadId: string; turnId: string; sequence: number; title: string }
   | { type: 'message.delta'; threadId: string; turnId: string; sequence: number; text: string }
+  | { type: 'model.progress'; threadId: string; turnId: string; sequence: number; phase: ModelRunPhase }
   | { type: 'tool.started'; threadId: string; turnId: string; sequence: number; toolId: string; title: string }
   | { type: 'tool.output'; threadId: string; turnId: string; sequence: number; toolId: string; output: string }
   | { type: 'model.metrics'; threadId: string; turnId: string; sequence: number; metrics: ModelRunMetrics }
@@ -85,6 +87,10 @@ function isMetricSource(value: unknown): value is MetricSource {
 
 function isModelResponseSpeed(value: unknown): value is ModelResponseSpeed {
   return value === 'standard' || value === 'fast' || value === 'quality';
+}
+
+function isModelRunPhase(value: unknown): value is ModelRunPhase {
+  return value === 'connecting' || value === 'reasoning' || value === 'answering';
 }
 
 function isReasoningInput(value: unknown): boolean {
@@ -193,6 +199,8 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
       return hasString(value, 'title');
     case 'message.delta':
       return hasString(value, 'text');
+    case 'model.progress':
+      return isModelRunPhase(value.phase);
     case 'tool.started':
       return hasString(value, 'toolId') && hasString(value, 'title');
     case 'tool.output':

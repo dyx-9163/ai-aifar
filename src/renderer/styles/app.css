@@ -609,6 +609,47 @@ button {
   font-size: 12px;
 }
 
+.progress-row {
+  align-self: flex-start;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.progress-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: progress-pulse 1.25s ease-out infinite;
+}
+
+.runtime-control-error {
+  max-width: 260px;
+  overflow: hidden;
+  color: #f29a9a;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes progress-pulse {
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
 .jump-to-bottom {
   position: sticky;
   z-index: 2;

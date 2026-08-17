@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import type { ModelProfileInput } from '../shared/domain';
+import type { ModelProfileInput, ModelResponseSpeed, ReasoningEffort } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -11,6 +11,7 @@ import { createTranslator } from './i18n';
 const app = useApp();
 const theme = ref<'light' | 'dark'>('dark');
 const view = ref<'chat' | 'settings'>('chat');
+const runtimeError = ref('');
 
 const activeThreadId = computed(() => app.state.value.activeThreadId);
 const t = computed(() => createTranslator(app.state.value.snapshot.settings.language));
@@ -72,6 +73,18 @@ async function testModelProfile(profile: ModelProfileInput, report: (message: st
     report(error instanceof Error ? error.message : t.value('modelConnectionFailed'));
   }
 }
+
+async function updateModelRuntime(patch: {
+  reasoning?: { mode?: 'enabled' | 'disabled'; effort?: ReasoningEffort };
+  responseSpeed?: ModelResponseSpeed;
+}): Promise<void> {
+  runtimeError.value = '';
+  try {
+    await app.updateActiveModelRuntime(patch);
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : t.value('modelConnectionFailed');
+  }
+}
 </script>
 
 <template>
@@ -104,11 +117,12 @@ async function testModelProfile(profile: ModelProfileInput, report: (message: st
       :model-profiles="app.state.value.snapshot.modelProfiles"
       :active-model-profile-id="app.activeModelProfileId.value"
       :active-model-profile="app.activeModelProfile.value"
+      :runtime-error="runtimeError"
       :t="t"
       @submit="app.startTurn"
       @cancel="app.cancelTurn"
       @select-model="app.selectModelProfile"
-      @update-model-runtime="app.updateActiveModelRuntime"
+      @update-model-runtime="updateModelRuntime"
     />
 
     <Inspector

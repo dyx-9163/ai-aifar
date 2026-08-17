@@ -1,4 +1,4 @@
-import type { Item, ModelRunMetrics } from '../shared/domain';
+import type { Item, ModelRunMetrics, ModelRunPhase } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
 
 export type TimelineEntry =
@@ -20,10 +20,19 @@ export type TimelineEntry =
       id: string;
       kind: 'metrics';
       text: string;
+    }
+  | {
+      id: string;
+      kind: 'progress';
+      phase: ModelRunPhase;
     };
 
 export function createTimelineEntries(items: Item[], events: AgentEvent[] = []): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
+  const terminalTurns = new Set(
+    events.filter((event) => event.type === 'turn.completed' || event.type === 'turn.failed').map((event) => event.turnId),
+  );
+  const progressByTurn = new Map<string, Extract<AgentEvent, { type: 'model.progress' }>>();
 
   for (const item of items) {
     if (item.kind === 'message') {
@@ -48,6 +57,9 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = []):
   }
 
   for (const event of events) {
+    if (event.type === 'model.progress') {
+      progressByTurn.set(event.turnId, event);
+    }
     if (event.type === 'tool.started' || event.type === 'tool.output') {
       entries.push({
         id: `${event.type}-${event.turnId}-${event.sequence}`,
@@ -70,6 +82,12 @@ export function createTimelineEntries(items: Item[], events: AgentEvent[] = []):
         kind: 'metrics',
         text: formatMetrics(event.metrics),
       });
+    }
+  }
+
+  for (const [turnId, event] of progressByTurn) {
+    if (!terminalTurns.has(turnId)) {
+      entries.push({ id: `model.progress-${turnId}`, kind: 'progress', phase: event.phase });
     }
   }
 
