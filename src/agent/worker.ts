@@ -1,7 +1,9 @@
-import type { Approval, Item } from '../shared/domain.js';
+import type { Approval, Item, ModelProfileInput } from '../shared/domain.js';
 import { isDesktopRequest, type AgentEvent, type DesktopRequest } from '../shared/protocol.js';
-import { openDatabase, type AppDatabase } from './database.js';
-import { runDemoTurn } from './demoAgent.js';
+import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './database.js';
+import { buildChatMessages } from './chatContext.js';
+import { requiresApproval, runDemoTurn } from './demoAgent.js';
+import { streamChatCompletion, testModelProfile, type ChatMessage } from './modelProvider.js';
 
 type ParentPort = {
   postMessage(message: unknown): void;
@@ -14,6 +16,10 @@ type WorkerPort = {
   on(eventName: 'message', listener: (event: { data: unknown }) => void): void;
   start?(): void;
 };
+
+type SequencedEvent = Exclude<AgentEvent, { type: 'snapshot' }>;
+type StripEnvelope<T> = T extends unknown ? Omit<T, 'threadId' | 'turnId' | 'sequence'> : never;
+type SequencedEventPayload = StripEnvelope<SequencedEvent>;
 
 const parentPort = (process as NodeJS.Process & { parentPort?: ParentPort }).parentPort;
 const activeTurns = new Map<string, AbortController>();
@@ -57,7 +63,49 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
   }
 
   if (message.type === 'thread.create') {
-    return database.createThread(message.title);
+    return database.createThread(message.title, message.groupId);
+  }
+
+  if (message.type === 'thread.delete') {
+    database.deleteThread(message.threadId);
+    return undefined;
+  }
+
+  if (message.type === 'group.create') {
+    return database.createGroup(message.name);
+  }
+
+  if (message.type === 'group.delete') {
+    database.deleteGroup(message.groupId);
+    return undefined;
+  }
+
+  if (message.type === 'thread.setModel') {
+    database.setThreadModel(message.threadId, message.modelProfileId || undefined);
+    return undefined;
+  }
+
+  if (message.type === 'modelProfile.save') {
+    return database.saveModelProfile(message.profile);
+  }
+
+  if (message.type === 'modelProfile.delete') {
+    database.deleteModelProfile(message.id);
+    return undefined;
+  }
+
+  if (message.type === 'modelProfile.test') {
+    const profile = runtimeProfileFromInput(message.profile, database);
+    return testModelProfile(profile);
+  }
+
+  if (message.type === 'language.set') {
+    database.setLanguage(message.language);
+    return undefined;
+  }
+
+  if (message.type === 'settings.update') {
+    return database.updateSettings(message.settings);
   }
 
   if (message.type === 'approval.respond') {
@@ -84,27 +132,106 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
     const controller = new AbortController();
     activeTurns.set(turnId, controller);
     database.appendItem(userMessage(message.threadId, turnId, message.text));
-    void runDemoTurn(
-      {
-        threadId: message.threadId,
-        turnId,
-        text: message.text,
-      },
-      (event) => {
-        if (event.type === 'message.delta') {
-          database?.appendItem(assistantMessage(event.threadId, event.turnId, event.sequence, event.text));
-        }
-        if (event.type === 'approval.required') {
-          database?.upsertApproval(approvalFromEvent(event));
-        }
-        workerPort?.postMessage(event);
-      },
-      controller.signal,
-    ).finally(() => activeTurns.delete(turnId));
+
+    const settings = database.getSnapshot().settings;
+    const selectedProfile = database.getModelProfileForRuntime(message.modelProfileId);
+    const useModelProvider = selectedProfile && !requiresApproval(message.text);
+    const turn = useModelProvider
+      ? runModelTurn(
+          message.threadId,
+          turnId,
+          selectedProfile,
+          buildChatMessages(database.getThreadMessages(message.threadId, settings.contextMessageLimit), settings.contextMessageLimit),
+          controller.signal,
+        )
+      : runDemoTurn(
+          {
+            threadId: message.threadId,
+            turnId,
+            text: message.text,
+          },
+          persistAndPostEvent,
+          controller.signal,
+        );
+
+    void turn.finally(() => activeTurns.delete(turnId));
     return { turnId };
   }
 
   return undefined;
+}
+
+async function runModelTurn(
+  threadId: string,
+  turnId: string,
+  profile: RuntimeModelProfile,
+  history: ChatMessage[],
+  signal: AbortSignal,
+): Promise<void> {
+  let sequence = 1;
+  const next = async (event: SequencedEventPayload) => {
+    const sequenced = { ...event, threadId, turnId, sequence: sequence++ } as SequencedEvent;
+    await persistAndPostEvent(sequenced);
+  };
+
+  try {
+    await next({ type: 'turn.started', title: `Chat with ${profile.name}` });
+    await next({ type: 'tool.started', toolId: `tool-${turnId}-model`, title: `Call ${profile.name}` });
+    const metrics = await streamChatCompletion(
+      profile,
+      [
+        {
+          role: 'system',
+          content: 'You are a helpful private AI assistant. Keep answers clear, practical, and concise.',
+        },
+        ...history,
+      ],
+      async (delta) => next({ type: 'message.delta', text: delta }),
+      signal,
+    );
+    await next({ type: 'model.metrics', metrics });
+    await next({ type: 'turn.completed' });
+  } catch (error) {
+    await next({ type: 'turn.failed', error: error instanceof Error ? error.message : 'Model request failed.' });
+  }
+}
+
+async function persistAndPostEvent(event: AgentEvent): Promise<void> {
+  if (event.type === 'message.delta') {
+    database?.appendItem(assistantMessage(event.threadId, event.turnId, event.sequence, event.text));
+  }
+  if (event.type === 'approval.required') {
+    database?.upsertApproval(approvalFromEvent(event));
+  }
+  workerPort?.postMessage(event);
+}
+
+function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): RuntimeModelProfile {
+  const existing = input.id ? db.getModelProfileForRuntime(input.id) : undefined;
+  return {
+    id: input.id ?? 'unsaved-test-profile',
+    name: input.name.trim(),
+    provider: input.provider,
+    baseUrl: input.baseUrl.trim().replace(/\/$/, ''),
+    model: input.model.trim(),
+    apiKey: input.apiKey?.trim() || existing?.apiKey,
+    apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
+    capabilities: {
+      text: input.capabilities?.text ?? true,
+      vision: input.capabilities?.vision ?? false,
+      longContext: input.capabilities?.longContext ?? false,
+      reasoning: input.capabilities?.reasoning ?? false,
+      streamingUsage: input.capabilities?.streamingUsage ?? false,
+    },
+    reasoning: {
+      mode: input.reasoning?.mode ?? existing?.reasoning.mode ?? 'disabled',
+      protocol: input.reasoning?.protocol ?? existing?.reasoning.protocol ?? 'none',
+      effort: input.reasoning?.effort ?? existing?.reasoning.effort ?? 'medium',
+    },
+    isDefault: input.isDefault ?? existing?.isDefault ?? false,
+    createdAt: existing?.createdAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function postReply(requestId: string, ok: boolean, data?: unknown, error?: string): void {

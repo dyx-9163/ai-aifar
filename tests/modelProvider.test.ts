@@ -239,4 +239,21 @@ describe('OpenAI-compatible model provider', () => {
       { role: 'assistant', content: 'first answer' },
     ]);
   });
+
+  it('builds model context with the configured latest-message limit', () => {
+    const history = ['one', 'two', 'three'].map((text, index) => ({
+      id: `item-${index}`,
+      threadId: 'thread-1',
+      turnId: `turn-${index}`,
+      kind: 'message' as const,
+      role: 'user' as const,
+      text,
+      createdAt: `2026-08-17T00:00:0${index}.000Z`,
+    }));
+
+    expect(buildChatMessages(history, 2)).toEqual([
+      { role: 'user', content: 'two' },
+      { role: 'user', content: 'three' },
+    ]);
+  });
 });

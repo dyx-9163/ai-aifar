@@ -1,70 +1,17 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import type { Approval, AppSnapshot, Item, ThreadSummary } from '../../shared/domain';
-import type { AgentEvent } from '../../shared/protocol';
+import {
+  appendOptimisticUserMessage,
+  applyAssistantDeltaToSnapshot,
+  emptyAgentClientState,
+  reduceAgentEvent,
+  type AgentClientState,
+} from '../../agentClient/core';
+import type { ChatGroup, Item, LanguagePreference, ModelProfile, ModelProfileInput, RuntimeSettingsInput, ThreadSummary } from '../../shared/domain';
 
-export interface RendererState {
-  snapshot: AppSnapshot;
-  activeThreadId?: string;
-  events: AgentEvent[];
-  seenSequences: Record<string, true>;
-  pendingApproval?: Approval;
-  busy: boolean;
-}
-
-export function emptyState(): RendererState {
-  return {
-    snapshot: {
-      threads: [],
-      items: {},
-      approvals: [],
-      settings: { theme: 'system' },
-    },
-    events: [],
-    seenSequences: {},
-    busy: false,
-  };
-}
-
-export function reduceEvent(state: RendererState, event: AgentEvent): RendererState {
-  if (event.type === 'snapshot') {
-    return {
-      ...state,
-      snapshot: event.snapshot,
-      activeThreadId: state.activeThreadId ?? event.snapshot.threads[0]?.id,
-    };
-  }
-
-  const key = `${event.threadId}:${event.sequence}`;
-  if (state.seenSequences[key]) {
-    return state;
-  }
-
-  const nextState: RendererState = {
-    ...state,
-    events: [...state.events, event],
-    seenSequences: { ...state.seenSequences, [key]: true },
-    activeThreadId: event.threadId,
-    busy: event.type !== 'turn.completed' && event.type !== 'turn.failed',
-  };
-
-  if (event.type === 'approval.required') {
-    nextState.pendingApproval = {
-      id: event.approvalId,
-      threadId: event.threadId,
-      turnId: event.turnId,
-      title: event.title,
-      description: event.description,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  if (event.type === 'turn.completed' || event.type === 'turn.failed') {
-    nextState.busy = false;
-  }
-
-  return nextState;
-}
+export type RendererState = AgentClientState;
+export const emptyState = emptyAgentClientState;
+export const reduceEvent = reduceAgentEvent;
+export { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot };
 
 export function useApp() {
   const state = ref<RendererState>(emptyState());
@@ -78,6 +25,11 @@ export function useApp() {
     const threadId = state.value.activeThreadId;
     return threadId ? (state.value.snapshot.items[threadId] ?? []) : [];
   });
+
+  const activeModelProfileId = computed(() => activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId);
+  const activeModelProfile = computed(() =>
+    state.value.snapshot.modelProfiles.find((profile) => profile.id === activeModelProfileId.value),
+  );
 
   const visibleEvents = computed(() =>
     state.value.events.filter((event) => event.type === 'snapshot' || event.threadId === state.value.activeThreadId),
@@ -97,17 +49,37 @@ export function useApp() {
     unsubscribe?.();
   });
 
-  async function createThread(title: string): Promise<ThreadSummary> {
-    const thread = await window.desktop.createThread(title);
+  async function createGroup(name: string): Promise<ChatGroup> {
+    const group = await window.desktop.createGroup(name);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    state.value.activeGroupId = group.id;
+    return group;
+  }
+
+  async function deleteGroup(groupId: string): Promise<void> {
+    await window.desktop.deleteGroup(groupId);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
+  async function createThread(title: string, groupId = state.value.activeGroupId): Promise<ThreadSummary> {
+    const thread = await window.desktop.createThread(title, groupId);
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
     state.value.activeThreadId = thread.id;
+    state.value.activeGroupId = thread.groupId;
     return thread;
   }
 
+  async function deleteThread(threadId: string): Promise<void> {
+    await window.desktop.deleteThread(threadId);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
   async function startTurn(text: string): Promise<void> {
-    const threadId = state.value.activeThreadId ?? (await createThread('New task')).id;
+    const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
+    const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
     state.value.busy = true;
-    await window.desktop.startTurn(threadId, text);
+    const response = await window.desktop.startTurn(threadId, text, modelProfileId);
+    state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
   }
 
   async function respondApproval(approved: boolean): Promise<void> {
@@ -119,14 +91,59 @@ export function useApp() {
     state.value.pendingApproval = { ...approval, status: approved ? 'approved' : 'rejected', respondedAt: new Date().toISOString() };
   }
 
+  async function saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile> {
+    const saved = await window.desktop.saveModelProfile(profile);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return saved;
+  }
+
+  async function deleteModelProfile(id: string): Promise<void> {
+    await window.desktop.deleteModelProfile(id);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
+  async function testModelProfile(profile: ModelProfileInput): Promise<{ ok: true; message: string }> {
+    return window.desktop.testModelProfile(profile);
+  }
+
+  async function setLanguage(language: LanguagePreference): Promise<void> {
+    await window.desktop.setLanguage(language);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
+  async function updateSettings(settings: RuntimeSettingsInput): Promise<void> {
+    await window.desktop.updateSettings(settings);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
+  async function selectModelProfile(modelProfileId?: string): Promise<void> {
+    let threadId = state.value.activeThreadId;
+    if (!threadId) {
+      threadId = (await createThread('New task')).id;
+    }
+    await window.desktop.setThreadModel(threadId, modelProfileId);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
   return {
     state,
     loading,
     activeThread,
     activeItems,
+    activeModelProfile,
+    activeModelProfileId,
     visibleEvents,
+    createGroup,
+    deleteGroup,
     createThread,
+    deleteThread,
     startTurn,
     respondApproval,
+    saveModelProfile,
+    deleteModelProfile,
+    testModelProfile,
+    setLanguage,
+    updateSettings,
+    selectModelProfile,
   };
 }
