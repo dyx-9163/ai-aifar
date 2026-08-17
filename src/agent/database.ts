@@ -18,6 +18,7 @@ import type {
 import {
   normalizeMaxConcurrency,
   normalizeModelCapabilities,
+  normalizeProfileCapabilities,
   normalizeReasoningSettings,
 } from './modelCapabilities.js';
 
@@ -88,6 +89,7 @@ type ModelProfileRow = {
   api_key: string | null;
   capabilities: string;
   reasoning: string;
+  max_concurrency: number;
   response_speed: string | null;
   is_default: number;
   created_at: string;
@@ -341,8 +343,9 @@ class SqliteAppDatabase implements AppDatabase {
     const now = new Date().toISOString();
     const existing = input.id ? this.getModelProfileForRuntime(input.id) : undefined;
     const reasoningInput = { ...existing?.reasoning, ...input.reasoning };
-    const capabilities = normalizeModelCapabilities(
-      input.capabilities ?? existing?.capabilities,
+    const capabilities = normalizeProfileCapabilities(
+      input.capabilities,
+      existing?.capabilities,
       reasoningInput.protocol ?? 'none',
     );
     const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);
@@ -373,8 +376,8 @@ class SqliteAppDatabase implements AppDatabase {
       }
       this.db
         .prepare(
-          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, response_speed, is_default, created_at, updated_at)
-           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :responseSpeed, :isDefault, :createdAt, :updatedAt)
+          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, max_concurrency, response_speed, is_default, created_at, updated_at)
+           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :maxConcurrency, :responseSpeed, :isDefault, :createdAt, :updatedAt)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              provider = excluded.provider,
@@ -383,6 +386,7 @@ class SqliteAppDatabase implements AppDatabase {
              api_key = excluded.api_key,
              capabilities = excluded.capabilities,
              reasoning = excluded.reasoning,
+             max_concurrency = excluded.max_concurrency,
              response_speed = excluded.response_speed,
              is_default = excluded.is_default,
              updated_at = excluded.updated_at`,
@@ -396,6 +400,7 @@ class SqliteAppDatabase implements AppDatabase {
           apiKey: profile.apiKey ?? null,
           capabilities: JSON.stringify(profile.capabilities),
           reasoning: JSON.stringify(profile.reasoning),
+          maxConcurrency: profile.maxConcurrency,
           responseSpeed: profile.responseSpeed,
           isDefault: profile.isDefault ? 1 : 0,
           createdAt: profile.createdAt,
@@ -509,6 +514,7 @@ class SqliteAppDatabase implements AppDatabase {
         model TEXT NOT NULL,
         api_key TEXT,
         capabilities TEXT NOT NULL,
+        max_concurrency INTEGER NOT NULL DEFAULT 1,
         is_default INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -529,6 +535,11 @@ class SqliteAppDatabase implements AppDatabase {
       'model_profiles',
       'reasoning',
       'ALTER TABLE model_profiles ADD COLUMN reasoning TEXT NOT NULL DEFAULT \'{"mode":"disabled","protocol":"none","effort":"medium"}\'',
+    );
+    this.ensureColumn(
+      'model_profiles',
+      'max_concurrency',
+      'ALTER TABLE model_profiles ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 1',
     );
     this.ensureColumn(
       'model_profiles',
@@ -772,7 +783,7 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
     apiKeyConfigured: Boolean(row.api_key),
     capabilities,
     reasoning,
-    maxConcurrency: normalizeMaxConcurrency(capabilities.concurrency.defaultLimit, capabilities),
+    maxConcurrency: normalizeMaxConcurrency(row.max_concurrency, capabilities),
     responseSpeed: normalizeResponseSpeed(row.response_speed),
     isDefault: row.is_default === 1,
     createdAt: row.created_at,

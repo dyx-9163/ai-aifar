@@ -29,9 +29,23 @@ describe('model capabilities', () => {
     ).effort).toBe('max');
   });
 
+  it('ignores whitespace-only declared effort values', () => {
+    expect(openAiCapabilities(['   ', 'max']).reasoning).toEqual({
+      inputMode: 'effort', effortOptions: ['max'], outputModes: ['summary'], defaultEffort: 'max',
+    });
+    expect(openAiCapabilities(['\t']).reasoning).toEqual({
+      inputMode: 'unsupported', effortOptions: [], outputModes: [], defaultEffort: undefined,
+    });
+  });
+
   it('rejects an effort that the profile does not declare', () => {
     const profile = profileFixture({ effortOptions: ['low', 'medium', 'high'], effort: 'max' });
     expect(() => validateReasoningSelection(profile)).toThrow('does not support reasoning effort "max"');
+  });
+
+  it('treats a whitespace-only selected effort as missing', () => {
+    const profile = profileFixture({ effortOptions: ['low'], effort: '   ' });
+    expect(() => validateReasoningSelection(profile)).toThrow('requires a reasoning effort');
   });
 
   it('bounds profile concurrency by the declared capability limit', () => {

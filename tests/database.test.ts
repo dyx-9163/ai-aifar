@@ -266,6 +266,64 @@ describe('sqlite app database', () => {
     db.close();
   });
 
+  it('persists normalized model profile concurrency across reopen', () => {
+    const dbPath = createDbPath();
+    const first = openDatabase(dbPath);
+    const saved = first.saveModelProfile({
+      name: 'Concurrent model',
+      provider: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'concurrent-model',
+      maxConcurrency: 99,
+      capabilities: {
+        concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
+      },
+      isDefault: true,
+    });
+    expect(saved.maxConcurrency).toBe(32);
+    first.close();
+
+    const second = openDatabase(dbPath);
+    expect(second.getModelProfileForRuntime(saved.id)?.maxConcurrency).toBe(32);
+    second.close();
+  });
+
+  it('preserves nested capability declarations when saving a partial update', () => {
+    const db = openDatabase(createDbPath());
+    const saved = db.saveModelProfile({
+      name: 'Partial capability model',
+      provider: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'partial-model',
+      capabilities: {
+        vision: true,
+        reasoning: { inputMode: 'effort', effortOptions: ['low', 'max'], outputModes: ['summary'], defaultEffort: 'max' },
+        usage: { tokens: false, reasoningTokens: true },
+      },
+      isDefault: true,
+    });
+
+    const updated = db.saveModelProfile({
+      id: saved.id,
+      name: saved.name,
+      provider: saved.provider,
+      baseUrl: saved.baseUrl,
+      model: saved.model,
+      capabilities: {
+        reasoning: { outputModes: ['raw'] },
+        usage: { reasoningTokens: false },
+      },
+      isDefault: true,
+    });
+
+    expect(updated.capabilities).toMatchObject({
+      vision: true,
+      reasoning: { inputMode: 'effort', effortOptions: ['low', 'max'], outputModes: ['raw'], defaultEffort: 'max' },
+      usage: { tokens: false, reasoningTokens: false },
+    });
+    db.close();
+  });
+
   it('stores the selected model profile on a thread', () => {
     const db = openDatabase(createDbPath());
     const profile = db.saveModelProfile({

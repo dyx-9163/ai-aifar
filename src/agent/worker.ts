@@ -6,7 +6,7 @@ import { requiresApproval, runDemoTurn } from './demoAgent.js';
 import { streamChatCompletion, testModelProfile, type ChatMessage } from './modelProvider.js';
 import {
   normalizeMaxConcurrency,
-  normalizeModelCapabilities,
+  normalizeProfileCapabilities,
   normalizeReasoningSettings,
 } from './modelCapabilities.js';
 
@@ -217,8 +217,9 @@ async function persistAndPostEvent(event: AgentEvent): Promise<void> {
 function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): RuntimeModelProfile {
   const existing = input.id ? db.getModelProfileForRuntime(input.id) : undefined;
   const reasoningInput = { ...existing?.reasoning, ...input.reasoning };
-  const capabilities = normalizeModelCapabilities(
-    input.capabilities ?? existing?.capabilities,
+  const capabilities = normalizeProfileCapabilities(
+    input.capabilities,
+    existing?.capabilities,
     reasoningInput.protocol ?? 'none',
   );
   const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);

@@ -1,6 +1,7 @@
 import type { RuntimeModelProfile } from './database.js';
 import type {
   ModelCapabilities,
+  ModelCapabilitiesInput,
   ModelReasoningSettings,
   ReasoningInputMode,
   ReasoningProtocol,
@@ -19,15 +20,16 @@ export function qwenCapabilities(): ModelCapabilities {
 }
 
 export function openAiCapabilities(effortOptions: string[] = []): ModelCapabilities {
+  const declaredEffortOptions = [...new Set(effortOptions.filter(hasNonWhitespaceText))];
   return {
     text: true,
     vision: false,
     longContext: false,
     reasoning: {
-      inputMode: effortOptions.length ? 'effort' : 'unsupported',
-      effortOptions: [...new Set(effortOptions)],
-      outputModes: effortOptions.length ? ['summary'] : [],
-      defaultEffort: effortOptions.includes('medium') ? 'medium' : effortOptions[0],
+      inputMode: declaredEffortOptions.length ? 'effort' : 'unsupported',
+      effortOptions: declaredEffortOptions,
+      outputModes: declaredEffortOptions.length ? ['summary'] : [],
+      defaultEffort: declaredEffortOptions.includes('medium') ? 'medium' : declaredEffortOptions[0],
     },
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
@@ -77,6 +79,24 @@ export function normalizeModelCapabilities(input: unknown, reasoningProtocol: Re
   };
 }
 
+export function normalizeProfileCapabilities(
+  input: ModelCapabilitiesInput | undefined,
+  existing: ModelCapabilities | undefined,
+  reasoningProtocol: ReasoningProtocol,
+): ModelCapabilities {
+  if (!existing || !input) {
+    return normalizeModelCapabilities(input ?? existing, reasoningProtocol);
+  }
+
+  return normalizeModelCapabilities({
+    ...existing,
+    ...input,
+    reasoning: { ...existing.reasoning, ...input.reasoning },
+    concurrency: { ...existing.concurrency, ...input.concurrency },
+    usage: { ...existing.usage, ...input.usage },
+  }, reasoningProtocol);
+}
+
 export function normalizeReasoningSettings(
   input: Partial<ModelReasoningSettings> | undefined,
   capabilities: ModelCapabilities,
@@ -110,7 +130,7 @@ export function validateReasoningSelection(profile: RuntimeModelProfile): void {
     return;
   }
 
-  const effort = profile.reasoning.effort;
+  const effort = nonEmptyString(profile.reasoning.effort);
   if (!effort) {
     throw new Error(`Model profile "${profile.name}" requires a reasoning effort`);
   }
@@ -151,13 +171,17 @@ function positiveIntegerOr(value: unknown, fallback: number): number {
 }
 
 function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
+  return hasNonWhitespaceText(value) ? value : undefined;
 }
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    ? value.filter(hasNonWhitespaceText)
     : [];
+}
+
+function hasNonWhitespaceText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function reasoningInputMode(value: unknown): ReasoningInputMode {
