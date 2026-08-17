@@ -131,6 +131,33 @@ describe('OpenAI-compatible model provider', () => {
     });
   });
 
+  it('emits a safe visible notice when a reasoning model returns no displayable content', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"reasoning_content":"hidden chain of thought"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+    const deltas: string[] = [];
+
+    const metrics = await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: true },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      (delta) => deltas.push(delta),
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(deltas.join('')).toContain('模型只返回了思考内容');
+    expect(deltas.join('')).not.toContain('hidden chain of thought');
+    expect(metrics.reasoningObserved).toBe(true);
+  });
+
   it('retries once without optional usage and reasoning parameters when rejected', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {

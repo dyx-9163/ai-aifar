@@ -32,6 +32,7 @@ const timelineRef = ref<HTMLElement>();
 const isPinnedToBottom = ref(true);
 const hasUnreadBelow = ref(false);
 const isAutoScrolling = ref(false);
+const openRuntimeMenu = ref<'reasoning' | 'speed'>();
 
 const scrollSignature = computed(() =>
   timelineEntries.value.map((entry) => `${entry.id}:${entry.kind === 'message' ? entry.text.length : entry.text.length}`).join('|'),
@@ -55,15 +56,25 @@ const reasoningSummary = computed(() => {
 const speedSummary = computed(() => responseSpeedLabel(activeResponseSpeed.value));
 
 function setReasoningEffort(effort: ReasoningEffort): void {
+  openRuntimeMenu.value = undefined;
   emit('updateModelRuntime', { reasoning: { mode: 'enabled', effort } });
 }
 
 function disableReasoning(): void {
+  openRuntimeMenu.value = undefined;
   emit('updateModelRuntime', { reasoning: { mode: 'disabled' } });
 }
 
 function setResponseSpeed(responseSpeed: ModelResponseSpeed): void {
+  openRuntimeMenu.value = undefined;
   emit('updateModelRuntime', { responseSpeed });
+}
+
+function toggleRuntimeMenu(menu: 'reasoning' | 'speed'): void {
+  if (!props.activeModelProfile) {
+    return;
+  }
+  openRuntimeMenu.value = openRuntimeMenu.value === menu ? undefined : menu;
 }
 
 function reasoningEffortLabel(effort: ReasoningEffort): string {
@@ -179,12 +190,12 @@ function nextAnimationFrame(): Promise<void> {
             </option>
           </select>
         </label>
-        <details class="runtime-menu" data-testid="reasoning-runtime-menu" :class="{ disabled: !activeModelProfile }">
-          <summary data-testid="reasoning-runtime-trigger">
+        <div class="runtime-menu" data-testid="reasoning-runtime-menu" :class="{ disabled: !activeModelProfile }">
+          <button type="button" class="runtime-menu-trigger" data-testid="reasoning-runtime-trigger" @click="toggleRuntimeMenu('reasoning')">
             <span>{{ t('reasoningEffort') }}</span>
             <strong>{{ reasoningSummary }}</strong>
-          </summary>
-          <div class="runtime-menu-panel">
+          </button>
+          <div v-if="openRuntimeMenu === 'reasoning'" class="runtime-menu-panel">
             <button
               type="button"
               data-testid="reasoning-runtime-disabled"
@@ -206,13 +217,13 @@ function nextAnimationFrame(): Promise<void> {
               {{ reasoningEffortLabel(effort) }}
             </button>
           </div>
-        </details>
-        <details class="runtime-menu" data-testid="speed-runtime-menu" :class="{ disabled: !activeModelProfile }">
-          <summary data-testid="speed-runtime-trigger">
+        </div>
+        <div class="runtime-menu" data-testid="speed-runtime-menu" :class="{ disabled: !activeModelProfile }">
+          <button type="button" class="runtime-menu-trigger" data-testid="speed-runtime-trigger" @click="toggleRuntimeMenu('speed')">
             <span>{{ t('responseSpeed') }}</span>
             <strong>{{ speedSummary }}</strong>
-          </summary>
-          <div class="runtime-menu-panel">
+          </button>
+          <div v-if="openRuntimeMenu === 'speed'" class="runtime-menu-panel">
             <button
               v-for="speed in responseSpeedOptions"
               :key="speed"
@@ -225,7 +236,7 @@ function nextAnimationFrame(): Promise<void> {
               {{ responseSpeedLabel(speed) }}
             </button>
           </div>
-        </details>
+        </div>
         <span class="runtime-pill">{{ busy ? t('running') : t('ready') }}</span>
       </div>
     </header>

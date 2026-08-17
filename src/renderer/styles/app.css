@@ -376,7 +376,7 @@ button {
   font-size: 12px;
 }
 
-.runtime-menu summary {
+.runtime-menu-trigger {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -385,15 +385,11 @@ button {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--panel-raised);
+  color: var(--muted);
   cursor: pointer;
-  list-style: none;
 }
 
-.runtime-menu summary::-webkit-details-marker {
-  display: none;
-}
-
-.runtime-menu summary::after {
+.runtime-menu-trigger::after {
   content: "›";
   color: var(--subtle);
   transform: rotate(90deg);

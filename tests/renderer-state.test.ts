@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
 import type { Item } from '../src/shared/domain';
 import { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot, emptyState, reduceEvent, useApp } from '../src/renderer/composables/useApp';
@@ -28,6 +28,10 @@ function approvalEvent(): AgentEvent {
     description: 'Simulated write approval.',
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('renderer state reducer', () => {
   it('deduplicates events by thread and sequence', () => {
@@ -286,6 +290,64 @@ describe('renderer state reducer', () => {
       await app.cancelTurn();
 
       expect(cancelled).toEqual({ threadId: 'thread-1', turnId: 'turn-1' });
+      expect(app.state.value.busy).toBe(false);
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('clears busy state when starting a turn fails before events arrive', async () => {
+    const originalWindow = globalThis.window;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: async () => {
+            throw new Error('Agent runtime is not ready.');
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+      };
+
+      await expect(app.startTurn('hello')).rejects.toThrow('Agent runtime is not ready.');
+
+      expect(app.state.value.busy).toBe(false);
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('clears busy state when the turn start acknowledgement hangs', async () => {
+    vi.useFakeTimers();
+    const originalWindow = globalThis.window;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: async () => new Promise(() => undefined),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+      };
+
+      const turn = app.startTurn('hello');
+      const turnExpectation = expect(turn).rejects.toThrow('Agent runtime did not acknowledge');
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await turnExpectation;
       expect(app.state.value.busy).toBe(false);
     } finally {
       Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });

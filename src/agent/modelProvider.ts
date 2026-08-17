@@ -40,14 +40,22 @@ export async function streamChatCompletion(
   }
 
   let firstTokenAt: number | undefined;
+  let visibleDeltaCount = 0;
   const streamedMetrics = await readSseDeltas(
     response.body,
     async (delta) => {
       firstTokenAt ??= nowMs();
+      visibleDeltaCount += 1;
       await emitDelta(delta);
     },
     signal,
   );
+  if (visibleDeltaCount === 0 && streamedMetrics.reasoningObserved) {
+    firstTokenAt ??= nowMs();
+    await emitDelta(
+      '模型只返回了思考内容，没有返回可展示回答。请先关闭思考强度，或在模型服务中确认该私有化模型的模板会输出 content 字段。',
+    );
+  }
   const durationMs = Math.max(1, nowMs() - startedAt);
   const completionTokens = streamedMetrics.completionTokens;
   const serverRate = streamedMetrics.serverTokensPerSecond;
@@ -62,7 +70,7 @@ export async function streamChatCompletion(
     modelName: profile.model,
     reasoningRequested: profile.reasoning.mode,
     reasoningProtocol: profile.reasoning.protocol,
-    reasoningObserved: Boolean(reasoningTokens && reasoningTokens > 0),
+    reasoningObserved: Boolean((reasoningTokens && reasoningTokens > 0) || streamedMetrics.reasoningObserved),
     responseSpeed: profile.responseSpeed,
     durationMs,
     timeToFirstTokenMs: firstTokenAt ? Math.max(0, firstTokenAt - startedAt) : undefined,
@@ -202,7 +210,7 @@ function shouldSendReasoning(profile: RuntimeModelProfile): boolean {
 
 function parseMetrics(data: string): StreamedMetrics {
   const parsed = JSON.parse(data) as {
-    choices?: Array<{ finish_reason?: string | null }>;
+    choices?: Array<{ delta?: { reasoning_content?: string; reasoning?: string }; finish_reason?: string | null }>;
     usage?: {
       prompt_tokens?: number;
       completion_tokens?: number;
@@ -217,6 +225,10 @@ function parseMetrics(data: string): StreamedMetrics {
   };
 
   const metrics: StreamedMetrics = {};
+  const delta = parsed.choices?.[0]?.delta;
+  if (typeof delta?.reasoning_content === 'string' || typeof delta?.reasoning === 'string') {
+    metrics.reasoningObserved = true;
+  }
   const finishReason = parsed.choices?.[0]?.finish_reason;
   if (typeof finishReason === 'string') {
     metrics.finishReason = finishReason;

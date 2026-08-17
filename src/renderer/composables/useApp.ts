@@ -34,6 +34,8 @@ export const emptyState = emptyAgentClientState;
 export const reduceEvent = reduceAgentEvent;
 export { appendOptimisticUserMessage, applyAssistantDeltaToSnapshot };
 
+const TURN_START_ACK_TIMEOUT_MS = 10_000;
+
 export function useApp() {
   const state = ref<RendererState>(emptyState());
   const loading = ref(true);
@@ -99,8 +101,17 @@ export function useApp() {
     const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
     const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
     state.value.busy = true;
-    const response = await window.desktop.startTurn(threadId, text, modelProfileId);
-    state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
+    try {
+      const response = await withTimeout(
+        window.desktop.startTurn(threadId, text, modelProfileId),
+        TURN_START_ACK_TIMEOUT_MS,
+        'Agent runtime did not acknowledge the turn within 10s.',
+      );
+      state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
+    } catch (error) {
+      state.value = { ...state.value, busy: false, activeTurnId: undefined };
+      throw error;
+    }
   }
 
   async function cancelTurn(): Promise<void> {
@@ -203,4 +214,20 @@ export function useApp() {
     updateSettings,
     selectModelProfile,
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
