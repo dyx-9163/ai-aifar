@@ -15,6 +15,7 @@ import {
   groupReasoningItems,
   reasoningControls,
   reasoningMenuCommand,
+  reasoningProfileForRuntime,
   shouldShowReasoningPanel,
   type ReasoningItemGroup,
 } from '../modelControls';
@@ -101,6 +102,11 @@ function handleModelChange(event: Event): void {
 const reasoningControl = computed(() =>
   props.activeModelProfile ? reasoningControls(props.activeModelProfile) : { kind: 'hidden' as const },
 );
+const runtimeReasoningProfile = computed(() => reasoningProfileForRuntime(
+  props.modelProfiles,
+  props.activeModelProfile,
+  props.activeRuntime,
+));
 const activeReasoningEffort = computed(() =>
   props.activeModelProfile?.reasoning.effort
     ?? props.activeModelProfile?.capabilities.reasoning.defaultEffort,
@@ -351,7 +357,7 @@ function nextAnimationFrame(): Promise<void> {
           v-if="standaloneReasoningGroup"
           :preference="reasoningDisplayMode"
           :running="true"
-          :output-modes="activeModelProfile?.capabilities.reasoning.outputModes"
+          :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
           :t="t"
         />
 
@@ -365,7 +371,7 @@ function nextAnimationFrame(): Promise<void> {
             :summary="reasoningPanelByEntryId.get(entry.id)?.summary"
             :preference="reasoningDisplayMode"
             :running="isReasoningRunning(reasoningPanelByEntryId.get(entry.id)!)"
-            :output-modes="activeModelProfile?.capabilities.reasoning.outputModes"
+            :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
             :t="t"
           />
           <article

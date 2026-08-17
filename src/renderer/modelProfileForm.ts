@@ -38,6 +38,36 @@ export interface EffortSelectionInput {
 export type EffortValidationIssue = 'effortOptionsRequired' | 'defaultEffortInvalid' | 'currentEffortInvalid';
 export type ConnectionTestState = 'untested' | 'testing' | 'connected' | 'failed';
 
+export interface FormOperationSnapshot {
+  token: number;
+  profileId?: string;
+  fingerprint: string;
+  revision: number;
+}
+
+export function captureFormOperation(
+  token: number,
+  profile: ModelProfileInput | ModelProfile,
+  revision: number,
+): FormOperationSnapshot {
+  return {
+    token,
+    profileId: profile.id,
+    fingerprint: modelProfileFormFingerprint(profile),
+    revision,
+  };
+}
+
+export function formOperationCanApply(
+  submitted: FormOperationSnapshot,
+  current: FormOperationSnapshot,
+): boolean {
+  return submitted.token === current.token
+    && submitted.profileId === current.profileId
+    && submitted.fingerprint === current.fingerprint
+    && submitted.revision === current.revision;
+}
+
 export function buildModelProfileInput(
   form: ModelProfileFormValues,
   existing?: ModelProfile,

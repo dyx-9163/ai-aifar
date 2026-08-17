@@ -39,6 +39,17 @@ export interface ThreadRuntimePresentation {
   active: boolean;
 }
 
+export function reasoningProfileForRuntime(
+  profiles: ModelProfile[],
+  selectedProfile: ModelProfile | undefined,
+  runtime: ThreadRuntimeState | undefined,
+): ModelProfile | undefined {
+  if (!runtime || runtime.status === 'idle') {
+    return selectedProfile;
+  }
+  return profiles.find((profile) => profile.id === runtime.modelProfileId);
+}
+
 export function reasoningControls(profile: ModelProfile): ReasoningControl {
   const capability = profile.capabilities.reasoning;
   if (capability.inputMode === 'toggle') {

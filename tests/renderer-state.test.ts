@@ -7,8 +7,10 @@ import { createTranslator, isLanguagePreference } from '../src/renderer/i18n';
 import { renderMarkdown } from '../src/renderer/markdown';
 import {
   buildModelProfileInput,
+  captureFormOperation,
   connectionTestStateForFingerprint,
   effortValidationIssue,
+  formOperationCanApply,
   modelProfileFormFingerprint,
   reconcileEffortSelection,
   runModelProfileSave,
@@ -19,6 +21,7 @@ import {
   groupReasoningItems,
   reasoningControls,
   reasoningMenuCommand,
+  reasoningProfileForRuntime,
   selectReasoningContent,
   shouldShowReasoningPanel,
   threadRuntimePresentation,
@@ -250,6 +253,39 @@ describe('renderer state reducer', () => {
     expect(connectionTestStateForFingerprint('connected', tested, modelProfileFormFingerprint({ ...first, maxConcurrency: 2 }))).toBe('untested');
   });
 
+  it('does not apply a pending profile A save after the form switches to edited profile B', async () => {
+    const profileA = { ...modelProfileFixture(openAiCapabilities(['medium'])), id: 'model-a', name: 'A' };
+    const profileB = { ...modelProfileFixture(qwenCapabilities()), id: 'model-b', name: 'B' };
+    const submitted = captureFormOperation(1, profileA, 3);
+    let resolveSave: ((profile: ModelProfile) => void) | undefined;
+    const pendingSave = runModelProfileSave(profileA, () => new Promise<ModelProfile>((resolve) => {
+      resolveSave = resolve;
+    }));
+    const editedB = { ...profileB, name: 'B edited' };
+
+    resolveSave?.(profileA);
+    await expect(pendingSave).resolves.toEqual({ ok: true, profile: profileA });
+    expect(formOperationCanApply(submitted, captureFormOperation(1, editedB, 4))).toBe(false);
+  });
+
+  it('does not let an older repeated save overwrite a newer response for the same form revision', async () => {
+    const profile = { ...modelProfileFixture(openAiCapabilities(['medium'])), id: 'model-a' };
+    const older = captureFormOperation(1, profile, 3);
+    const newer = captureFormOperation(2, profile, 3);
+
+    expect(formOperationCanApply(newer, newer)).toBe(true);
+    expect(formOperationCanApply(older, newer)).toBe(false);
+  });
+
+  it('does not let an older connection response overwrite a newer request with the same fingerprint', () => {
+    const profile = { ...modelProfileFixture(openAiCapabilities(['medium'])), id: 'model-a' };
+    const older = captureFormOperation(7, profile, 5);
+    const newer = captureFormOperation(8, profile, 5);
+
+    expect(formOperationCanApply(older, newer)).toBe(false);
+    expect(formOperationCanApply(newer, newer)).toBe(true);
+  });
+
   it('derives reasoning controls only from the selected profile capabilities', () => {
     expect(reasoningControls(modelProfileFixture(qwenCapabilities()))).toEqual({ kind: 'toggle' });
     expect(reasoningControls(modelProfileFixture(openAiCapabilities(['minimal', 'high', 'max'])))).toEqual({
@@ -313,6 +349,22 @@ describe('renderer state reducer', () => {
       mode: 'summary',
       text: '',
     });
+  });
+
+  it('binds running reasoning capability to the runtime model when the selected model changes', () => {
+    const runtimeProfile = { ...modelProfileFixture(openAiCapabilities(['medium'])), id: 'model-a' };
+    const selectedProfile = { ...modelProfileFixture(openAiCapabilities([])), id: 'model-b' };
+    const resolved = reasoningProfileForRuntime(
+      [runtimeProfile, selectedProfile],
+      selectedProfile,
+      { threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-a', status: 'running' },
+    );
+
+    expect(resolved?.id).toBe('model-a');
+    expect(selectReasoningContent('summary', [], {
+      running: true,
+      outputModes: resolved?.capabilities.reasoning.outputModes ?? [],
+    })).toEqual({ availability: 'empty', mode: 'summary', text: '' });
   });
 
   it('closes the effort menu only for explicit close commands', () => {

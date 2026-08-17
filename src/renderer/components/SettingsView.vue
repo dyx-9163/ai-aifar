@@ -14,8 +14,10 @@ import type {
 import type { Translator } from '../i18n';
 import {
   buildModelProfileInput,
+  captureFormOperation,
   connectionTestStateForFingerprint,
   effortValidationIssue,
+  formOperationCanApply,
   modelProfileFormFingerprint,
   reconcileEffortSelection,
   runModelProfileSave,
@@ -46,6 +48,12 @@ const activeSection = ref<'general' | 'models' | 'runtime'>('models');
 const connectionTestState = ref<ConnectionTestState>('untested');
 const testedFingerprint = ref<string>();
 const saving = ref(false);
+const testingConnection = ref(false);
+const formRevision = ref(0);
+const activeSaveOperationToken = ref(0);
+const activeConnectionOperationToken = ref(0);
+let nextSaveOperationToken = 0;
+let nextConnectionOperationToken = 0;
 const form = reactive({
   id: '',
   name: 'Private model endpoint',
@@ -115,12 +123,14 @@ watch(
 watch(
   () => modelProfileFormFingerprint(inputFromForm()),
   (fingerprint) => {
+    formRevision.value += 1;
     connectionTestState.value = connectionTestStateForFingerprint(
       connectionTestState.value,
       testedFingerprint.value,
       fingerprint,
     );
   },
+  { flush: 'sync' },
 );
 
 function loadProfile(profile: ModelProfile): void {
@@ -196,15 +206,27 @@ async function saveProfile(): Promise<void> {
     modelStatus.value = capabilityError.value;
     return;
   }
+  const input = inputFromForm();
+  const submitted = captureFormOperation(++nextSaveOperationToken, input, formRevision.value);
+  activeSaveOperationToken.value = submitted.token;
   saving.value = true;
-  const result = await runModelProfileSave(inputFromForm(), props.saveModelProfile);
-  saving.value = false;
-  if (!result.ok) {
-    modelStatus.value = `${props.t('saveModelProfileFailed')} ${result.error.message}`;
-    return;
+  try {
+    const result = await runModelProfileSave(input, props.saveModelProfile);
+    const current = captureFormOperation(activeSaveOperationToken.value, inputFromForm(), formRevision.value);
+    if (!formOperationCanApply(submitted, current)) {
+      return;
+    }
+    if (!result.ok) {
+      modelStatus.value = `${props.t('saveModelProfileFailed')} ${result.error.message}`;
+      return;
+    }
+    loadProfile(result.profile);
+    modelStatus.value = props.t('savedModelProfile');
+  } finally {
+    if (activeSaveOperationToken.value === submitted.token) {
+      saving.value = false;
+    }
   }
-  loadProfile(result.profile);
-  modelStatus.value = props.t('savedModelProfile');
 }
 
 async function testProfile(): Promise<void> {
@@ -213,19 +235,36 @@ async function testProfile(): Promise<void> {
     connectionTestState.value = 'failed';
     return;
   }
-  modelStatus.value = props.t('testingModelEndpoint');
   const input = inputFromForm();
-  const fingerprint = modelProfileFormFingerprint(input);
-  testedFingerprint.value = fingerprint;
+  const submitted = captureFormOperation(++nextConnectionOperationToken, input, formRevision.value);
+  activeConnectionOperationToken.value = submitted.token;
+  modelStatus.value = props.t('testingModelEndpoint');
+  testedFingerprint.value = submitted.fingerprint;
   connectionTestState.value = 'testing';
-  const result = await props.testModelProfile(input);
-  if (modelProfileFormFingerprint(inputFromForm()) !== fingerprint) {
-    connectionTestState.value = 'untested';
-    modelStatus.value = props.t('connectionTestStale');
-    return;
+  testingConnection.value = true;
+  try {
+    const result = await props.testModelProfile(input);
+    const current = captureFormOperation(activeConnectionOperationToken.value, inputFromForm(), formRevision.value);
+    if (!formOperationCanApply(submitted, current)) {
+      if (activeConnectionOperationToken.value === submitted.token) {
+        connectionTestState.value = 'untested';
+        modelStatus.value = props.t('connectionTestStale');
+      }
+      return;
+    }
+    connectionTestState.value = result.ok ? 'connected' : 'failed';
+    modelStatus.value = result.ok ? props.t('connectionSucceededCapabilitiesUnverified') : result.message;
+  } catch (error) {
+    const current = captureFormOperation(activeConnectionOperationToken.value, inputFromForm(), formRevision.value);
+    if (formOperationCanApply(submitted, current)) {
+      connectionTestState.value = 'failed';
+      modelStatus.value = error instanceof Error ? error.message : props.t('modelConnectionFailed');
+    }
+  } finally {
+    if (activeConnectionOperationToken.value === submitted.token) {
+      testingConnection.value = false;
+    }
   }
-  connectionTestState.value = result.ok ? 'connected' : 'failed';
-  modelStatus.value = result.ok ? props.t('connectionSucceededCapabilitiesUnverified') : result.message;
 }
 
 function synchronizeEffortSelection(): void {
@@ -241,7 +280,7 @@ function synchronizeEffortSelection(): void {
 }
 
 function deleteProfile(): void {
-  if (!form.id) {
+  if (!form.id || saving.value) {
     return;
   }
   emit('deleteModelProfile', form.id);
@@ -342,12 +381,12 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
             <p class="pane-label">{{ t('settings') }}</p>
             <h2>{{ t('modelProviders') }}</h2>
           </div>
-          <button type="button" class="secondary-button compact-button" @click="resetForm">{{ t('addProvider') }}</button>
+          <button type="button" class="secondary-button compact-button" :disabled="saving" @click="resetForm">{{ t('addProvider') }}</button>
         </div>
 
         <label class="field-stack">
           <span>{{ t('currentChatModel') }}</span>
-          <select :value="activeModelProfileId ?? ''" class="model-select wide" @change="emit('selectModelProfile', (($event.target as HTMLSelectElement).value || undefined))">
+          <select :value="activeModelProfileId ?? ''" class="model-select wide" :disabled="saving" @change="emit('selectModelProfile', (($event.target as HTMLSelectElement).value || undefined))">
             <option value="">{{ t('demoMode') }}</option>
             <option v-for="profile in modelProfiles" :key="profile.id" :value="profile.id">
               {{ profile.name }}
@@ -364,6 +403,7 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
               type="button"
               class="profile-row"
               :class="{ active: profile.id === form.id }"
+              :disabled="saving"
               @click="loadProfile(profile)"
             >
               <span>{{ profile.name }}</span>
@@ -371,7 +411,7 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
             </button>
           </aside>
 
-          <div class="settings-form two-column">
+          <fieldset class="settings-form settings-form-fieldset two-column" :disabled="saving" :aria-busy="saving">
             <label class="field-stack">
               <span>{{ t('name') }}</span>
               <input v-model="form.name" class="text-input" placeholder="Private model endpoint" />
@@ -473,15 +513,15 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                 {{ capabilityError }}
               </p>
             </div>
-          </div>
+          </fieldset>
         </div>
 
         <p class="settings-note">{{ modelStatus }}</p>
 
         <div class="approval-actions">
-          <button type="button" class="secondary-button compact" :disabled="!form.id" @click="deleteProfile">{{ t('delete') }}</button>
-          <button type="button" class="secondary-button compact" :disabled="saving" @click="testProfile">{{ t('testConnection') }}</button>
-          <button type="button" class="primary-action compact" :disabled="saving || Boolean(capabilityError)" @click="saveProfile">
+          <button type="button" class="secondary-button compact" :disabled="!form.id || saving" @click="deleteProfile">{{ t('delete') }}</button>
+          <button type="button" class="secondary-button compact" :disabled="saving || testingConnection" @click="testProfile">{{ t('testConnection') }}</button>
+          <button type="button" class="primary-action compact" :disabled="saving || testingConnection || Boolean(capabilityError)" :aria-busy="saving" @click="saveProfile">
             {{ saving ? t('saving') : t('save') }}
           </button>
         </div>
