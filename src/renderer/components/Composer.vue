@@ -33,12 +33,13 @@ function handleKeydown(event: KeyboardEvent): void {
     <textarea
       v-model="text"
       class="composer-input"
+      data-testid="composer-input"
       rows="3"
       placeholder="Ask the local agent..."
       :disabled="busy"
       @keydown="handleKeydown"
     />
-    <button class="send-button" type="submit" :disabled="busy || !text.trim()" title="Send prompt">
+    <button class="send-button" type="submit" data-testid="composer-send" :disabled="busy || !text.trim()" title="Send prompt">
       <span aria-hidden="true">></span>
       <span>Send</span>
     </button>

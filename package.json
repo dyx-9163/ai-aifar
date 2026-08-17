@@ -4,11 +4,11 @@
   "version": "0.1.0",
   "description": "A private, cross-platform AI desktop client.",
   "main": ".vite/build/main.js",
-  "type": "module",
   "scripts": {
     "start": "electron-forge start",
     "typecheck": "vue-tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
-    "test": "vitest run",
+    "test": "vitest run tests/protocol.test.ts tests/database.test.ts tests/demoAgent.test.ts tests/renderer-state.test.ts",
+    "test:e2e": "electron-forge package && playwright test tests/e2e/app.spec.ts",
     "build": "electron-forge package",
     "package": "electron-forge package",
     "make": "electron-forge make"
@@ -24,6 +24,7 @@
     "@types/node": "^26.2.0",
     "@vitejs/plugin-vue": "^6.0.8",
     "electron": "^43.4.0",
+    "playwright": "^1.62.1",
     "typescript": "^5.9.3",
     "vite": "^8.2.1",
     "vitest": "^4.1.10",

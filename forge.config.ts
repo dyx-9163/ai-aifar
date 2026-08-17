@@ -2,9 +2,9 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = process.cwd();
+process.env.VITE_CONFIG_NATIVE_IGNORE_WARNING ??= 'true';
 
 const config = {
   packagerConfig: {

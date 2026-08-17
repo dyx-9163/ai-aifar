@@ -5,6 +5,11 @@ import { isAgentEvent, isDesktopRequest, type DesktopRequest } from './shared/pr
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
+const customUserDataPath = process.env.PRIVATE_AI_DESKTOP_USER_DATA;
+if (customUserDataPath) {
+  app.setPath('userData', customUserDataPath);
+}
+
 let mainWindow: BrowserWindow | null = null;
 let agentProcess: Electron.UtilityProcess | null = null;
 let agentPort: Electron.MessagePortMain | null = null;
@@ -44,8 +49,6 @@ function startAgentRuntime(): void {
 }
 
 async function createWindow(): Promise<void> {
-  startAgentRuntime();
-
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -73,6 +76,12 @@ async function createWindow(): Promise<void> {
   });
 
   mainWindow = window;
+
+  try {
+    startAgentRuntime();
+  } catch (error) {
+    console.error('Failed to start agent runtime:', error);
+  }
 
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
