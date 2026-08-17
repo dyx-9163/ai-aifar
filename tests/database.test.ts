@@ -82,6 +82,36 @@ describe('sqlite app database', () => {
     }
   });
 
+  it('repairs the v1-v4 state produced when 088906a interrupted successful legacy history', () => {
+    const path = createDbPath();
+    createMislabelledV4Database(path);
+
+    const db = openDatabase(path);
+    try {
+      const snapshot = db.getSnapshot();
+      expect(snapshot.turns).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'mislabelled-success', status: 'completed', incomplete: false }),
+        expect.objectContaining({ id: 'genuine-partial', status: 'interrupted', incomplete: true }),
+      ]));
+      expect(snapshot.items['v4-history-thread']).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          turnId: 'mislabelled-success', role: 'assistant', text: 'complete legacy answer', incomplete: false,
+        }),
+        expect.objectContaining({
+          turnId: 'genuine-partial', role: 'assistant', text: 'partial streamed answer', incomplete: true,
+        }),
+      ]));
+    } finally {
+      db.close();
+    }
+
+    const migrated = new DatabaseSync(path);
+    expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
+      { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 },
+    ]);
+    migrated.close();
+  });
+
   it('merges reasoning fragments into one logical item', () => {
     const db = openDatabase(createDbPath());
     const thread = db.createThread('Reasoning');
@@ -698,5 +728,103 @@ function createPreV3Database(path: string): void {
     id: 'legacy-unfinished-user', threadId: 'legacy-unfinished-thread', turnId: 'legacy-unfinished',
     kind: 'message', role: 'user', text: 'unfinished question', createdAt,
   }), createdAt);
+  legacy.close();
+}
+
+function createMislabelledV4Database(path: string): void {
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+    CREATE TABLE threads (
+      id TEXT PRIMARY KEY,
+      group_id TEXT,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL,
+      model_profile_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    );
+    CREATE TABLE turns (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      model_profile_id TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      error TEXT,
+      incomplete INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL,
+      metrics TEXT
+    );
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (version, applied_at) VALUES
+      (1, '2026-08-16T00:00:00.000Z'),
+      (2, '2026-08-16T00:00:01.000Z'),
+      (3, '2026-08-17T00:00:00.000Z'),
+      (4, '2026-08-18T00:00:00.000Z');
+    INSERT INTO threads (
+      id, group_id, title, status, model_profile_id, created_at, updated_at, deleted_at
+    ) VALUES (
+      'v4-history-thread', NULL, 'Base to head history', 'ready', NULL,
+      '2026-08-16T01:00:00.000Z', '2026-08-17T01:00:00.000Z', NULL
+    );
+    INSERT INTO turns (
+      id, thread_id, model_profile_id, status, created_at, started_at, completed_at,
+      error, incomplete, updated_at, metrics
+    ) VALUES
+      (
+        'mislabelled-success', 'v4-history-thread', NULL, 'interrupted',
+        '2026-08-16T01:00:00.000Z', NULL, NULL, NULL, 1, '2026-08-17T01:00:00.000Z', NULL
+      ),
+      (
+        'genuine-partial', 'v4-history-thread', NULL, 'interrupted',
+        '2026-08-16T02:00:00.000Z', NULL, NULL, NULL, 1, '2026-08-17T01:00:00.000Z', NULL
+      );
+  `);
+  const insertItem = legacy.prepare(`
+    INSERT INTO items (id, thread_id, turn_id, kind, payload, created_at)
+    VALUES (?, 'v4-history-thread', ?, 'message', ?, ?)
+  `);
+  insertItem.run(
+    'mislabelled-success-assistant',
+    'mislabelled-success',
+    JSON.stringify({
+      id: 'mislabelled-success-assistant',
+      threadId: 'v4-history-thread',
+      turnId: 'mislabelled-success',
+      kind: 'message',
+      role: 'assistant',
+      text: 'complete legacy answer',
+      createdAt: '2026-08-16T01:00:01.000Z',
+    }),
+    '2026-08-16T01:00:01.000Z',
+  );
+  insertItem.run(
+    'genuine-partial-assistant',
+    'genuine-partial',
+    JSON.stringify({
+      id: 'genuine-partial-assistant',
+      threadId: 'v4-history-thread',
+      turnId: 'genuine-partial',
+      kind: 'message',
+      role: 'assistant',
+      text: 'partial streamed answer',
+      incomplete: true,
+      createdAt: '2026-08-16T02:00:01.000Z',
+    }),
+    '2026-08-16T02:00:01.000Z',
+  );
   legacy.close();
 }

@@ -727,6 +727,7 @@ class SqliteAppDatabase implements AppDatabase {
     this.applyMigration(2, () => this.compactAssistantMessageFragments());
     this.applyMigration(3, () => this.migrateLegacyTurnCompletion());
     this.applyMigration(4, () => this.ensureColumn('turns', 'metrics', 'ALTER TABLE turns ADD COLUMN metrics TEXT'));
+    this.applyMigration(5, () => this.repairMislabelledLegacyCompletion());
     this.interruptUnfinishedTurns();
   }
 
@@ -881,33 +882,66 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   private migrateLegacyTurnCompletion(): void {
+    this.completeLegacyTurns('running');
+  }
+
+  private repairMislabelledLegacyCompletion(): void {
+    this.completeLegacyTurns('interrupted');
+  }
+
+  private completeLegacyTurns(status: 'running' | 'interrupted'): void {
     const rows = this.db
       .prepare(
         `SELECT tr.id AS turn_id, i.id AS item_id, i.payload, i.created_at
          FROM turns tr
          INNER JOIN items i ON i.turn_id = tr.id
-         WHERE tr.status = 'running' AND i.kind = 'message'
+         WHERE tr.status = :status
+           AND tr.incomplete = 1
+           AND tr.completed_at IS NULL
+           AND tr.error IS NULL
+           AND i.kind = 'message'
          ORDER BY i.created_at ASC, i.id ASC`,
       )
-      .all() as Array<{ turn_id: string; item_id: string; payload: string; created_at: string }>;
-    const completed = new Map<string, { completedAt: string; assistantItems: Array<{ id: string; item: MessageItem }> }>();
+      .all({ status }) as Array<{ turn_id: string; item_id: string; payload: string; created_at: string }>;
+    const candidates = new Map<string, {
+      completedAt: string;
+      assistantItems: Array<{ id: string; item: MessageItem }>;
+      hasExplicitStreamState: boolean;
+    }>();
     for (const row of rows) {
       const item = parseMessageItem(row.payload);
       if (!item || item.role !== 'assistant') continue;
-      const entry = completed.get(row.turn_id) ?? { completedAt: row.created_at, assistantItems: [] };
+      const entry = candidates.get(row.turn_id) ?? {
+        completedAt: row.created_at,
+        assistantItems: [],
+        hasExplicitStreamState: false,
+      };
       entry.completedAt = row.created_at;
       entry.assistantItems.push({ id: row.item_id, item });
-      completed.set(row.turn_id, entry);
+      entry.hasExplicitStreamState ||= Object.prototype.hasOwnProperty.call(item, 'incomplete');
+      candidates.set(row.turn_id, entry);
     }
 
     const updateTurn = this.db.prepare(
       `UPDATE turns
        SET status = 'completed', completed_at = :completedAt, incomplete = 0, updated_at = :completedAt
-       WHERE id = :turnId AND status = 'running'`,
+       WHERE id = :turnId
+         AND status = :status
+         AND incomplete = 1
+         AND completed_at IS NULL
+         AND error IS NULL`,
     );
     const updateItem = this.db.prepare('UPDATE items SET payload = :payload WHERE id = :id');
-    for (const [turnId, entry] of completed) {
-      updateTurn.run({ turnId, completedAt: entry.completedAt });
+    for (const [turnId, entry] of candidates) {
+      // Before streamed rows gained an explicit `incomplete` flag, a non-empty
+      // assistant row was the only durable evidence that the legacy run had
+      // delivered its final answer. Any explicit stream state is ambiguous and
+      // stays interrupted so a genuinely partial answer is never promoted.
+      if (entry.hasExplicitStreamState || !entry.assistantItems.some(({ item }) => item.text.trim().length > 0)) {
+        continue;
+      }
+      const result = updateTurn.run({ turnId, completedAt: entry.completedAt, status });
+      if (result.changes !== 1) continue;
       for (const assistant of entry.assistantItems) {
         updateItem.run({ id: assistant.id, payload: JSON.stringify({ ...assistant.item, incomplete: false }) });
       }
