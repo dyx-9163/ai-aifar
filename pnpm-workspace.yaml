@@ -1,0 +1,9 @@
+allowBuilds:
+  better-sqlite3: true
+  electron: true
+nodeLinker: hoisted
+
+# Forge 7 allows rebuild 3.x, whose Git dependency is unreachable in many
+# private networks. Rebuild 4 keeps the public API and uses registry packages.
+overrides:
+  '@electron/rebuild': 4.0.4

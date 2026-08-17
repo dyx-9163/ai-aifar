@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node", "electron"],
+    "lib": ["ES2022"],
+    "noEmit": true
+  },
+  "include": [
+    "forge.config.ts",
+    "vite.*.config.ts",
+    "src/main.ts",
+    "src/preload.ts",
+    "src/agent/**/*.ts",
+    "src/shared/**/*.ts"
+  ]
+}
