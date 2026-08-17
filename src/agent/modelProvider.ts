@@ -176,12 +176,16 @@ function buildChatCompletionBody(
     body.stream_options = { include_usage: true };
   }
 
-  if (includeReasoning && shouldSendReasoning(profile)) {
-    if (profile.reasoning.protocol === 'qwen') {
-      body.chat_template_kwargs = { enable_thinking: true };
-    }
-    if (profile.reasoning.protocol === 'openai') {
-      body.reasoning_effort = profile.reasoning.effort;
+  if (includeReasoning) {
+    if (profile.reasoning.mode === 'disabled') {
+      body.chat_template_kwargs = { enable_thinking: false };
+    } else if (shouldSendReasoning(profile)) {
+      if (profile.reasoning.protocol === 'qwen') {
+        body.chat_template_kwargs = { enable_thinking: true };
+      }
+      if (profile.reasoning.protocol === 'openai') {
+        body.reasoning_effort = profile.reasoning.effort;
+      }
     }
   }
 

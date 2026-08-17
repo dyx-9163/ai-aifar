@@ -20,7 +20,7 @@ const profile: RuntimeModelProfile = {
 };
 
 describe('OpenAI-compatible model provider', () => {
-  it('streams chat completion deltas from SSE data lines', async () => {
+  it('streams chat completion deltas and requests thinking off by default', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
       'data: {"choices":[{"delta":{"content":" there"}}]}\n\n',
@@ -55,7 +55,7 @@ describe('OpenAI-compatible model provider', () => {
     });
     expect(requests[0]?.url).toBe('http://127.0.0.1:8080/v1/chat/completions');
     expect((requests[0]?.init.headers as Record<string, string>).Authorization).toBe('Bearer local-not-used');
-    expect(JSON.parse(String(requests[0]?.init.body)).chat_template_kwargs).toBeUndefined();
+    expect(JSON.parse(String(requests[0]?.init.body)).chat_template_kwargs).toEqual({ enable_thinking: false });
   });
 
   it('sends qwen thinking parameters only when the profile enables qwen reasoning', async () => {
