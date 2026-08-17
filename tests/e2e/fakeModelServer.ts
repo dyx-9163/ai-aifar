@@ -4,6 +4,7 @@ export interface FakeModelServer {
   baseUrl: string;
   requestCount(): number;
   releaseNext(parts: Array<{ answer?: string; rawReasoning?: string; summary?: string }>): void;
+  failNext(status: number, body: unknown): void;
   close(): Promise<void>;
 }
 
@@ -52,13 +53,7 @@ export async function startFakeModelServer(): Promise<FakeModelServer> {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requestCount: () => completionRequestCount,
     releaseNext(parts) {
-      let next = pending.shift();
-      while (next?.response.destroyed) {
-        next = pending.shift();
-      }
-      if (!next) {
-        throw new Error('No pending fake model request is available to release.');
-      }
+      const next = takePendingResponse(pending);
 
       next.response.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -83,6 +78,14 @@ export async function startFakeModelServer(): Promise<FakeModelServer> {
       })}\n\n`);
       next.response.end('data: [DONE]\n\n');
     },
+    failNext(status, body) {
+      const next = takePendingResponse(pending);
+      next.response.writeHead(status, {
+        'content-type': 'application/json; charset=utf-8',
+        connection: 'close',
+      });
+      next.response.end(JSON.stringify(body));
+    },
     async close() {
       for (const entry of pending.splice(0)) {
         entry.response.destroy();
@@ -93,4 +96,15 @@ export async function startFakeModelServer(): Promise<FakeModelServer> {
       });
     },
   };
+}
+
+function takePendingResponse(pending: PendingResponse[]): PendingResponse {
+  let next = pending.shift();
+  while (next?.response.destroyed) {
+    next = pending.shift();
+  }
+  if (!next) {
+    throw new Error('No pending fake model request is available to release.');
+  }
+  return next;
 }

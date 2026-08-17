@@ -62,12 +62,13 @@ pnpm test:e2e
 pnpm make
 ```
 
-`pnpm test:e2e` packages the app, starts the packaged Windows executable, and runs deterministic Electron acceptance against an in-process fake OpenAI-compatible SSE server. It covers per-profile FIFO/concurrency, background focus isolation, queued/running cancellation, answer/raw/summary separation, browser copy behavior, restart interruption, bounded SQLite rows, and secret scans. Screenshots and Playwright diagnostics are written below ignored `test-results/`.
+`pnpm test:e2e` packages the app, starts the packaged Windows executable, and runs deterministic Electron acceptance against an in-process fake OpenAI-compatible SSE server. It covers per-profile FIFO/concurrency, background focus isolation, queued/running cancellation, answer/raw/summary separation by item identity, browser selection/copy behavior, restart interruption, bounded SQLite rows, and a controlled provider-error secret scan. Screenshots and Playwright diagnostics are written below ignored `test-results/`.
 
-The live Qwen suite never substitutes the fake server. It probes `${PRIVATE_AI_LIVE_MODEL_BASE_URL}/models` first (default `http://127.0.0.1:8080/v1`); an unreachable or non-success endpoint produces an explicit skip reason.
+The live Qwen suite is explicitly opt-in and never substitutes the fake server. Without `PRIVATE_AI_LIVE_MODEL_E2E=1` it skips before probing or launching Electron. When enabled, it probes `${PRIVATE_AI_LIVE_MODEL_BASE_URL}/models` first (default `http://127.0.0.1:8080/v1`) and requires that response to list the configured model name. An unreachable endpoint, non-success response, invalid model list, or model-name mismatch produces an explicit skip reason.
 
 ```powershell
-# Optional overrides; defaults are the local endpoint and Qwen3.5-9B.
+# Explicit opt-in, followed by endpoint/model values shown at their defaults.
+$env:PRIVATE_AI_LIVE_MODEL_E2E = '1'
 $env:PRIVATE_AI_LIVE_MODEL_BASE_URL = 'http://127.0.0.1:8080/v1'
 $env:PRIVATE_AI_LIVE_MODEL_NAME = 'Qwen3.5-9B'
 # $env:PRIVATE_AI_LIVE_MODEL_API_KEY = '<set only when required>'
@@ -76,7 +77,7 @@ pnpm package
 & .\node_modules\.bin\playwright.CMD test tests/e2e/live-model.spec.ts --workers=1
 ```
 
-The live suite requires a non-empty final answer, raw Qwen thinking only in the reasoning panel, native-summary unavailability, answer-copy separation, and turn-scoped duration/tokens-per-second metrics when available.
+The live suite requires a non-empty final answer, independently identified raw Qwen reasoning and answer items for the same turn, native-summary unavailability, answer-copy selection scoped outside the reasoning DOM, and turn-scoped duration/tokens-per-second metrics when available. It does not reject legitimate answer text merely because it overlaps reasoning text, and it does not compare rendered Markdown text byte-for-byte with the persisted Markdown source.
 
 ## Architecture
 

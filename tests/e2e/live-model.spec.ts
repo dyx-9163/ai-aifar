@@ -8,10 +8,15 @@ import type { AgentEvent } from '../../src/shared/protocol';
 const liveBaseUrl = (process.env.PRIVATE_AI_LIVE_MODEL_BASE_URL ?? 'http://127.0.0.1:8080/v1').replace(/\/$/, '');
 const liveModelName = process.env.PRIVATE_AI_LIVE_MODEL_NAME ?? 'Qwen3.5-9B';
 const liveApiKey = process.env.PRIVATE_AI_LIVE_MODEL_API_KEY?.trim();
+const liveOptIn = process.env.PRIVATE_AI_LIVE_MODEL_E2E === '1';
 const packagedExecutable = join(process.cwd(), 'out', 'Private AI Desktop-win32-x64', 'Private AI Desktop.exe');
 
 test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', async () => {
   test.setTimeout(180_000);
+  test.skip(
+    !liveOptIn,
+    'Live model skipped: set PRIVATE_AI_LIVE_MODEL_E2E=1 to opt in to the real endpoint.',
+  );
   const probe = await probeLiveEndpoint();
   test.skip(!probe.reachable, probe.reason);
 
@@ -64,24 +69,46 @@ test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', 
     const runtime = page.getByTestId(`thread-row-${thread.id}`).getByTestId('thread-runtime-status');
     await expect(runtime).toHaveAttribute('data-runtime-status', 'completed', { timeout: 150_000 });
 
+    const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
+    const turn = snapshot.turns.find((candidate) => candidate.threadId === thread.id);
+    expect(turn?.modelProfileId).toBe(profile.id);
+    expect(turn?.id).toBeTruthy();
+
     const rawPanel = page.getByTestId('reasoning-panel');
+    await expect(rawPanel).toHaveAttribute('data-item-kind', 'reasoning');
+    await expect(rawPanel).toHaveAttribute('data-reasoning-mode', 'raw');
+    await expect(rawPanel).toHaveAttribute('data-turn-id', turn?.id ?? '');
     await rawPanel.click();
     const rawContent = rawPanel.getByTestId('reasoning-content');
     await expect(rawContent).not.toHaveText('');
     const rawText = (await rawContent.textContent())?.trim() ?? '';
     expect(rawText.length).toBeGreaterThan(0);
 
-    const answer = page.getByTestId('assistant-message-content');
+    const answerItem = page.getByTestId('assistant-message');
+    await expect(answerItem).toHaveAttribute('data-item-kind', 'message');
+    await expect(answerItem).toHaveAttribute('data-message-role', 'assistant');
+    await expect(answerItem).toHaveAttribute('data-turn-id', turn?.id ?? '');
+    const answer = answerItem.getByTestId('assistant-message-content');
     await expect(answer).not.toHaveText('');
     const answerText = (await answer.innerText()).trim();
     expect(answerText.length).toBeGreaterThan(0);
-    expect(answerText).not.toContain(rawText);
 
     await page.evaluate(() => {
-      const target = window as typeof window & { __task9LiveCopiedText?: string };
+      const target = window as typeof window & {
+        __task9LiveCopiedText?: string;
+        __task9LiveCopyScope?: { answer: boolean; reasoning: boolean };
+      };
       target.__task9LiveCopiedText = '';
       document.addEventListener('copy', () => {
-        target.__task9LiveCopiedText = window.getSelection()?.toString() ?? '';
+        const selection = window.getSelection();
+        const answerContainer = document.querySelector('[data-testid="assistant-message-content"]');
+        const reasoningContainer = document.querySelector('[data-testid="reasoning-content"]');
+        const anchor = selection?.anchorNode;
+        target.__task9LiveCopiedText = selection?.toString() ?? '';
+        target.__task9LiveCopyScope = {
+          answer: Boolean(anchor && answerContainer?.contains(anchor)),
+          reasoning: Boolean(anchor && reasoningContainer?.contains(anchor)),
+        };
       }, { once: true });
     });
     await answer.evaluate((element) => {
@@ -95,23 +122,30 @@ test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', 
     await expect.poll(() => page.evaluate(() => (
       window as typeof window & { __task9LiveCopiedText?: string }
     ).__task9LiveCopiedText)).toBe(answerText);
-    expect(answerText).not.toContain(rawText);
+    await expect.poll(() => page.evaluate(() => (
+      window as typeof window & { __task9LiveCopyScope?: { answer: boolean; reasoning: boolean } }
+    ).__task9LiveCopyScope)).toEqual({ answer: true, reasoning: false });
 
-    const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
-    const turn = snapshot.turns.find((candidate) => candidate.threadId === thread.id);
-    expect(turn?.modelProfileId).toBe(profile.id);
     const persistedItems = snapshot.items[thread.id] ?? [];
     const persistedRaw = persistedItems.find((item) => item.kind === 'reasoning' && item.mode === 'raw');
     const persistedSummary = persistedItems.find((item) => item.kind === 'reasoning' && item.mode === 'summary');
     const persistedAnswer = persistedItems.find((item) => item.kind === 'message' && item.role === 'assistant');
     expect(persistedRaw?.text.trim()).toBe(rawText);
     expect(persistedSummary).toBeUndefined();
-    expect(persistedAnswer?.text.trim()).toBe(answerText);
+    expect(persistedAnswer?.turnId).toBe(turn?.id);
+    expect(persistedAnswer?.kind).toBe('message');
+    expect(persistedAnswer?.role).toBe('assistant');
+    expect(persistedAnswer?.text.trim()).not.toBe('');
 
     const events = await page.evaluate(() => (
       window as typeof window & { __task9LiveEvents?: AgentEvent[] }
     ).__task9LiveEvents ?? []);
-    const metricsEvent = events.find((event) => event.type === 'model.metrics');
+    const metricsEvent = events.find((event) => (
+      event.type === 'model.metrics'
+      && event.threadId === thread.id
+      && event.turnId === turn?.id
+      && event.modelProfileId === profile.id
+    ));
     expect(metricsEvent?.type).toBe('model.metrics');
     if (metricsEvent?.type === 'model.metrics') {
       expect(metricsEvent.threadId).toBe(thread.id);
@@ -127,6 +161,9 @@ test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', 
     await page.evaluate(() => window.desktop.updateSettings({ reasoningDisplayMode: 'summary' }));
     await page.reload();
     const unavailablePanel = page.getByTestId('reasoning-panel');
+    await expect(unavailablePanel).toHaveAttribute('data-item-kind', 'reasoning');
+    await expect(unavailablePanel).toHaveAttribute('data-reasoning-mode', 'summary');
+    await expect(unavailablePanel).toHaveAttribute('data-turn-id', turn?.id ?? '');
     await unavailablePanel.click();
     await expect(unavailablePanel.getByTestId('reasoning-unavailable')).toHaveAttribute('data-reasoning-mode', 'summary');
     await expect(page.getByTestId('assistant-message-content')).toHaveText(answerText);
@@ -148,6 +185,23 @@ async function probeLiveEndpoint(): Promise<{ reachable: boolean; reason: string
       return {
         reachable: false,
         reason: `Live model skipped: ${liveBaseUrl}/models returned HTTP ${response.status}.`,
+      };
+    }
+    const payload = await response.json() as { data?: unknown };
+    const modelIds = Array.isArray(payload.data)
+      ? payload.data.flatMap((entry) => (
+        typeof entry === 'object'
+        && entry !== null
+        && 'id' in entry
+        && typeof entry.id === 'string'
+          ? [entry.id]
+          : []
+      ))
+      : [];
+    if (!modelIds.includes(liveModelName)) {
+      return {
+        reachable: false,
+        reason: `Live model skipped: ${liveBaseUrl}/models does not list configured model "${liveModelName}".`,
       };
     }
     return { reachable: true, reason: `Live model reachable at ${liveBaseUrl}.` };

@@ -10,6 +10,7 @@ const props = defineProps<{
   preference: ReasoningDisplayMode;
   running: boolean;
   outputModes?: ReasoningOutputMode[];
+  turnId?: string;
   t: Translator;
 }>();
 
@@ -47,7 +48,13 @@ async function copySelectedReasoning(): Promise<void> {
 </script>
 
 <template>
-  <details class="reasoning-panel" data-testid="reasoning-panel">
+  <details
+    class="reasoning-panel"
+    data-testid="reasoning-panel"
+    data-item-kind="reasoning"
+    :data-reasoning-mode="selection.mode"
+    :data-turn-id="turnId"
+  >
     <summary class="reasoning-panel-summary">
       <span v-if="running" class="progress-dot" aria-hidden="true"></span>
       <span>{{ title }}</span>

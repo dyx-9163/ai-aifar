@@ -363,6 +363,7 @@ function nextAnimationFrame(): Promise<void> {
           :preference="reasoningDisplayMode"
           :running="true"
           :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
+          :turn-id="standaloneReasoningGroup.turnId"
           :t="t"
         />
 
@@ -377,13 +378,15 @@ function nextAnimationFrame(): Promise<void> {
             :preference="reasoningDisplayMode"
             :running="isReasoningRunning(reasoningPanelByEntryId.get(entry.id)!)"
             :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
+            :turn-id="reasoningPanelByEntryId.get(entry.id)?.turnId"
             :t="t"
           />
           <article
             v-if="entry.kind !== 'reasoning'"
-            :data-testid="entry.kind === 'message' ? `${entry.role}-message` : entry.kind === 'metrics' ? 'turn-metrics' : undefined"
+            :data-testid="entry.kind === 'message' ? `${entry.role}-message` : entry.kind === 'metrics' ? 'turn-metrics' : entry.kind === 'tool' && entry.status === 'failed' ? 'turn-error' : undefined"
             :data-item-kind="entry.kind"
             :data-message-role="entry.kind === 'message' ? entry.role : undefined"
+            :data-turn-id="entry.kind === 'message' ? entry.turnId : undefined"
             :class="
               entry.kind === 'message'
                 ? ['message-row', `role-${entry.role}`, { live: entry.live }]

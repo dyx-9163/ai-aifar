@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from 'playwright/test';
 import { openDatabase } from '../../src/agent/database';
 import type { ReasoningDisplayMode, ReasoningOutputMode, ThreadSummary, TurnRecord } from '../../src/shared/domain';
+import type { AgentEvent } from '../../src/shared/protocol';
 import { startFakeModelServer, type FakeModelServer } from './fakeModelServer';
 
 const packagedExecutable = join(process.cwd(), 'out', 'Private AI Desktop-win32-x64', 'Private AI Desktop.exe');
@@ -46,6 +47,26 @@ test('fake model server holds and releases separate SSE streams', async () => {
   }
 });
 
+test('fake model server releases a controlled provider HTTP failure', async () => {
+  const server = await startFakeModelServer();
+  try {
+    const responsePromise = fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'task-9-fake', messages: [], stream: true }),
+    });
+
+    await expect.poll(() => server.requestCount()).toBe(1);
+    server.failNext(429, { error: { message: 'controlled failure' } });
+
+    const response = await responsePromise;
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toEqual({ error: { message: 'controlled failure' } });
+  } finally {
+    await server.close();
+  }
+});
+
 test('queues FIFO at concurrency one and background completion does not steal focus', async () => {
   const userData = createUserData('fifo-one');
   const server = await startFakeModelServer();
@@ -70,11 +91,11 @@ test('queues FIFO at concurrency one and background completion does not steal fo
     await expectThreadRuntime(page, chatB.id, 'running');
     await expect(threadRow(page, chatB.id)).toHaveClass(/active/);
     await expect(page.getByTestId('active-runtime-status')).toHaveAttribute('data-runtime-status', 'running');
+    await captureEvidence(page, 'concurrency-one-fifo.png');
 
     server.releaseNext([{ answer: 'second complete' }]);
     await expectThreadRuntime(page, chatA.id, 'completed');
     await expectThreadRuntime(page, chatB.id, 'completed');
-    await captureEvidence(page, 'concurrency-one-fifo.png');
   } finally {
     await closeElectron(app);
     await server.close();
@@ -97,12 +118,12 @@ test('starts two independent chats at concurrency two', async () => {
     await expect.poll(() => server.requestCount()).toBe(2);
     await expectThreadRuntime(page, chatA.id, 'running');
     await expectThreadRuntime(page, chatB.id, 'running');
+    await captureEvidence(page, 'concurrency-two-running.png');
 
     server.releaseNext([{ answer: 'parallel A complete' }]);
     server.releaseNext([{ answer: 'parallel B complete' }]);
     await expectThreadRuntime(page, chatA.id, 'completed');
     await expectThreadRuntime(page, chatB.id, 'completed');
-    await captureEvidence(page, 'concurrency-two-running.png');
   } finally {
     await closeElectron(app);
     await server.close();
@@ -144,13 +165,13 @@ test('queued and running cancellation each release capacity once', async () => {
     await expect.poll(() => server.requestCount()).toBe(2);
     await expectThreadRuntime(page, chatC.id, 'running');
     await expectThreadRuntime(page, chatD.id, 'queued', 1);
+    await captureEvidence(page, 'cancellation-single-release.png');
 
     server.releaseNext([{ answer: 'C complete' }]);
     await expect.poll(() => server.requestCount()).toBe(3);
     await expectThreadRuntime(page, chatD.id, 'running');
     server.releaseNext([{ answer: 'D complete' }]);
     await expectThreadRuntime(page, chatD.id, 'completed');
-    await captureEvidence(page, 'cancellation-single-release.png');
   } finally {
     await closeElectron(app);
     await server.close();
@@ -178,28 +199,50 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
     await submitOnThread(page, thread.id, 'separate all streams');
     await expect.poll(() => server.requestCount()).toBe(1);
     server.releaseNext([
-      { rawReasoning: 'raw-part-1 ' },
-      { rawReasoning: 'raw-part-2' },
-      { summary: 'summary-part-1 ' },
-      { summary: 'summary-part-2' },
-      { answer: 'answer-part-1 ' },
-      { answer: 'answer-part-2' },
+      { rawReasoning: 'shared-' },
+      { rawReasoning: 'output' },
+      { summary: 'shared-' },
+      { summary: 'output' },
+      { answer: '**shared-' },
+      { answer: 'output**' },
     ]);
     await expectThreadRuntime(page, thread.id, 'completed');
 
+    const completedSnapshot = await page.evaluate(() => window.desktop.getSnapshot());
+    turnId = completedSnapshot.turns.find((turn) => turn.threadId === thread.id)?.id ?? '';
+    expect(turnId).not.toBe('');
+
     const rawPanel = page.getByTestId('reasoning-panel');
+    await expect(rawPanel).toHaveAttribute('data-item-kind', 'reasoning');
+    await expect(rawPanel).toHaveAttribute('data-reasoning-mode', 'raw');
+    await expect(rawPanel).toHaveAttribute('data-turn-id', turnId);
     await rawPanel.click();
-    await expect(rawPanel.getByTestId('reasoning-content')).toHaveText('raw-part-1 raw-part-2');
-    const answer = page.getByTestId('assistant-message-content');
-    await expect(answer).toHaveText('answer-part-1 answer-part-2');
-    await expect(answer).not.toContainText('raw-part');
-    await expect(answer).not.toContainText('summary-part');
+    await expect(rawPanel.getByTestId('reasoning-content')).toHaveText('shared-output');
+    const answerItem = page.getByTestId('assistant-message');
+    await expect(answerItem).toHaveAttribute('data-item-kind', 'message');
+    await expect(answerItem).toHaveAttribute('data-message-role', 'assistant');
+    await expect(answerItem).toHaveAttribute('data-turn-id', turnId);
+    const answer = answerItem.getByTestId('assistant-message-content');
+    await expect(answer).toHaveText('shared-output');
+    const renderedAnswerText = (await answer.innerText()).trim();
+    expect(renderedAnswerText).toBe('shared-output');
 
     await page.evaluate(() => {
-      const target = window as typeof window & { __task9CopiedText?: string };
+      const target = window as typeof window & {
+        __task9CopiedText?: string;
+        __task9CopyScope?: { answer: boolean; reasoning: boolean };
+      };
       target.__task9CopiedText = '';
       document.addEventListener('copy', () => {
-        target.__task9CopiedText = window.getSelection()?.toString() ?? '';
+        const selection = window.getSelection();
+        const answerContainer = document.querySelector('[data-testid="assistant-message-content"]');
+        const reasoningContainer = document.querySelector('[data-testid="reasoning-content"]');
+        const anchor = selection?.anchorNode;
+        target.__task9CopiedText = selection?.toString() ?? '';
+        target.__task9CopyScope = {
+          answer: Boolean(anchor && answerContainer?.contains(anchor)),
+          reasoning: Boolean(anchor && reasoningContainer?.contains(anchor)),
+        };
       }, { once: true });
     });
     await answer.evaluate((element) => {
@@ -212,7 +255,10 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
     await page.keyboard.press('Control+C');
     await expect.poll(() => page.evaluate(() => (
       window as typeof window & { __task9CopiedText?: string }
-    ).__task9CopiedText)).toBe('answer-part-1 answer-part-2');
+    ).__task9CopiedText)).toBe(renderedAnswerText);
+    await expect.poll(() => page.evaluate(() => (
+      window as typeof window & { __task9CopyScope?: { answer: boolean; reasoning: boolean } }
+    ).__task9CopyScope)).toEqual({ answer: true, reasoning: false });
 
     const clipboardResult = await page.evaluate(async () => {
       try {
@@ -222,7 +268,7 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
       }
     });
     if (clipboardResult.available) {
-      expect(clipboardResult.text).toBe('answer-part-1 answer-part-2');
+      expect(clipboardResult.text).toBe(renderedAnswerText);
     } else {
       test.info().annotations.push({
         type: 'clipboard-boundary',
@@ -230,8 +276,6 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
       });
     }
 
-    const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
-    turnId = snapshot.turns.find((turn) => turn.threadId === thread.id)?.id ?? '';
     eventFixture = await page.evaluate(() => JSON.stringify((
       window as typeof window & { __task9Events?: unknown[] }
     ).__task9Events ?? []));
@@ -239,14 +283,70 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
     await page.evaluate(() => window.desktop.updateSettings({ reasoningDisplayMode: 'summary' }));
     await page.reload();
     const summaryPanel = page.getByTestId('reasoning-panel');
+    await expect(summaryPanel).toHaveAttribute('data-item-kind', 'reasoning');
+    await expect(summaryPanel).toHaveAttribute('data-reasoning-mode', 'summary');
+    await expect(summaryPanel).toHaveAttribute('data-turn-id', turnId);
     await summaryPanel.click();
-    await expect(summaryPanel.getByTestId('reasoning-content')).toHaveText('summary-part-1 summary-part-2');
-    await expect(page.getByTestId('assistant-message-content')).toHaveText('answer-part-1 answer-part-2');
+    await expect(summaryPanel.getByTestId('reasoning-content')).toHaveText('shared-output');
+    await expect(page.getByTestId('assistant-message-content')).toHaveText(renderedAnswerText);
     await captureEvidence(page, 'three-streams-separated.png');
 
     await closeElectron(app);
     app = undefined;
     verifyPersistedTurn(seeded.databasePath, turnId, seeded.apiKey, eventFixture);
+  } finally {
+    await closeElectron(app);
+    await server.close();
+    removeUserData(userData);
+  }
+});
+
+test('redacts a provider failure secret from the failed turn event UI and SQLite', async () => {
+  const userData = createUserData('provider-failure');
+  const server = await startFakeModelServer();
+  const seeded = seedWorkspace(userData, server, 1, ['Provider failure']);
+  let app: ElectronApplication | undefined;
+  let eventFixture = '';
+  let turnId = '';
+  try {
+    app = await launchPackagedApp(userData);
+    const page = await app.firstWindow();
+    const [thread] = seeded.threads;
+    await page.evaluate(() => {
+      const target = window as typeof window & { __task9FailureEvents?: unknown[] };
+      target.__task9FailureEvents = [];
+      window.desktop.subscribe((event) => target.__task9FailureEvents?.push(event));
+    });
+
+    await submitOnThread(page, thread.id, 'trigger provider failure');
+    await expect.poll(() => server.requestCount()).toBe(1);
+    server.failNext(401, {
+      error: { message: `provider rejected credential ${seeded.apiKey}` },
+    });
+
+    await expectThreadRuntime(page, thread.id, 'failed');
+    const visibleError = page.getByTestId('turn-error');
+    await expect(visibleError).toBeVisible();
+    await expect(visibleError).not.toContainText(seeded.apiKey);
+    expect((await visibleError.innerText()).trim()).not.toBe('');
+
+    const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
+    turnId = snapshot.turns.find((turn) => turn.threadId === thread.id)?.id ?? '';
+    const failureEvents = await page.evaluate(() => (
+      window as typeof window & { __task9FailureEvents?: AgentEvent[] }
+    ).__task9FailureEvents ?? []);
+    const failureEvent = failureEvents.find((event) => event.type === 'turn.failed' && event.threadId === thread.id);
+    expect(failureEvent?.type).toBe('turn.failed');
+    if (failureEvent?.type === 'turn.failed') {
+      expect(failureEvent.turnId).toBe(turnId);
+      expect(failureEvent.error.trim()).not.toBe('');
+    }
+    eventFixture = JSON.stringify(failureEvents);
+    expect(eventFixture).not.toContain(seeded.apiKey);
+
+    await closeElectron(app);
+    app = undefined;
+    verifyFailedTurn(seeded.databasePath, turnId, seeded.apiKey);
   } finally {
     await closeElectron(app);
     await server.close();
@@ -278,6 +378,11 @@ test('marks unfinished work interrupted on restart without a model request', asy
     const page = await app.firstWindow();
     await expectThreadRuntime(page, thread.id, 'interrupted');
     expect(server.requestCount()).toBe(0);
+    const observationDeadline = Date.now() + 750;
+    while (Date.now() < observationDeadline) {
+      expect(server.requestCount()).toBe(0);
+      await page.waitForTimeout(100);
+    }
     await captureEvidence(page, 'restart-interrupted.png');
     const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
     expect(snapshot.turns.find((turn) => turn.id === seededTurn.id)?.status).toBe('interrupted');
@@ -393,13 +498,24 @@ function verifyPersistedTurn(databasePath: string, turnId: string, apiKey: strin
   expect(turnId).not.toBe('');
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    const rows = database.prepare('SELECT kind, payload FROM items WHERE turn_id = ?').all(turnId) as Array<{
+    const rows = database.prepare('SELECT turn_id, kind, payload FROM items WHERE turn_id = ?').all(turnId) as Array<{
+      turn_id: string;
       kind: string;
       payload: string;
     }>;
-    const items = rows.map((row) => JSON.parse(row.payload) as { kind: string; role?: string; mode?: string });
+    expect(rows.every((row) => row.turn_id === turnId)).toBe(true);
+    const items = rows.map((row) => JSON.parse(row.payload) as {
+      kind: string;
+      role?: string;
+      mode?: string;
+      text?: string;
+      turnId?: string;
+    });
     expect(items.filter((item) => item.kind === 'message' && item.role === 'user')).toHaveLength(1);
-    expect(items.filter((item) => item.kind === 'message' && item.role === 'assistant')).toHaveLength(1);
+    const assistantItems = items.filter((item) => item.kind === 'message' && item.role === 'assistant');
+    expect(assistantItems).toHaveLength(1);
+    expect(assistantItems[0]?.turnId).toBe(turnId);
+    expect(assistantItems[0]?.text?.trim()).not.toBe('');
     expect(items.filter((item) => item.kind === 'reasoning' && item.mode === 'raw')).toHaveLength(1);
     expect(items.filter((item) => item.kind === 'reasoning' && item.mode === 'summary')).toHaveLength(1);
 
@@ -407,6 +523,22 @@ function verifyPersistedTurn(databasePath: string, turnId: string, apiKey: strin
     expect(rows.map((row) => row.payload).join('\n')).not.toContain(apiKey);
     expect(turnErrors.map((row) => row.error).join('\n')).not.toContain(apiKey);
     expect(eventFixture).not.toContain(apiKey);
+  } finally {
+    database.close();
+  }
+}
+
+function verifyFailedTurn(databasePath: string, turnId: string, apiKey: string): void {
+  expect(turnId).not.toBe('');
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const turn = database.prepare('SELECT status, error FROM turns WHERE id = ?').get(turnId) as {
+      status: string;
+      error: string | null;
+    } | undefined;
+    expect(turn?.status).toBe('failed');
+    expect(turn?.error?.trim()).not.toBe('');
+    expect(turn?.error).not.toContain(apiKey);
   } finally {
     database.close();
   }
