@@ -150,6 +150,39 @@ describe('OpenAI-compatible model provider', () => {
     expect(fetchCalls).toBe(0);
   });
 
+  it.each([
+    ['toggle/openai', 'toggle', 'openai'],
+    ['effort/qwen', 'effort', 'qwen'],
+    ['toggle/none', 'toggle', 'none'],
+    ['custom/custom', 'custom', 'custom'],
+  ] as const)('rejects invalid %s reasoning configuration before fetch', async (_name, inputMode, protocol) => {
+    let fetchCalls = 0;
+    const fetchImpl = async (): Promise<Response> => {
+      fetchCalls += 1;
+      return new Response(null, { status: 200 });
+    };
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: {
+          ...profile.capabilities,
+          reasoning: {
+            inputMode,
+            effortOptions: inputMode === 'effort' ? ['low'] : [],
+            outputModes: [],
+          },
+        },
+        reasoning: { mode: 'enabled', protocol, effort: 'low', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow();
+    expect(fetchCalls).toBe(0);
+  });
+
   it('records requested fast response speed without inventing provider timing', async () => {
     const fetchImpl = async (): Promise<Response> =>
       new Response(

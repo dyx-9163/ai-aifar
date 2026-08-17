@@ -21,6 +21,49 @@ describe('model capabilities', () => {
     expect(capabilities.concurrency.defaultLimit).toBe(1);
   });
 
+  it('normalizes a missing reasoning subsection without replacing independent declarations', () => {
+    const capabilities = normalizeModelCapabilities({
+      text: false,
+      vision: true,
+      longContext: true,
+      concurrency: { defaultLimit: 4, configurable: false, maxLimit: 8 },
+      streaming: false,
+      usage: { tokens: false, reasoningTokens: false },
+    }, 'none');
+
+    expect(capabilities).toEqual({
+      text: false,
+      vision: true,
+      longContext: true,
+      reasoning: { inputMode: 'unsupported', effortOptions: [], outputModes: [] },
+      concurrency: { defaultLimit: 4, configurable: false, maxLimit: 8 },
+      streaming: false,
+      usage: { tokens: false, reasoningTokens: false },
+    });
+  });
+
+  it('completes legacy qwen reasoning without replacing unrelated declarations', () => {
+    const capabilities = normalizeModelCapabilities({
+      text: false,
+      vision: true,
+      longContext: true,
+      reasoning: true,
+      concurrency: { defaultLimit: 3, configurable: false, maxLimit: 6 },
+      streaming: false,
+      usage: { tokens: false, reasoningTokens: false },
+    }, 'qwen');
+
+    expect(capabilities).toEqual({
+      text: false,
+      vision: true,
+      longContext: true,
+      reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+      concurrency: { defaultLimit: 3, configurable: false, maxLimit: 6 },
+      streaming: false,
+      usage: { tokens: false, reasoningTokens: false },
+    });
+  });
+
   it('preserves arbitrary declared effort values', () => {
     const capabilities = openAiCapabilities(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
     expect(normalizeReasoningSettings(
@@ -46,6 +89,48 @@ describe('model capabilities', () => {
   it('treats a whitespace-only selected effort as missing', () => {
     const profile = profileFixture({ effortOptions: ['low'], effort: '   ' });
     expect(() => validateReasoningSelection(profile)).toThrow('requires a reasoning effort');
+  });
+
+  it.each([
+    {
+      name: 'toggle with the OpenAI protocol',
+      inputMode: 'toggle' as const,
+      protocol: 'openai' as const,
+      error: 'toggle reasoning requires the qwen protocol',
+    },
+    {
+      name: 'effort with the Qwen protocol',
+      inputMode: 'effort' as const,
+      protocol: 'qwen' as const,
+      error: 'effort reasoning requires the openai protocol',
+    },
+    {
+      name: 'an enabled input with no protocol',
+      inputMode: 'toggle' as const,
+      protocol: 'none' as const,
+      error: 'toggle reasoning requires the qwen protocol',
+    },
+    {
+      name: 'an unimplemented custom input',
+      inputMode: 'custom' as const,
+      protocol: 'custom' as const,
+      error: 'custom reasoning is not implemented',
+    },
+  ])('rejects $name', ({ inputMode, protocol, error }) => {
+    const invalid: RuntimeModelProfile = {
+      ...profileFixture({ effortOptions: ['low'], effort: 'low' }),
+      capabilities: {
+        ...openAiCapabilities(['low']),
+        reasoning: {
+          inputMode,
+          effortOptions: inputMode === 'effort' ? ['low'] : [],
+          outputModes: [],
+        },
+      },
+      reasoning: { mode: 'enabled', protocol, effort: 'low', display: 'auto' },
+    };
+
+    expect(() => validateReasoningSelection(invalid)).toThrow(error);
   });
 
   it('bounds profile concurrency by the declared capability limit', () => {

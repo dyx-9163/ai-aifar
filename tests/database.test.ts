@@ -58,6 +58,30 @@ afterEach(() => {
 });
 
 describe('sqlite app database', () => {
+  it('preserves successful assistant history when migrating an exact pre-v3 database', () => {
+    const path = createDbPath();
+    createPreV3Database(path);
+
+    const db = openDatabase(path);
+    try {
+      const snapshot = db.getSnapshot();
+
+      expect(snapshot.turns).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'legacy-success', status: 'completed', incomplete: false }),
+        expect.objectContaining({ id: 'legacy-unfinished', status: 'interrupted', incomplete: true }),
+      ]));
+      expect(snapshot.items['legacy-success-thread']).toContainEqual(expect.objectContaining({
+        turnId: 'legacy-success',
+        kind: 'message',
+        role: 'assistant',
+        text: 'historical answer',
+        incomplete: false,
+      }));
+    } finally {
+      db.close();
+    }
+  });
+
   it('merges reasoning fragments into one logical item', () => {
     const db = openDatabase(createDbPath());
     const thread = db.createThread('Reasoning');
@@ -481,3 +505,73 @@ describe('sqlite app database', () => {
     second.close();
   });
 });
+
+function createPreV3Database(path: string): void {
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+    CREATE TABLE threads (
+      id TEXT PRIMARY KEY,
+      group_id TEXT,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL,
+      model_profile_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    );
+    CREATE TABLE turns (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (version, applied_at) VALUES
+      (1, '2026-08-16T00:00:00.000Z'),
+      (2, '2026-08-16T00:00:01.000Z');
+  `);
+
+  const insertThread = legacy.prepare(`
+    INSERT INTO threads (id, group_id, title, status, model_profile_id, created_at, updated_at, deleted_at)
+    VALUES (?, NULL, ?, 'ready', NULL, ?, ?, NULL)
+  `);
+  const insertTurn = legacy.prepare(`
+    INSERT INTO turns (id, thread_id, status, created_at, updated_at)
+    VALUES (?, ?, 'running', ?, ?)
+  `);
+  const insertItem = legacy.prepare(`
+    INSERT INTO items (id, thread_id, turn_id, kind, payload, created_at)
+    VALUES (?, ?, ?, 'message', ?, ?)
+  `);
+  const createdAt = '2026-08-16T01:00:00.000Z';
+  insertThread.run('legacy-success-thread', 'Successful history', createdAt, createdAt);
+  insertTurn.run('legacy-success', 'legacy-success-thread', createdAt, createdAt);
+  insertItem.run('legacy-success-user', 'legacy-success-thread', 'legacy-success', JSON.stringify({
+    id: 'legacy-success-user', threadId: 'legacy-success-thread', turnId: 'legacy-success',
+    kind: 'message', role: 'user', text: 'historical question', createdAt,
+  }), createdAt);
+  insertItem.run('legacy-success-assistant', 'legacy-success-thread', 'legacy-success', JSON.stringify({
+    id: 'legacy-success-assistant', threadId: 'legacy-success-thread', turnId: 'legacy-success',
+    kind: 'message', role: 'assistant', text: 'historical answer', createdAt: '2026-08-16T01:00:01.000Z',
+  }), '2026-08-16T01:00:01.000Z');
+
+  insertThread.run('legacy-unfinished-thread', 'Unfinished history', createdAt, createdAt);
+  insertTurn.run('legacy-unfinished', 'legacy-unfinished-thread', createdAt, createdAt);
+  insertItem.run('legacy-unfinished-user', 'legacy-unfinished-thread', 'legacy-unfinished', JSON.stringify({
+    id: 'legacy-unfinished-user', threadId: 'legacy-unfinished-thread', turnId: 'legacy-unfinished',
+    kind: 'message', role: 'user', text: 'unfinished question', createdAt,
+  }), createdAt);
+  legacy.close();
+}

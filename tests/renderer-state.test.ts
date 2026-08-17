@@ -12,6 +12,7 @@ import {
   effortValidationIssue,
   formOperationCanApply,
   modelProfileFormFingerprint,
+  reasoningConfigurationValidationIssue,
   reconcileEffortSelection,
   runModelProfileSave,
   type ModelProfileFormValues,
@@ -219,6 +220,19 @@ describe('renderer state reducer', () => {
     expect(effortValidationIssue({
       reasoningMode: 'disabled', inputMode: 'effort', options: [], currentEffort: '', defaultEffort: '',
     })).toBeUndefined();
+  });
+
+  it.each([
+    ['toggle', 'openai', 'toggleRequiresQwen'],
+    ['effort', 'qwen', 'effortRequiresOpenAi'],
+    ['toggle', 'none', 'toggleRequiresQwen'],
+    ['custom', 'custom', 'customUnsupported'],
+  ] as const)('reports invalid settings input %s with protocol %s', (inputMode, protocol, issue) => {
+    expect(reasoningConfigurationValidationIssue({
+      reasoningMode: 'enabled',
+      inputMode,
+      protocol,
+    })).toBe(issue);
   });
 
   it('awaits model profile persistence and converts rejection into an explicit result', async () => {

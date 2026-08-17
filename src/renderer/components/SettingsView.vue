@@ -20,6 +20,7 @@ import {
   formOperationCanApply,
   modelProfileFormFingerprint,
   reconcileEffortSelection,
+  reasoningConfigurationValidationIssue,
   runModelProfileSave,
   type ConnectionTestState,
   type ModelProfileFormValues,
@@ -84,6 +85,14 @@ const maxConcurrencyLimit = computed(() => editingProfile.value?.capabilities.co
 const capabilityError = computed(() => {
   if (!Number.isInteger(form.maxConcurrency) || form.maxConcurrency < 1 || form.maxConcurrency > maxConcurrencyLimit.value) {
     return props.t('maxConcurrencyError').replace('{max}', String(maxConcurrencyLimit.value));
+  }
+  const configurationIssue = reasoningConfigurationValidationIssue({
+    reasoningMode: form.reasoningMode,
+    inputMode: form.reasoningInputMode,
+    protocol: form.reasoningProtocol,
+  });
+  if (configurationIssue) {
+    return props.t(configurationIssue);
   }
   const issue = effortValidationIssue({
     reasoningMode: form.reasoningMode,

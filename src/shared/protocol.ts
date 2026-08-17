@@ -15,6 +15,7 @@ import type {
   RuntimeSettingsInput,
   ThemePreference,
 } from './domain.js';
+import { reasoningConfigurationIssue } from './reasoningConfiguration.js';
 
 export type DesktopRequest =
   | { type: 'snapshot.get' }
@@ -216,7 +217,7 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
     return false;
   }
 
-  return (
+  const structurallyValid = (
     hasOptionalString(value, 'id') &&
     hasString(value, 'name') &&
     value.provider === 'openai-compatible' &&
@@ -229,6 +230,18 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
     (value.responseSpeed === undefined || isModelResponseSpeed(value.responseSpeed)) &&
     (value.isDefault === undefined || typeof value.isDefault === 'boolean')
   );
+  if (!structurallyValid) {
+    return false;
+  }
+
+  const capabilities = isRecord(value.capabilities) ? value.capabilities : undefined;
+  const capabilityReasoning = capabilities && isRecord(capabilities.reasoning) ? capabilities.reasoning : undefined;
+  const reasoning = isRecord(value.reasoning) ? value.reasoning : undefined;
+  return reasoningConfigurationIssue({
+    inputMode: isReasoningInputMode(capabilityReasoning?.inputMode) ? capabilityReasoning.inputMode : 'unsupported',
+    protocol: isReasoningProtocol(reasoning?.protocol) ? reasoning.protocol : 'none',
+    mode: isReasoningMode(reasoning?.mode) ? reasoning.mode : 'disabled',
+  }) === undefined;
 }
 
 export function isDesktopRequest(value: unknown): value is DesktopRequest {

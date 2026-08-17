@@ -7,6 +7,10 @@ import type {
   ReasoningMode,
   ReasoningProtocol,
 } from '../shared/domain';
+import {
+  reasoningConfigurationIssue,
+  type ReasoningConfigurationIssue,
+} from '../shared/reasoningConfiguration';
 
 export interface ModelProfileFormValues {
   id?: string;
@@ -131,6 +135,18 @@ export function effortValidationIssue(input: EffortSelectionInput): EffortValida
     return 'currentEffortInvalid';
   }
   return undefined;
+}
+
+export function reasoningConfigurationValidationIssue(input: {
+  reasoningMode: ReasoningMode;
+  inputMode: ReasoningInputMode;
+  protocol: ReasoningProtocol;
+}): ReasoningConfigurationIssue | undefined {
+  return reasoningConfigurationIssue({
+    mode: input.reasoningMode,
+    inputMode: input.inputMode,
+    protocol: input.protocol,
+  });
 }
 
 export async function runModelProfileSave(

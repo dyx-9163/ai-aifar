@@ -695,7 +695,7 @@ class SqliteAppDatabase implements AppDatabase {
     );
     this.ensureDefaultGroup();
     this.applyMigration(2, () => this.compactAssistantMessageFragments());
-    this.applyMigration(3, () => undefined);
+    this.applyMigration(3, () => this.migrateLegacyTurnCompletion());
     this.interruptUnfinishedTurns();
   }
 
@@ -845,6 +845,40 @@ class SqliteAppDatabase implements AppDatabase {
       update.run({ id: first.id, payload: JSON.stringify(merged) });
       for (const fragment of fragments) {
         remove.run({ id: fragment.id });
+      }
+    }
+  }
+
+  private migrateLegacyTurnCompletion(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT tr.id AS turn_id, i.id AS item_id, i.payload, i.created_at
+         FROM turns tr
+         INNER JOIN items i ON i.turn_id = tr.id
+         WHERE tr.status = 'running' AND i.kind = 'message'
+         ORDER BY i.created_at ASC, i.id ASC`,
+      )
+      .all() as Array<{ turn_id: string; item_id: string; payload: string; created_at: string }>;
+    const completed = new Map<string, { completedAt: string; assistantItems: Array<{ id: string; item: MessageItem }> }>();
+    for (const row of rows) {
+      const item = parseMessageItem(row.payload);
+      if (!item || item.role !== 'assistant') continue;
+      const entry = completed.get(row.turn_id) ?? { completedAt: row.created_at, assistantItems: [] };
+      entry.completedAt = row.created_at;
+      entry.assistantItems.push({ id: row.item_id, item });
+      completed.set(row.turn_id, entry);
+    }
+
+    const updateTurn = this.db.prepare(
+      `UPDATE turns
+       SET status = 'completed', completed_at = :completedAt, incomplete = 0, updated_at = :completedAt
+       WHERE id = :turnId AND status = 'running'`,
+    );
+    const updateItem = this.db.prepare('UPDATE items SET payload = :payload WHERE id = :id');
+    for (const [turnId, entry] of completed) {
+      updateTurn.run({ turnId, completedAt: entry.completedAt });
+      for (const assistant of entry.assistantItems) {
+        updateItem.run({ id: assistant.id, payload: JSON.stringify({ ...assistant.item, incomplete: false }) });
       }
     }
   }

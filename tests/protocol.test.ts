@@ -37,7 +37,7 @@ describe('desktop protocol guards', () => {
     ).toBe(true);
   });
 
-  it('accepts model profile reasoning settings', () => {
+  it('rejects reasoning settings without matching declared input capabilities', () => {
     expect(
       isDesktopRequest({
         type: 'modelProfile.save',
@@ -50,7 +50,7 @@ describe('desktop protocol guards', () => {
           responseSpeed: 'fast',
         },
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isDesktopRequest({
         type: 'modelProfile.save',
@@ -63,7 +63,7 @@ describe('desktop protocol guards', () => {
           responseSpeed: 'standard',
         },
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('accepts provider-declared capability options', () => {
@@ -123,6 +123,31 @@ describe('desktop protocol guards', () => {
       profile: {
         ...profile,
         capabilities: { concurrency: { defaultLimit: 0 } },
+      },
+    })).toBe(false);
+  });
+
+  it.each([
+    ['toggle', 'openai'],
+    ['effort', 'qwen'],
+    ['toggle', 'none'],
+    ['custom', 'custom'],
+  ] as const)('rejects reasoning input %s with protocol %s', (inputMode, protocol) => {
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        name: 'Invalid reasoning mapping',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'fixture',
+        capabilities: {
+          reasoning: {
+            inputMode,
+            effortOptions: inputMode === 'effort' ? ['low'] : [],
+            outputModes: [],
+          },
+        },
+        reasoning: { mode: 'enabled', protocol, effort: 'low', display: 'auto' },
       },
     })).toBe(false);
   });

@@ -6,6 +6,7 @@ import type {
   ReasoningInputMode,
   ReasoningProtocol,
 } from '../shared/domain.js';
+import { reasoningConfigurationIssue, type ReasoningConfigurationIssue } from '../shared/reasoningConfiguration.js';
 
 export function qwenCapabilities(): ModelCapabilities {
   return {
@@ -40,41 +41,29 @@ export function openAiCapabilities(effortOptions: string[] = []): ModelCapabilit
 export function normalizeModelCapabilities(input: unknown, reasoningProtocol: ReasoningProtocol): ModelCapabilities {
   const value = asRecord(input);
   const reasoning = asRecord(value?.reasoning);
-
-  if (!reasoning) {
-    if (reasoningProtocol === 'qwen' && value?.reasoning === true) {
-      return qwenCapabilities();
-    }
-    return unsupportedCapabilities(value);
-  }
-
   const concurrency = asRecord(value?.concurrency);
   const usage = asRecord(value?.usage);
-  const effortOptions = stringArray(reasoning.effortOptions);
-  const outputModes = stringArray(reasoning.outputModes).filter(
-    (mode): mode is 'raw' | 'summary' => mode === 'raw' || mode === 'summary',
-  );
-  const defaultEffort = nonEmptyString(reasoning.defaultEffort);
+  const legacyStreamingUsage = typeof value?.streamingUsage === 'boolean' ? value.streamingUsage : undefined;
+  const normalizedReasoning = reasoning
+    ? normalizeReasoningCapabilities(reasoning)
+    : reasoningProtocol === 'qwen' && value?.reasoning === true
+      ? qwenCapabilities().reasoning
+      : unsupportedReasoningCapabilities();
 
   return {
     text: booleanOr(value?.text, true),
     vision: booleanOr(value?.vision, false),
     longContext: booleanOr(value?.longContext, false),
-    reasoning: {
-      inputMode: reasoningInputMode(reasoning.inputMode),
-      effortOptions,
-      outputModes,
-      defaultEffort: defaultEffort && effortOptions.includes(defaultEffort) ? defaultEffort : undefined,
-    },
+    reasoning: normalizedReasoning,
     concurrency: {
       defaultLimit: positiveIntegerOr(concurrency?.defaultLimit, 1),
       configurable: booleanOr(concurrency?.configurable, true),
       maxLimit: positiveIntegerOr(concurrency?.maxLimit, 32),
     },
-    streaming: booleanOr(value?.streaming, true),
+    streaming: booleanOr(value?.streaming, legacyStreamingUsage ?? true),
     usage: {
-      tokens: booleanOr(usage?.tokens, true),
-      reasoningTokens: booleanOr(usage?.reasoningTokens, true),
+      tokens: booleanOr(usage?.tokens, legacyStreamingUsage ?? true),
+      reasoningTokens: booleanOr(usage?.reasoningTokens, legacyStreamingUsage ?? true),
     },
   };
 }
@@ -118,6 +107,14 @@ export function normalizeMaxConcurrency(value: unknown, capabilities: ModelCapab
 }
 
 export function validateReasoningSelection(profile: RuntimeModelProfile): void {
+  const issue = reasoningConfigurationIssue({
+    inputMode: profile.capabilities.reasoning.inputMode,
+    protocol: profile.reasoning.protocol,
+    mode: profile.reasoning.mode,
+  });
+  if (issue) {
+    throw new Error(`Model profile "${profile.name}" ${reasoningConfigurationMessage(issue)}`);
+  }
   if (profile.reasoning.mode === 'disabled') {
     return;
   }
@@ -139,21 +136,29 @@ export function validateReasoningSelection(profile: RuntimeModelProfile): void {
   }
 }
 
-function unsupportedCapabilities(value: Record<string, unknown> | undefined): ModelCapabilities {
-  const usage = asRecord(value?.usage);
-  const legacyStreamingUsage = typeof value?.streamingUsage === 'boolean' ? value.streamingUsage : undefined;
+function normalizeReasoningCapabilities(reasoning: Record<string, unknown>): ModelCapabilities['reasoning'] {
+  const effortOptions = stringArray(reasoning.effortOptions);
+  const outputModes = stringArray(reasoning.outputModes).filter(
+    (mode): mode is 'raw' | 'summary' => mode === 'raw' || mode === 'summary',
+  );
+  const defaultEffort = nonEmptyString(reasoning.defaultEffort);
   return {
-    text: booleanOr(value?.text, true),
-    vision: booleanOr(value?.vision, false),
-    longContext: booleanOr(value?.longContext, false),
-    reasoning: { inputMode: 'unsupported', effortOptions: [], outputModes: [] },
-    concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
-    streaming: booleanOr(value?.streaming, legacyStreamingUsage ?? true),
-    usage: {
-      tokens: booleanOr(usage?.tokens, legacyStreamingUsage ?? true),
-      reasoningTokens: booleanOr(usage?.reasoningTokens, legacyStreamingUsage ?? true),
-    },
+    inputMode: reasoningInputMode(reasoning.inputMode),
+    effortOptions,
+    outputModes,
+    defaultEffort: defaultEffort && effortOptions.includes(defaultEffort) ? defaultEffort : undefined,
   };
+}
+
+function unsupportedReasoningCapabilities(): ModelCapabilities['reasoning'] {
+  return { inputMode: 'unsupported', effortOptions: [], outputModes: [] };
+}
+
+function reasoningConfigurationMessage(issue: ReasoningConfigurationIssue): string {
+  if (issue === 'toggleRequiresQwen') return 'toggle reasoning requires the qwen protocol';
+  if (issue === 'effortRequiresOpenAi') return 'effort reasoning requires the openai protocol';
+  if (issue === 'customUnsupported') return 'custom reasoning is not implemented';
+  return 'does not support enabled reasoning input';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
