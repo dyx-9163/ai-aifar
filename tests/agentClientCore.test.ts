@@ -505,6 +505,72 @@ describe('Agent Client Core', () => {
     expect(afterFutureStart.optimisticThreads['thread-1']).toBeUndefined();
   });
 
+  it('lets a worker snapshot turn claim a first-turn optimistic placeholder', () => {
+    let state = {
+      ...emptyAgentClientState(),
+      runtimeByThread: {
+        'thread-1': { threadId: 'thread-1', status: 'queued' as const },
+      },
+      optimisticThreads: { 'thread-1': true as const },
+    };
+
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [
+          {
+            id: 'turn-old',
+            threadId: 'thread-1',
+            status: 'completed',
+            createdAt: '2026-08-17T00:00:00.000Z',
+            incomplete: false,
+          },
+          {
+            id: 'turn-real',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'queued',
+            createdAt: '2026-08-17T00:01:00.000Z',
+            incomplete: true,
+          },
+        ],
+      }),
+    });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-real', status: 'queued' });
+    expect(state.currentTurnByThread['thread-1']).toBe('turn-real');
+    expect(state.optimisticThreads['thread-1']).toBeUndefined();
+    expect(state.supersededTurns['thread-1:turn-old']).toBe(true);
+    expect(state.supersededTurns['thread-1:turn-real']).toBeUndefined();
+
+    state = reduceAgentEvent(state, started('thread-1', 'turn-real', 1));
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-real', status: 'running' });
+  });
+
+  it('treats a stale snapshot as history when its live current turn is not persisted yet', () => {
+    let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-live', 1));
+    state = reduceAgentEvent(state, {
+      type: 'snapshot',
+      snapshot: snapshotFixture({
+        turns: [{
+          id: 'turn-old',
+          threadId: 'thread-1',
+          status: 'completed',
+          createdAt: '2026-08-17T00:00:00.000Z',
+          incomplete: false,
+        }],
+      }),
+    });
+
+    expect(state.supersededTurns['thread-1:turn-old']).toBe(true);
+    state = reduceAgentEvent(state, { type: 'turn.completed', ...envelope('thread-1', 'turn-live', 2) });
+    state = reduceAgentEvent(state, started('thread-1', 'turn-old', 1));
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-live', status: 'completed' });
+
+    state = reduceAgentEvent(state, started('thread-1', 'turn-future', 1));
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-future', status: 'running' });
+  });
+
   it('does not mark a genuinely future turn as superseded when loading snapshot history', () => {
     const loaded = reduceAgentEvent(emptyAgentClientState(), historicalTurnsSnapshot());
 
@@ -559,6 +625,83 @@ describe('Agent Client Core', () => {
       incomplete: false,
     }));
   });
+
+  it.each([
+    {
+      snapshotStatus: 'completed' as const,
+      terminal: { type: 'turn.failed' as const, error: 'late failure' },
+      wantIncomplete: false,
+    },
+    {
+      snapshotStatus: 'failed' as const,
+      terminal: { type: 'turn.completed' as const },
+      wantIncomplete: true,
+    },
+    {
+      snapshotStatus: 'completed' as const,
+      terminal: { type: 'turn.completed' as const },
+      wantIncomplete: false,
+    },
+    {
+      snapshotStatus: 'failed' as const,
+      terminal: { type: 'turn.failed' as const, error: 'same failure' },
+      wantIncomplete: true,
+    },
+  ])(
+    'keeps snapshot $snapshotStatus as the first-known historical terminal after duplicate $terminal.type events',
+    ({ snapshotStatus, terminal, wantIncomplete }) => {
+      let state = reduceAgentEvent(emptyAgentClientState(), historicalTurnsSnapshot(snapshotStatus));
+      state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-old', 1, 'late answer'));
+      state = reduceAgentEvent(state, {
+        ...terminal,
+        ...envelope('thread-1', 'turn-old', 2),
+      });
+      state = reduceAgentEvent(state, {
+        ...terminal,
+        ...envelope('thread-1', 'turn-old', 3),
+      });
+
+      expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-new', status: 'completed' });
+      expect(state.snapshot.items['thread-1']).toContainEqual(expect.objectContaining({
+        turnId: 'turn-old',
+        incomplete: wantIncomplete,
+      }));
+    },
+  );
+
+  it.each([
+    {
+      snapshotStatus: 'completed' as const,
+      terminal: { type: 'turn.failed' as const, error: 'late failure' },
+      wantIncomplete: false,
+    },
+    {
+      snapshotStatus: 'failed' as const,
+      terminal: { type: 'turn.completed' as const },
+      wantIncomplete: true,
+    },
+  ])(
+    'keeps a current snapshot $snapshotStatus runtime consistent after conflicting $terminal.type',
+    ({ snapshotStatus, terminal, wantIncomplete }) => {
+      let state = reduceAgentEvent(emptyAgentClientState(), {
+        type: 'snapshot',
+        snapshot: snapshotFixture({
+          turns: [{
+            id: 'turn-current',
+            threadId: 'thread-1',
+            status: snapshotStatus,
+            createdAt: '2026-08-17T00:00:00.000Z',
+            incomplete: wantIncomplete,
+          }],
+        }),
+      });
+      state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-current', 1, 'answer'));
+      state = reduceAgentEvent(state, { ...terminal, ...envelope('thread-1', 'turn-current', 2) });
+
+      expect(state.runtimeByThread['thread-1'].status).toBe(snapshotStatus);
+      expect(state.snapshot.items['thread-1']).toMatchObject([{ incomplete: wantIncomplete }]);
+    },
+  );
 
   it.each([
     {

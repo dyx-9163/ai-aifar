@@ -563,6 +563,98 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('keeps a snapshot-claimed optimistic turn running across a later acknowledgement', async () => {
+    const originalWindow = globalThis.window;
+    let resolveStart: ((value: { turnId: string }) => void) | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = { ...app.state.value, activeThreadId: 'thread-1' };
+      const turn = app.startTurn('hello');
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'snapshot',
+        snapshot: {
+          ...app.state.value.snapshot,
+          turns: [{
+            id: 'turn-1',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'queued',
+            createdAt: '2026-08-17T00:00:00.000Z',
+            incomplete: true,
+          }],
+        },
+      });
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.started',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        modelProfileId: 'model-1',
+        sequence: 1,
+        title: 'run',
+      });
+      resolveStart?.({ turnId: 'turn-1' });
+      await turn;
+
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'running' });
+      expect(app.state.value.supersededTurns['thread-1:turn-1']).toBeUndefined();
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('keeps a snapshot-confirmed turn when the later acknowledgement fails', async () => {
+    const originalWindow = globalThis.window;
+    let rejectStart: ((error: Error) => void) | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((_resolve, reject) => {
+            rejectStart = reject;
+          }),
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = { ...app.state.value, activeThreadId: 'thread-1' };
+      const turn = app.startTurn('hello');
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'snapshot',
+        snapshot: {
+          ...app.state.value.snapshot,
+          turns: [{
+            id: 'turn-1',
+            threadId: 'thread-1',
+            modelProfileId: 'model-1',
+            status: 'queued',
+            createdAt: '2026-08-17T00:00:00.000Z',
+            incomplete: true,
+          }],
+        },
+      });
+      rejectStart?.(new Error('late bridge failure'));
+
+      await expect(turn).rejects.toThrow('late bridge failure');
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'queued' });
+      expect(app.state.value.optimisticThreads['thread-1']).toBeUndefined();
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('rolls back only the optimistic target runtime when starting a turn fails', async () => {
     const originalWindow = globalThis.window;
     let rejectStart: ((error: Error) => void) | undefined;

@@ -59,7 +59,10 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
     const activeThread = event.snapshot.threads.find((thread) => thread.id === activeThreadId);
     const runtimeProjection = reconcileSnapshotRuntimes(state, event.snapshot.turns ?? []);
     const turns = reconcileTurns(state.snapshot.turns ?? [], event.snapshot.turns ?? []);
-    const snapshotTerminalStatusByTurn = indexSnapshotTerminalStatuses(turns);
+    const snapshotTerminalStatusByTurn = mergeTerminalStatusIndexes(
+      state.snapshotTerminalStatusByTurn,
+      indexSnapshotTerminalStatuses(turns),
+    );
     const snapshot = reconcileSnapshot(
       state.snapshot,
       { ...event.snapshot, turns },
@@ -82,11 +85,13 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
   }
 
   const runtimeProjection = reduceCurrentRuntime(state, event);
+  const snapshotTerminalStatusByTurn = indexTerminalEvent(state, event, turnKey);
   let nextState: AgentClientState = {
     ...state,
     events: [...state.events, event],
     lastSequenceByTurn: { ...state.lastSequenceByTurn, [turnKey]: event.sequence },
     ...runtimeProjection,
+    snapshotTerminalStatusByTurn,
   };
 
   if (event.type === 'message.delta' || event.type === 'answer.delta') {
@@ -370,6 +375,32 @@ function reconcileSnapshotRuntimes(state: AgentClientState, incomingTurns: TurnR
       continue;
     }
 
+    const currentIncoming = currentTurnId ? incomingById.get(currentTurnId) : undefined;
+    const currentKnown = currentTurnId
+      ? currentIncoming ?? state.snapshot.turns.find((turn) => turn.id === currentTurnId)
+      : undefined;
+    const claimsOptimisticPlaceholder =
+      optimistic &&
+      !current?.turnId &&
+      !isTerminalStatus(candidate.status) &&
+      (
+        !currentTurnId ||
+        (
+          candidate.id !== currentTurnId &&
+          !supersededTurns[turnKey(threadId, candidate.id)] &&
+          (!currentKnown || compareTurns(currentKnown, candidate) < 0)
+        )
+      );
+    if (claimsOptimisticPlaceholder) {
+      if (currentTurnId && currentTurnId !== candidate.id) {
+        supersededTurns[turnKey(threadId, currentTurnId)] = true;
+      }
+      runtimeByThread[threadId] = runtimeFromTurn(candidate);
+      currentTurnByThread[threadId] = candidate.id;
+      delete optimisticThreads[threadId];
+      continue;
+    }
+
     if (optimistic && (!currentTurnId || candidate.id === currentTurnId || supersededTurns[turnKey(threadId, candidate.id)])) {
       continue;
     }
@@ -383,10 +414,6 @@ function reconcileSnapshotRuntimes(state: AgentClientState, incomingTurns: TurnR
       continue;
     }
 
-    const currentIncoming = currentTurnId ? incomingById.get(currentTurnId) : undefined;
-    const currentKnown = currentTurnId
-      ? currentIncoming ?? state.snapshot.turns.find((turn) => turn.id === currentTurnId)
-      : undefined;
     const currentHasLiveSequence = Boolean(
       currentTurnId && state.lastSequenceByTurn[turnKey(threadId, currentTurnId)] !== undefined,
     );
@@ -440,6 +467,8 @@ function indexSnapshotHistory(
     const currentTurn = incomingById.get(currentTurnId)
       ?? state.snapshot.turns.find((candidate) => candidate.threadId === turn.threadId && candidate.id === currentTurnId);
     if (currentTurn && compareTurns(turn, currentTurn) < 0) {
+      supersededTurns[turnKey(turn.threadId, turn.id)] = true;
+    } else if (!currentTurn && state.lastSequenceByTurn[turnKey(turn.threadId, currentTurnId)] !== undefined) {
       supersededTurns[turnKey(turn.threadId, turn.id)] = true;
     }
   }
@@ -587,8 +616,8 @@ function knownTerminalStatus(
   if (runtime?.turnId === turnId && isTerminalStatus(runtime.status)) {
     return runtime.status;
   }
-  return firstTerminalStatus(state.events, threadId, turnId)
-    ?? state.snapshotTerminalStatusByTurn[turnKey(threadId, turnId)];
+  return state.snapshotTerminalStatusByTurn[turnKey(threadId, turnId)]
+    ?? firstTerminalStatus(state.events, threadId, turnId);
 }
 
 function indexSnapshotTerminalStatuses(turns: TurnRecord[]): Record<string, TerminalStatus> {
@@ -599,6 +628,28 @@ function indexSnapshotTerminalStatuses(turns: TurnRecord[]): Record<string, Term
     }
   }
   return statuses;
+}
+
+function mergeTerminalStatusIndexes(
+  current: Record<string, TerminalStatus>,
+  incoming: Record<string, TerminalStatus>,
+): Record<string, TerminalStatus> {
+  return { ...incoming, ...current };
+}
+
+function indexTerminalEvent(
+  state: AgentClientState,
+  event: SequencedAgentEvent,
+  eventKey: string,
+): Record<string, TerminalStatus> {
+  if (!isTerminalEvent(event) || state.snapshotTerminalStatusByTurn[eventKey]) {
+    return state.snapshotTerminalStatusByTurn;
+  }
+  const firstLiveStatus = firstTerminalStatus(state.events, event.threadId, event.turnId);
+  return {
+    ...state.snapshotTerminalStatusByTurn,
+    [eventKey]: firstLiveStatus ?? eventStatus(event),
+  };
 }
 
 function reconcileTurns(current: TurnRecord[], incoming: TurnRecord[]): TurnRecord[] {
