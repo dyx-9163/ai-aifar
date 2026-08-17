@@ -895,6 +895,59 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('preserves a queued worker event through acknowledgement and cancels its real turn', async () => {
+    const originalWindow = globalThis.window;
+    let resolveStart: ((value: { turnId: string }) => void) | undefined;
+    let cancelled: { threadId: string; turnId: string } | undefined;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          startTurn: () => new Promise<{ turnId: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+          cancelTurn: async (threadId: string, turnId: string) => {
+            cancelled = { threadId, turnId };
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = { ...app.state.value, activeThreadId: 'thread-1' };
+      const turn = app.startTurn('hello');
+      app.state.value = reduceEvent(app.state.value, {
+        type: 'turn.queued',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        modelProfileId: 'model-1',
+        sequence: 1,
+        queuePosition: 1,
+      });
+
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({
+        turnId: 'turn-1',
+        modelProfileId: 'model-1',
+        status: 'queued',
+        queuePosition: 1,
+      });
+      resolveStart?.({ turnId: 'turn-1' });
+      await turn;
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({
+        turnId: 'turn-1',
+        status: 'queued',
+        queuePosition: 1,
+      });
+
+      await app.cancelTurn();
+      expect(cancelled).toEqual({ threadId: 'thread-1', turnId: 'turn-1' });
+      expect(app.state.value.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'cancelling' });
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('lets an event arriving before the start acknowledgement claim the optimistic turn', async () => {
     const originalWindow = globalThis.window;
     let resolveStart: ((value: { turnId: string }) => void) | undefined;

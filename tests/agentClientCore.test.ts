@@ -151,6 +151,70 @@ describe('Agent Client Core', () => {
     });
   });
 
+  it.each([
+    {
+      name: 'queued',
+      event: queued('thread-1', 'turn-1', 1),
+      want: { turnId: 'turn-1', modelProfileId: 'model-1', status: 'queued', queuePosition: 1 },
+    },
+    {
+      name: 'started',
+      event: started('thread-1', 'turn-1', 1),
+      want: { turnId: 'turn-1', modelProfileId: 'model-1', status: 'running' },
+    },
+    {
+      name: 'answer delta',
+      event: answerDelta('thread-1', 'turn-1', 1, 'answer'),
+      want: { turnId: 'turn-1', modelProfileId: 'model-1', status: 'running' },
+    },
+    {
+      name: 'model progress',
+      event: {
+        type: 'model.progress' as const,
+        ...envelope('thread-1', 'turn-1', 1),
+        phase: 'reasoning' as const,
+      },
+      want: { turnId: 'turn-1', modelProfileId: 'model-1', status: 'running' },
+    },
+  ])('derives $name state when the first worker event claims an optimistic placeholder', ({ event, want }) => {
+    const optimistic = {
+      ...emptyAgentClientState(),
+      runtimeByThread: {
+        'thread-1': { threadId: 'thread-1', status: 'queued' as const },
+      },
+      optimisticThreads: { 'thread-1': true as const },
+    };
+
+    const claimed = reduceAgentEvent(optimistic, event);
+
+    expect(claimed.runtimeByThread['thread-1']).toMatchObject(want);
+    expect(claimed.currentTurnByThread['thread-1']).toBe('turn-1');
+    expect(claimed.optimisticThreads['thread-1']).toBeUndefined();
+  });
+
+  it.each([
+    answerDelta('thread-1', 'turn-1', 1, 'answer'),
+    {
+      type: 'model.progress' as const,
+      ...envelope('thread-1', 'turn-1', 1),
+      phase: 'answering' as const,
+    },
+  ])('does not downgrade a running turn when queued arrives after $type', (firstEvent) => {
+    const optimistic = {
+      ...emptyAgentClientState(),
+      runtimeByThread: {
+        'thread-1': { threadId: 'thread-1', status: 'queued' as const },
+      },
+      optimisticThreads: { 'thread-1': true as const },
+    };
+
+    let state = reduceAgentEvent(optimistic, firstEvent);
+    state = reduceAgentEvent(state, { ...queued('thread-1', 'turn-1', 1), sequence: 2 });
+
+    expect(state.runtimeByThread['thread-1']).toMatchObject({ turnId: 'turn-1', status: 'running' });
+    expect(state.runtimeByThread['thread-1'].queuePosition).toBeUndefined();
+  });
+
   it('suppresses duplicate and out-of-order sequences within one turn', () => {
     let state = reduceAgentEvent(emptyAgentClientState(), answerDelta('thread-1', 'turn-1', 2, '新'));
     state = reduceAgentEvent(state, answerDelta('thread-1', 'turn-1', 2, '重复'));

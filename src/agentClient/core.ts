@@ -313,7 +313,12 @@ function applyRuntimeEvent(current: ThreadRuntimeState | undefined, event: Seque
   const now = Date.now();
   const base: ThreadRuntimeState = current
     ? { ...current, modelProfileId: event.modelProfileId }
-    : { threadId: event.threadId, turnId: event.turnId, modelProfileId: event.modelProfileId, status: 'running' };
+    : {
+        threadId: event.threadId,
+        turnId: event.turnId,
+        modelProfileId: event.modelProfileId,
+        status: event.type === 'turn.queued' ? 'queued' : 'running',
+      };
   const terminal = isTerminalStatus(base.status);
 
   switch (event.type) {
