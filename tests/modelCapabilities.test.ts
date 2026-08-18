@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RuntimeModelProfile } from '../src/agent/database';
 import {
+  normalizeMaxOutputTokens,
   normalizeModelCapabilities,
   normalizeMaxConcurrency,
   normalizeReasoningSettings,
@@ -137,6 +138,19 @@ describe('model capabilities', () => {
     expect(normalizeMaxConcurrency(99, qwenCapabilities())).toBe(32);
     expect(normalizeMaxConcurrency(0, qwenCapabilities())).toBe(1);
   });
+
+  it.each([
+    [undefined, 2048],
+    [0, 2048],
+    [-1, 2048],
+    [1.5, 2048],
+    ['2048', 2048],
+    [1, 1],
+    [4096, 4096],
+    [32769, 32768],
+  ])('normalizes output limit %s to %s', (value, expected) => {
+    expect(normalizeMaxOutputTokens(value)).toBe(expected);
+  });
 });
 
 function profileFixture(input: { effortOptions: string[]; effort: string }): RuntimeModelProfile {
@@ -151,6 +165,7 @@ function profileFixture(input: { effortOptions: string[]; effort: string }): Run
     capabilities,
     reasoning: { mode: 'enabled', protocol: 'openai', effort: input.effort, display: 'summary' },
     maxConcurrency: 1,
+    maxOutputTokens: 2048,
     responseSpeed: 'standard',
     isDefault: true,
     createdAt: '2026-08-17T00:00:00.000Z',

@@ -37,6 +37,57 @@ describe('desktop protocol guards', () => {
     ).toBe(true);
   });
 
+  it('accepts a positive integer model output limit', () => {
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        name: 'Bounded model',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'Qwen3.5-9B',
+        maxOutputTokens: 2048,
+      },
+    })).toBe(true);
+  });
+
+  it('reuses the existing read-only model profile test request', () => {
+    expect(isDesktopRequest({
+      type: 'modelProfile.test',
+      profile: {
+        name: 'Local Qwen',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'Qwen3.5-9B',
+        maxConcurrency: 1,
+        maxOutputTokens: 2048,
+      },
+    })).toBe(true);
+  });
+
+  it.each([0, -1, 1.5, '2048'])('rejects invalid model output limit %s', (maxOutputTokens) => {
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        name: 'Unbounded model',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'Qwen3.5-9B',
+        maxOutputTokens,
+      },
+    })).toBe(false);
+  });
+
+  it.each([
+    'modelRuntime.start',
+    'modelRuntime.stop',
+    'modelRuntime.restart',
+    'modelRuntime.status',
+    'modelRuntime.inspect',
+    'modelRuntime.poll',
+  ])('rejects lifecycle or polling request %s', (type) => {
+    expect(isDesktopRequest({ type })).toBe(false);
+  });
+
   it('rejects reasoning settings without matching declared input capabilities', () => {
     expect(
       isDesktopRequest({

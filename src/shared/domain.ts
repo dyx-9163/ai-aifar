@@ -157,6 +157,7 @@ export interface ModelProfile {
   capabilities: ModelCapabilities;
   reasoning: ModelReasoningSettings;
   maxConcurrency: number;
+  maxOutputTokens: number;
   /** @deprecated Kept readable for persisted-profile migration only. */
   responseSpeed: ModelResponseSpeed;
   isDefault: boolean;
@@ -174,10 +175,55 @@ export interface ModelProfileInput {
   capabilities?: ModelCapabilitiesInput;
   reasoning?: Partial<ModelReasoningSettings>;
   maxConcurrency?: number;
+  maxOutputTokens?: number;
   /** @deprecated Kept readable for persisted-profile migration only. */
   responseSpeed?: ModelResponseSpeed;
   isDefault?: boolean;
 }
+
+export type ModelConnectionSuccessStatus = 'connected' | 'concurrency-warning' | 'slots-unverified';
+export type ModelConnectionFailureStatus = 'offline' | 'model-mismatch';
+export type ModelConnectionStatus = ModelConnectionSuccessStatus | ModelConnectionFailureStatus;
+
+interface ModelConnectionResultBase {
+  message: string;
+  model: string;
+  clientConcurrency: number;
+}
+
+export interface ModelConnectionConnectedResult extends ModelConnectionResultBase {
+  ok: true;
+  status: 'connected';
+  serviceSlots: number;
+}
+
+export interface ModelConnectionConcurrencyWarningResult extends ModelConnectionResultBase {
+  ok: true;
+  status: 'concurrency-warning';
+  serviceSlots: number;
+}
+
+export interface ModelConnectionSlotsUnverifiedResult extends ModelConnectionResultBase {
+  ok: true;
+  status: 'slots-unverified';
+}
+
+export interface ModelConnectionOfflineResult extends ModelConnectionResultBase {
+  ok: false;
+  status: 'offline';
+}
+
+export interface ModelConnectionMismatchResult extends ModelConnectionResultBase {
+  ok: false;
+  status: 'model-mismatch';
+}
+
+export type ModelConnectionSuccessResult =
+  | ModelConnectionConnectedResult
+  | ModelConnectionConcurrencyWarningResult
+  | ModelConnectionSlotsUnverifiedResult;
+export type ModelConnectionFailureResult = ModelConnectionOfflineResult | ModelConnectionMismatchResult;
+export type ModelConnectionResult = ModelConnectionSuccessResult | ModelConnectionFailureResult;
 
 export interface ModelRunMetrics {
   modelProfileId?: string;

@@ -1,16 +1,17 @@
 import { MakerZIP } from '@electron-forge/maker-zip';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { VitePlugin } from '@electron-forge/plugin-vite';
+import os from 'node:os';
 import path from 'node:path';
 
-const projectRoot = process.cwd();
 process.env.VITE_CONFIG_NATIVE_IGNORE_WARNING ??= 'true';
 
 const config = {
   packagerConfig: {
     asar: true,
+    ignore: [/^\/(?!\.vite(?:\/|$)|package\.json$)/],
     download: {
-      cacheRoot: path.join(projectRoot, '.electron-cache'),
+      cacheRoot: path.join(os.tmpdir(), 'private-ai-desktop-electron-cache'),
       mirrorOptions: {
         mirror: 'https://npmmirror.com/mirrors/electron/',
       },

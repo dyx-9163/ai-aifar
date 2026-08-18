@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
+import type { ModelConnectionResult } from '../src/shared/domain';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from '../src/agent/database';
-import type { ModelStreamHandlers } from '../src/agent/modelProvider';
+import { streamChatCompletion, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import {
   createWorkerTurnRuntime,
   requireAcceptedApprovalResponse,
+  testRuntimeModelProfileConnection,
   type WorkerTurnRuntime,
 } from '../src/agent/worker';
 
@@ -29,6 +31,59 @@ afterEach(() => {
 });
 
 describe('worker turn runtime', () => {
+  it('routes a transient profile through the typed connection result without losing output bounds', async () => {
+    const harness = createHarness(async () => metrics());
+    const expected: ModelConnectionResult = {
+      ok: true,
+      status: 'concurrency-warning',
+      message: 'service slots differ',
+      model: 'Qwen3.5-9B',
+      clientConcurrency: 2,
+      serviceSlots: 1,
+    };
+    let received: RuntimeModelProfile | undefined;
+
+    const result = await testRuntimeModelProfileConnection({
+      name: 'Transient Qwen',
+      provider: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1/',
+      model: 'Qwen3.5-9B',
+      maxConcurrency: 2,
+      maxOutputTokens: 4096,
+    }, harness.database, async (profile) => {
+      received = profile;
+      return expected;
+    });
+
+    expect(result).toBe(expected);
+    expect(received).toMatchObject({
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'Qwen3.5-9B',
+      maxConcurrency: 2,
+      maxOutputTokens: 4096,
+    });
+    harness.database.close();
+  });
+
+  it('routes a typed model mismatch without converting it to an exception', async () => {
+    const harness = createHarness(async () => metrics());
+    const expected: ModelConnectionResult = {
+      ok: false,
+      status: 'model-mismatch',
+      message: 'Configured model is not advertised by the model endpoint.',
+      model: 'Qwen3.5-9B',
+      clientConcurrency: 1,
+    };
+
+    await expect(testRuntimeModelProfileConnection({
+      name: 'Transient Qwen',
+      provider: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'Qwen3.5-9B',
+    }, harness.database, async () => expected)).resolves.toBe(expected);
+    harness.database.close();
+  });
+
   it('turns a false approval response into a failed acknowledgement', () => {
     expect(() => requireAcceptedApprovalResponse(
       { respondApproval: () => false },
@@ -456,6 +511,46 @@ describe('worker turn runtime', () => {
       incomplete: true,
       error: expect.not.stringContaining('super-secret-key'),
     });
+    harness.database.close();
+  });
+
+  it('marks a reasoning-only output-bound turn failed and incomplete instead of completed', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"reasoning_content":"bounded reasoning"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const harness = createHarness((profile, messages, handlers, signal) => streamChatCompletion(
+      profile,
+      messages,
+      handlers,
+      signal,
+      async () => new Response(ReadableStream.from(
+        chunks.map((chunk) => new TextEncoder().encode(chunk)),
+      ) as unknown as BodyInit, { status: 200 }),
+    ));
+    const thread = harness.database.createThread('Bounded no-answer failure');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'reason', modelProfileId: harness.profile.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.completed');
+    expect(harness.database.getSnapshot().turns.find((turn) => turn.id === turnId)).toMatchObject({
+      status: 'failed',
+      incomplete: true,
+      error: 'Model reached the output-token limit before producing a final answer. Increase the profile output limit or start a new chat.',
+    });
+    expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+      kind: 'reasoning',
+      mode: 'raw',
+      text: 'bounded reasoning',
+      incomplete: true,
+    }));
+    expect(harness.database.getSnapshot().items[thread.id]).not.toContainEqual(expect.objectContaining({
+      kind: 'message', role: 'assistant',
+    }));
     harness.database.close();
   });
 

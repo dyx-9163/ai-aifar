@@ -13,6 +13,26 @@ Model profiles are configured under **Settings → Model providers**. Configure 
 
 API keys stay in the Utility Process and SQLite model-profile record. They are redacted from renderer snapshots and must not appear in items, turn errors, or emitted events.
 
+## Standalone local Qwen runtime
+
+The local Qwen service is an operator-managed Docker Compose runtime, not part of the Electron process. It serves llama.cpp directly at `http://127.0.0.1:8080/v1`; there is no `context-proxy` or other request proxy in this path. Keep `models/*.gguf` and `model-runtime/.env` local and untracked.
+
+Run lifecycle and verification commands independently from the repository root:
+
+```powershell
+# Windows may require this process-local policy bypass. It does not change machine policy.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\model-runtime\start-model.ps1 -Profile gpu
+powershell -NoProfile -ExecutionPolicy Bypass -File .\model-runtime\status-model.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\model-runtime\verify-model.ps1 -ConcurrentRequests 1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\model-runtime\stop-model.ps1
+```
+
+`start-model.ps1` also accepts `-Profile hybrid` and `-Profile cpu`. GPU is the default and may fall back to hybrid once when the script detects the bounded GPU/model-load failure described in `model-runtime/README.md`. Before switching, the script must prove exactly one allowed profile in Compose project `ai-aifar-model`; only then may it stop that project without volumes and recheck the port. An unrelated listener or ambiguous project state fails closed. Status and verification require `status=ok`, exact `Qwen3.5-9B`, valid `/props`, a non-empty unique slot list with a matching count, and non-empty bounded verification output.
+
+The safe accepted default is one llama.cpp slot with `LLAMA_PARALLEL=1` and `LLAMA_CTX_SIZE=16384`. Runtime slots and the desktop profile's maximum concurrent turns are separate controls: the runtime value determines server capacity, while the desktop value controls client-side FIFO admission. They are not synchronized automatically, and the connection test reports a mismatch. Raising runtime parallelism while preserving the same per-request context requires a corresponding total-context increase (for example, `2` and `32768`) plus a fresh memory, latency, and CUDA stability acceptance.
+
+Starting or exiting Private AI Desktop does not start, stop, or restart the model container. When the endpoint is offline, Settings reports the independent start command as text only. Start the model before using the local profile, and stop it explicitly when model service shutdown is intended.
+
 ## Provider capability contract
 
 Controls come from the selected profile's declared capabilities rather than a model-name guess:
@@ -51,6 +71,8 @@ After an application/runtime restart, persisted `queued`, `running`, or `cancell
 
 The final answer, raw reasoning, and native reasoning summary are independent streams through provider parsing, IPC events, client state, SQLite, and UI rendering. Copying/selecting the answer does not include reasoning panel content; reasoning has its own copy action.
 
+Direct llama.cpp chunks are incremental: repeated text, prefix/suffix-shaped deltas, and spaces are preserved exactly. Payload text is never used as retransmission identity. Only a repeated explicit SSE `id` with identical event data may be skipped; cumulative normalization is available solely as an explicitly declared transport mode. A stream that ends without final-answer content fails and remains incomplete rather than creating a completed empty answer.
+
 Reasoning effort is a provider request option. It is not a performance measurement. Duration, time to first token, token usage, and tokens per second are recorded per turn when the endpoint supplies enough usage/timing data. Tokens per second is measured server-side when reported, otherwise derived from completion tokens and elapsed time; when neither is available it remains unavailable. The UI does not claim a configurable “speed” that the provider did not declare.
 
 ## Verification commands
@@ -77,7 +99,7 @@ pnpm package
 & .\node_modules\.bin\playwright.CMD test tests/e2e/live-model.spec.ts --workers=1
 ```
 
-The live suite requires a non-empty final answer, independently identified raw Qwen reasoning and answer items for the same turn, native-summary unavailability, answer-copy selection scoped outside the reasoning DOM, and turn-scoped duration/tokens-per-second metrics when available. It does not reject legitimate answer text merely because it overlaps reasoning text, and it does not compare rendered Markdown text byte-for-byte with the persisted Markdown source.
+The live suite first exercises the shipped 2,048 output bound with thinking enabled: it accepts either a completed non-empty answer or the fixed bounded failure when reasoning exhausts the limit, but never a completed empty answer. It retains a 4,096 positive case requiring independently identified non-empty raw reasoning and answer items for the same turn, native-summary unavailability, answer-copy selection scoped outside the reasoning DOM, and turn-scoped duration/tokens-per-second metrics when available. Production defaults remain unchanged.
 
 ## Architecture
 
@@ -95,4 +117,4 @@ Demo mode does not call a model provider, execute destructive tools, or mutate p
 
 `node:sqlite` avoids a native npm SQLite module and a Visual Studio C++ build-chain requirement. Current Node versions may emit an experimental SQLite warning during tests.
 
-Forge caches Electron downloads under `.electron-cache/` and uses the Electron mirror configured in `forge.config.ts`. `pnpm package` writes the unpacked app under `out/`; `pnpm make` produces the configured distributable artifact.
+Forge caches Electron downloads under an OS-temporary `private-ai-desktop-electron-cache` directory and uses the mirror configured in `forge.config.ts`. `pnpm package` writes the unpacked app under `out/`, then independently scans outer files and the inner ASAR. The ASAR is limited to `package.json` and production `.vite/**` entries with a 2 MiB ceiling; SDD/cache/source/tests/docs/model/runtime/local-env material is rejected. `pnpm make` produces the configured distributable artifact.

@@ -106,10 +106,255 @@ describe('sqlite app database', () => {
     }
 
     const migrated = new DatabaseSync(path);
-    expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-      { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 },
-    ]);
-    migrated.close();
+    try {
+      expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 },
+      ]);
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it('seeds one default local Qwen preset in a fresh database', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const snapshot = db.getSnapshot();
+      expect(snapshot.modelProfiles).toHaveLength(1);
+      expect(snapshot.modelProfiles[0]).toMatchObject({
+        id: 'local-qwen35',
+        name: 'Local Qwen3.5-9B',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'Qwen3.5-9B',
+        maxConcurrency: 1,
+        maxOutputTokens: 2048,
+        reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
+        capabilities: { reasoning: { inputMode: 'toggle', outputModes: ['raw'] } },
+        isDefault: true,
+      });
+      expect(snapshot.modelProfiles[0]).not.toHaveProperty('apiKey');
+      expect(snapshot.settings.activeModelProfileId).toBe('local-qwen35');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not duplicate the local Qwen preset when reopened', () => {
+    const path = createDbPath();
+    const first = openDatabase(path);
+    first.close();
+
+    const second = openDatabase(path);
+    try {
+      expect(second.getSnapshot().modelProfiles.filter((profile) =>
+        profile.provider === 'openai-compatible' &&
+        profile.baseUrl === 'http://127.0.0.1:8080/v1' &&
+        profile.model === 'Qwen3.5-9B')).toHaveLength(1);
+    } finally {
+      second.close();
+    }
+  });
+
+  it('seeds the preset without replacing an existing custom default', () => {
+    const path = createDbPath();
+    createV5ModelProfileDatabase(path);
+    const legacy = new DatabaseSync(path);
+    try {
+      legacy.exec(`
+        DELETE FROM model_profiles WHERE id = 'legacy-local';
+        UPDATE model_profiles SET is_default = CASE WHEN id = 'local-custom' THEN 1 ELSE 0 END;
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const db = openDatabase(path);
+    try {
+      const snapshot = db.getSnapshot();
+      expect(snapshot.modelProfiles.find((profile) => profile.id === 'local-custom')).toMatchObject({
+        model: 'my-custom-model',
+        isDefault: true,
+      });
+      expect(snapshot.modelProfiles.find((profile) => profile.id === 'local-qwen35')).toMatchObject({
+        model: 'Qwen3.5-9B',
+        isDefault: false,
+      });
+      expect(snapshot.settings.activeModelProfileId).toBe('local-custom');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('uses a deterministic fallback ID without overwriting a custom row that owns the preset ID', () => {
+    const path = createDbPath();
+    createV5ModelProfileDatabase(path);
+    const legacy = new DatabaseSync(path);
+    try {
+      legacy.exec(`
+        DELETE FROM model_profiles WHERE id = 'legacy-local';
+        UPDATE model_profiles SET is_default = CASE WHEN id = 'local-custom' THEN 1 ELSE 0 END;
+        INSERT INTO model_profiles (
+          id, name, provider, base_url, model, api_key, capabilities, reasoning,
+          max_concurrency, response_speed, is_default, created_at, updated_at
+        ) VALUES (
+          'local-qwen35', 'Reserved ID custom model', 'openai-compatible', 'https://custom.example.com/v1',
+          'custom-collision-model', 'collision-secret', '{"marker":"collision"}',
+          '{"mode":"disabled","protocol":"none","display":"auto"}', 4, 'quality', 0,
+          '2026-08-17T00:00:03.000Z', '2026-08-17T00:00:03.000Z'
+        );
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const first = openDatabase(path);
+    try {
+      expect(first.getModelProfileForRuntime('local-qwen35')).toMatchObject({
+        id: 'local-qwen35',
+        name: 'Reserved ID custom model',
+        baseUrl: 'https://custom.example.com/v1',
+        model: 'custom-collision-model',
+        apiKey: 'collision-secret',
+        maxConcurrency: 4,
+      });
+      expect(first.getSnapshot().modelProfiles.filter((profile) =>
+        profile.provider === 'openai-compatible' &&
+        profile.baseUrl === 'http://127.0.0.1:8080/v1' &&
+        profile.model === 'Qwen3.5-9B')).toEqual([
+        expect.objectContaining({ id: 'local-qwen35-2', isDefault: false }),
+      ]);
+    } finally {
+      first.close();
+    }
+
+    const second = openDatabase(path);
+    try {
+      expect(second.getSnapshot().modelProfiles.map((profile) => profile.id).sort()).toEqual([
+        'local-custom',
+        'local-qwen35',
+        'local-qwen35-2',
+        'remote-placeholder',
+      ]);
+      expect(second.getSnapshot().modelProfiles.filter((profile) =>
+        profile.baseUrl === 'http://127.0.0.1:8080/v1' && profile.model === 'Qwen3.5-9B')).toHaveLength(1);
+    } finally {
+      second.close();
+    }
+  });
+
+  it('repairs only the exact v5 local placeholder while preserving identity, default, and API key', () => {
+    const path = createDbPath();
+    createV5ModelProfileDatabase(path);
+
+    const db = openDatabase(path);
+    try {
+      const snapshot = db.getSnapshot();
+      const repaired = snapshot.modelProfiles.find((profile) => profile.id === 'legacy-local');
+      expect(repaired).toMatchObject({
+        id: 'legacy-local',
+        name: 'Legacy local endpoint',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'Qwen3.5-9B',
+        maxConcurrency: 1,
+        maxOutputTokens: 2048,
+        reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
+        capabilities: { reasoning: { inputMode: 'toggle', outputModes: ['raw'] } },
+        isDefault: true,
+        createdAt: '2026-08-17T00:00:00.000Z',
+        apiKeyConfigured: true,
+      });
+      expect(repaired).not.toHaveProperty('apiKey');
+      expect(db.getModelProfileForRuntime('legacy-local')?.apiKey).toBe('keep-this-secret');
+      expect(snapshot.settings.activeModelProfileId).toBe('legacy-local');
+      expect(snapshot.modelProfiles.filter((profile) => profile.model === 'Qwen3.5-9B')).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+
+    const migrated = new DatabaseSync(path);
+    try {
+      expect(migrated.prepare(`
+        SELECT id, name, provider, base_url, model, api_key, capabilities, reasoning,
+               max_concurrency, response_speed, is_default, created_at, updated_at
+        FROM model_profiles
+        WHERE id IN ('remote-placeholder', 'local-custom')
+        ORDER BY id
+      `).all()).toEqual([
+        {
+          id: 'local-custom',
+          name: 'Custom local model',
+          provider: 'openai-compatible',
+          base_url: 'http://127.0.0.1:8080/v1',
+          model: 'my-custom-model',
+          api_key: 'custom-key',
+          capabilities: '{"marker":"local-custom"}',
+          reasoning: '{"mode":"disabled","protocol":"none","display":"auto"}',
+          max_concurrency: 3,
+          response_speed: 'quality',
+          is_default: 0,
+          created_at: '2026-08-17T00:00:02.000Z',
+          updated_at: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          id: 'remote-placeholder',
+          name: 'Remote placeholder',
+          provider: 'openai-compatible',
+          base_url: 'https://models.example.com/v1',
+          model: 'your-model-name',
+          api_key: 'remote-key',
+          capabilities: '{"marker":"remote-placeholder"}',
+          reasoning: '{"mode":"disabled","protocol":"none","display":"auto"}',
+          max_concurrency: 2,
+          response_speed: 'fast',
+          is_default: 0,
+          created_at: '2026-08-17T00:00:01.000Z',
+          updated_at: '2026-08-17T00:00:01.000Z',
+        },
+      ]);
+      expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 },
+      ]);
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it('retains and narrowly repairs multiple exact legacy local placeholders', () => {
+    const path = createDbPath();
+    createV5ModelProfileDatabase(path);
+    const legacy = new DatabaseSync(path);
+    try {
+      legacy.exec(`
+        INSERT INTO model_profiles (
+          id, name, provider, base_url, model, api_key, capabilities, reasoning,
+          max_concurrency, response_speed, is_default, created_at, updated_at
+        ) VALUES (
+          'legacy-local-copy', 'Second legacy local endpoint', 'openai-compatible',
+          'http://127.0.0.1:8080/v1', 'your-model-name', 'second-secret',
+          '{"marker":"second-legacy"}', '{"mode":"auto","protocol":"none","display":"summary"}',
+          5, 'fast', 0, '2026-08-17T00:00:04.000Z', '2026-08-17T00:00:04.000Z'
+        );
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const db = openDatabase(path);
+    try {
+      const snapshot = db.getSnapshot();
+      const repaired = snapshot.modelProfiles
+        .filter((profile) => profile.baseUrl === 'http://127.0.0.1:8080/v1' && profile.model === 'Qwen3.5-9B')
+        .sort((left, right) => left.id.localeCompare(right.id));
+      expect(repaired).toEqual([
+        expect.objectContaining({ id: 'legacy-local', name: 'Legacy local endpoint', isDefault: true }),
+        expect.objectContaining({ id: 'legacy-local-copy', name: 'Second legacy local endpoint', isDefault: false }),
+      ]);
+      expect(db.getModelProfileForRuntime('legacy-local')?.apiKey).toBe('keep-this-secret');
+      expect(db.getModelProfileForRuntime('legacy-local-copy')?.apiKey).toBe('second-secret');
+      expect(snapshot.settings.activeModelProfileId).toBe('legacy-local');
+    } finally {
+      db.close();
+    }
   });
 
   it('merges reasoning fragments into one logical item', () => {
@@ -623,6 +868,38 @@ describe('sqlite app database', () => {
     second.close();
   });
 
+  it('persists a non-default output limit across a partial update and reopen', () => {
+    const dbPath = createDbPath();
+    const first = openDatabase(dbPath);
+    const saved = first.saveModelProfile({
+      name: 'Bounded custom model',
+      provider: 'openai-compatible',
+      baseUrl: 'https://models.example.com/v1',
+      model: 'custom-model',
+      maxOutputTokens: 4096,
+    });
+    const updated = first.saveModelProfile({
+      id: saved.id,
+      name: 'Renamed bounded model',
+      provider: saved.provider,
+      baseUrl: saved.baseUrl,
+      model: saved.model,
+    });
+    expect(updated).toMatchObject({ maxOutputTokens: 4096, isDefault: false });
+    first.close();
+
+    const second = openDatabase(dbPath);
+    try {
+      expect(second.getModelProfileForRuntime(saved.id)).toMatchObject({
+        name: 'Renamed bounded model',
+        maxOutputTokens: 4096,
+        isDefault: false,
+      });
+    } finally {
+      second.close();
+    }
+  });
+
   it('preserves nested capability declarations when saving a partial update', () => {
     const db = openDatabase(createDbPath());
     const saved = db.saveModelProfile({
@@ -755,6 +1032,73 @@ function createPreV3Database(path: string): void {
     id: 'legacy-unfinished-user', threadId: 'legacy-unfinished-thread', turnId: 'legacy-unfinished',
     kind: 'message', role: 'user', text: 'unfinished question', createdAt,
   }), createdAt);
+  legacy.close();
+}
+
+function createV5ModelProfileDatabase(path: string): void {
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+    CREATE TABLE model_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      model TEXT NOT NULL,
+      api_key TEXT,
+      capabilities TEXT NOT NULL,
+      reasoning TEXT NOT NULL,
+      max_concurrency INTEGER NOT NULL DEFAULT 1,
+      response_speed TEXT NOT NULL DEFAULT 'standard',
+      is_default INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE turns (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      model_profile_id TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      error TEXT,
+      incomplete INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL,
+      metrics TEXT
+    );
+    INSERT INTO schema_migrations (version, applied_at) VALUES
+      (1, '2026-08-16T00:00:00.000Z'),
+      (2, '2026-08-16T00:00:01.000Z'),
+      (3, '2026-08-17T00:00:00.000Z'),
+      (4, '2026-08-18T00:00:00.000Z'),
+      (5, '2026-08-18T00:00:01.000Z');
+    INSERT INTO model_profiles (
+      id, name, provider, base_url, model, api_key, capabilities, reasoning,
+      max_concurrency, response_speed, is_default, created_at, updated_at
+    ) VALUES
+      (
+        'legacy-local', 'Legacy local endpoint', 'openai-compatible', 'http://127.0.0.1:8080/v1',
+        'your-model-name', 'keep-this-secret', '{"marker":"legacy-local"}',
+        '{"mode":"auto","protocol":"none","display":"summary"}', 7, 'fast', 1,
+        '2026-08-17T00:00:00.000Z', '2026-08-17T00:00:00.000Z'
+      ),
+      (
+        'remote-placeholder', 'Remote placeholder', 'openai-compatible', 'https://models.example.com/v1',
+        'your-model-name', 'remote-key', '{"marker":"remote-placeholder"}',
+        '{"mode":"disabled","protocol":"none","display":"auto"}', 2, 'fast', 0,
+        '2026-08-17T00:00:01.000Z', '2026-08-17T00:00:01.000Z'
+      ),
+      (
+        'local-custom', 'Custom local model', 'openai-compatible', 'http://127.0.0.1:8080/v1',
+        'my-custom-model', 'custom-key', '{"marker":"local-custom"}',
+        '{"mode":"disabled","protocol":"none","display":"auto"}', 3, 'quality', 0,
+        '2026-08-17T00:00:02.000Z', '2026-08-17T00:00:02.000Z'
+      );
+  `);
   legacy.close();
 }
 

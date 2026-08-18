@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import type { ModelProfileInput } from '../shared/domain';
+import type { ModelConnectionResult, ModelProfileInput } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -87,13 +87,8 @@ function toggleTheme(): void {
   document.documentElement.dataset.theme = theme.value;
 }
 
-async function testModelProfile(profile: ModelProfileInput): Promise<{ ok: boolean; message: string }> {
-  try {
-    const result = await app.testModelProfile(profile);
-    return { ok: true, message: result.message };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : t.value('modelConnectionFailed') };
-  }
+async function testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult> {
+  return app.testModelProfile(profile);
 }
 
 async function updateModelRuntime(patch: {

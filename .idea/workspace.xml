@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ChangeListManager">
+    <list default="true" id="7194cd2f-233b-440c-9baa-3797cadb02a4" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/forge.config.ts" beforeDir="false" afterPath="$PROJECT_DIR$/forge.config.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/package.json" beforeDir="false" afterPath="$PROJECT_DIR$/package.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pnpm-lock.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/pnpm-lock.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agent/database.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agent/database.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agent/modelCapabilities.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agent/modelCapabilities.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agent/modelProvider.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agent/modelProvider.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agent/worker.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agent/worker.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/preload.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/preload.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/App.vue" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/App.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/components/SettingsView.vue" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/components/SettingsView.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/composables/useApp.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/composables/useApp.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/i18n/messages.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/i18n/messages.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/modelProfileForm.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/modelProfileForm.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/styles/app.css" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/styles/app.css" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/types.d.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/types.d.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/shared/domain.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/shared/domain.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/shared/protocol.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/shared/protocol.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/database.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/database.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/e2e/app.spec.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/e2e/app.spec.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/e2e/fakeModelServer.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/e2e/fakeModelServer.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/e2e/live-model.spec.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/e2e/live-model.spec.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/modelCapabilities.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/modelCapabilities.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/modelProvider.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/modelProvider.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/protocol.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/protocol.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/renderer-state.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/renderer-state.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/worker.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/worker.test.ts" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "dyx-9163"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/dyx-9163/ai-aifar.git",
+    "accountId": "e7e4bb7f-de4c-4e40-9878-02de80727468"
+  }
+}]]></component>
+  <component name="ProjectColorInfo"><![CDATA[{
+  "associatedIndex": 7,
+  "fromUser": false
+}]]></component>
+  <component name="ProjectId" id="3I5GbFGF5cOobiOfyNt8nzjmm4p" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.go.formatter.settings.were.checked": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "git-widget-placeholder": "main",
+    "ignore.virus.scanning.warn.message": "true",
+    "kotlin-language-version-configured": "true",
+    "last_opened_file_path": "D:/workspace/AI/2026-08-14/ai-aifar",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "pnpm",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-jdk-30f59d01ecdd-37e91769500f-intellij.indexing.shared.core-IU-261.25134.95" />
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-IU-261.25134.95" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="7194cd2f-233b-440c-9baa-3797cadb02a4" name="Changes" comment="" />
+      <created>1787047085485</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1787047085485</updated>
+      <workItem from="1787047086590" duration="491000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

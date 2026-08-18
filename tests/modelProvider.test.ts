@@ -23,6 +23,7 @@ const profile: RuntimeModelProfile = {
   },
   reasoning: { mode: 'disabled', protocol: 'none', effort: 'medium', display: 'auto' },
   maxConcurrency: 1,
+  maxOutputTokens: 2048,
   responseSpeed: 'standard',
   isDefault: true,
   createdAt: '2026-08-17T00:00:00.000Z',
@@ -37,11 +38,13 @@ const ignoreHandlers: ModelStreamHandlers = {
 };
 
 describe('OpenAI-compatible model provider', () => {
-  it('uses only a bounded structured provider message and redacts every API-key representation', async () => {
+  it('never surfaces provider body text or API-key representations in an HTTP error', async () => {
     const specialKey = ['unit-key-', '"', '\\', '?/'].join('');
+    const echoedPrompt = 'private prompt that must not escape';
+    const echoedResponse = 'private response that must not escape';
     const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({
       error: {
-        message: `request rejected for ${specialKey}; encoded=${encodeURIComponent(specialKey)}`,
+        message: `request rejected for ${specialKey}; prompt=${echoedPrompt}; response=${echoedResponse}`,
         code: 'authentication_failed',
       },
       provider_internal_diagnostic: specialKey,
@@ -56,13 +59,70 @@ describe('OpenAI-compatible model provider', () => {
     ).then(() => undefined, (caught: unknown) => caught);
     const message = error instanceof Error ? error.message : String(error);
 
-    expect(message).toContain('request rejected');
+    expect(message).toBe('Model request was rejected (HTTP 401). Check the profile credentials.');
+    expect(message).not.toContain(echoedPrompt);
+    expect(message).not.toContain(echoedResponse);
     expect(message).not.toContain('provider_internal_diagnostic');
     expect(containsSecretRepresentation(message, specialKey)).toBe(false);
-    expect(message.length).toBeLessThanOrEqual(380);
+    expect(message.length).toBeLessThanOrEqual(96);
   });
 
-  it('times out connection testing even when the fetch implementation ignores abort', async () => {
+  it('maps a bounded structured context rejection to fixed new-chat guidance', async () => {
+    const echoedPrompt = 'confidential context payload';
+    const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({
+      error: {
+        type: 'exceed_context_size_error',
+        code: 'context_length_exceeded',
+        message: echoedPrompt,
+      },
+    }), { status: 400 });
+
+    await expect(streamChatCompletion(
+      profile,
+      [{ role: 'user', content: echoedPrompt }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toBe('Model request exceeds the available context. Start a new chat or lower the history limit.');
+      expect(message).not.toContain(echoedPrompt);
+      return true;
+    });
+  });
+
+  it('bounds provider diagnostic reads before mapping an HTTP error', async () => {
+    let pulls = 0;
+    let cancellations = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new TextEncoder().encode('private-response-body'.repeat(512)));
+      },
+      cancel() {
+        cancellations += 1;
+      },
+    });
+    const fetchImpl = async (): Promise<Response> => ({
+      ok: false,
+      status: 500,
+      body,
+      text: async () => { throw new Error('unbounded response.text() must not be used'); },
+    }) as Response;
+
+    await expect(streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow('Model service failed to process the request (HTTP 500).');
+    expect(pulls).toBeGreaterThan(0);
+    expect(pulls).toBeLessThanOrEqual(2);
+    expect(cancellations).toBe(1);
+  });
+
+  it('returns typed offline when connection testing times out and fetch ignores abort', async () => {
     let resolveFetch!: (response: Response) => void;
     let requestSignal: AbortSignal | undefined;
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -75,10 +135,7 @@ describe('OpenAI-compatible model provider', () => {
 
     let guard: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race([
-      completion.then(
-        () => ({ type: 'completed' as const }),
-        (error: unknown) => ({ type: 'rejected' as const, error }),
-      ),
+      completion.then((result) => ({ type: 'completed' as const, result })),
       new Promise<{ type: 'timed-out' }>((resolve) => {
         guard = setTimeout(() => resolve({ type: 'timed-out' }), 125);
       }),
@@ -88,23 +145,48 @@ describe('OpenAI-compatible model provider', () => {
     if (outcome.type === 'timed-out') await completion;
 
     expect(outcome).toMatchObject({
-      type: 'rejected',
-      error: expect.objectContaining({ message: 'Model connection test timed out after 20ms.' }),
+      type: 'completed',
+      result: {
+        ok: false,
+        status: 'offline',
+        message: 'Model connection test timed out after 20ms.',
+        model: 'Qwen3.5-9B',
+        clientConcurrency: 1,
+      },
     });
     expect(requestSignal?.aborted).toBe(true);
   });
 
-  it('redacts encoded API-key forms from connection-test transport errors', async () => {
+  it('returns exact-model and slot diagnostics through the bounded connection wrapper', async () => {
+    const signalInputs: Array<AbortSignal | null | undefined> = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      signalInputs.push(init?.signal);
+      return signalInputs.length === 1
+        ? Response.json({ data: [{ id: 'Qwen3.5-9B' }] })
+        : Response.json([{ id: 0 }, { id: 1 }]);
+    };
+
+    await expect(testModelProfile(profile, fetchImpl, 100)).resolves.toMatchObject({
+      ok: true,
+      status: 'concurrency-warning',
+      model: 'Qwen3.5-9B',
+      clientConcurrency: 1,
+      serviceSlots: 2,
+    });
+    expect(signalInputs).toHaveLength(2);
+    expect(signalInputs[0]).toBe(signalInputs[1]);
+  });
+
+  it('returns typed offline without encoded API-key forms for connection-test transport errors', async () => {
     const specialKey = ['connection-key-', '"', '\\', '?/'].join('');
     const fetchImpl = async (): Promise<Response> => {
       throw new Error(`transport escaped=${JSON.stringify(specialKey).slice(1, -1)} encoded=${encodeURIComponent(specialKey)}`);
     };
 
-    const error = await testModelProfile({ ...profile, apiKey: specialKey }, fetchImpl)
-      .then(() => undefined, (caught: unknown) => caught);
-    const message = error instanceof Error ? error.message : String(error);
+    const result = await testModelProfile({ ...profile, apiKey: specialKey }, fetchImpl);
+    const message = result.message;
 
-    expect(message).toContain('transport');
+    expect(result).toMatchObject({ ok: false, status: 'offline', model: 'Qwen3.5-9B' });
     expect(containsSecretRepresentation(message, specialKey)).toBe(false);
   });
 
@@ -172,7 +254,9 @@ describe('OpenAI-compatible model provider', () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         sourceController = controller;
-        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+        ));
       },
       cancel() {
         cancelCalls += 1;
@@ -209,7 +293,9 @@ describe('OpenAI-compatible model provider', () => {
     let cancelCalls = 0;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+        ));
       },
       cancel() {
         cancelCalls += 1;
@@ -329,7 +415,10 @@ describe('OpenAI-compatible model provider', () => {
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       requests.push(init ?? {});
       return new Response(
-        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
         { status: 200 },
       );
     };
@@ -339,6 +428,7 @@ describe('OpenAI-compatible model provider', () => {
         ...profile,
         capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
         reasoning: { mode, protocol: 'qwen', effort: 'medium', display: 'auto' },
+        maxOutputTokens: 3072,
       },
       [{ role: 'user', content: 'hello' }],
       ignoreHandlers,
@@ -346,7 +436,14 @@ describe('OpenAI-compatible model provider', () => {
       fetchImpl,
     );
 
-    expect(JSON.parse(String(requests[0]?.body)).chat_template_kwargs).toEqual({ enable_thinking: enableThinking });
+    expect(JSON.parse(String(requests[0]?.body))).toEqual({
+      model: 'Qwen3.5-9B',
+      messages: [{ role: 'user', content: 'hello' }],
+      stream: true,
+      temperature: 0.2,
+      max_tokens: 3072,
+      chat_template_kwargs: { enable_thinking: enableThinking },
+    });
   });
 
   it('sends any declared openai reasoning effort including max', async () => {
@@ -354,7 +451,10 @@ describe('OpenAI-compatible model provider', () => {
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       requests.push(init ?? {});
       return new Response(
-        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
         { status: 200 },
       );
     };
@@ -431,7 +531,10 @@ describe('OpenAI-compatible model provider', () => {
   it('records requested fast response speed without inventing provider timing', async () => {
     const fetchImpl = async (): Promise<Response> =>
       new Response(
-        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
         { status: 200 },
       );
 
@@ -449,7 +552,7 @@ describe('OpenAI-compatible model provider', () => {
     });
   });
 
-  it('keeps raw reasoning out of the answer when the provider returns no answer', async () => {
+  it('fails a DONE-terminated reasoning stream that never produces a final answer', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"reasoning_content":"hidden chain of thought"}}]}\n\n',
       'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
@@ -460,7 +563,7 @@ describe('OpenAI-compatible model provider', () => {
     const answers: string[] = [];
     const raw: string[] = [];
 
-    const metrics = await streamChatCompletion(
+    await expect(streamChatCompletion(
       {
         ...profile,
         capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
@@ -474,11 +577,41 @@ describe('OpenAI-compatible model provider', () => {
       },
       new AbortController().signal,
       fetchImpl,
-    );
+    )).rejects.toThrow('Model stream ended without producing a final answer.');
 
     expect(answers).toEqual([]);
     expect(raw).toEqual(['hidden chain of thought']);
-    expect(metrics.reasoningObserved).toBe(true);
+  });
+
+  it('fails a length-bounded reasoning stream with fixed output-limit guidance', async () => {
+    const privateReasoning = 'private reasoning must not enter the error';
+    const chunks = [
+      `data: {"choices":[{"delta":{"reasoning_content":"${privateReasoning}"}}]}\n\n`,
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      async () => new Response(
+        ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      ),
+    )).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toBe(
+        'Model reached the output-token limit before producing a final answer. Increase the profile output limit or start a new chat.',
+      );
+      expect(message).not.toContain(privateReasoning);
+      return true;
+    });
   });
 
   it('streams raw reasoning, native summary, and answer through independent handlers', async () => {
@@ -519,11 +652,88 @@ describe('OpenAI-compatible model provider', () => {
     expect(answer).toEqual(['最终答案']);
   });
 
+  it('preserves repeated and prefix-like direct deltas exactly across byte-split SSE', async () => {
+    const payload = [
+      'data: {"choices":[{"delta":{"reasoning_content":"同","reasoning_summary":"同","content":"同"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"同思","reasoning_summary":"同摘","content":"同答"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"同思","reasoning_summary":"同摘","content":"同答"}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"思","reasoning_summary":"摘","content":"答"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ].join('');
+    const bytes = new TextEncoder().encode(payload);
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(
+        ReadableStream.from(Array.from(bytes, (byte) => Uint8Array.of(byte))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    const answer: string[] = [];
+    const raw: string[] = [];
+    const summary: string[] = [];
+    const phases: string[] = [];
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      {
+        onAnswerDelta: (delta) => answer.push(delta),
+        onRawReasoningDelta: (delta) => raw.push(delta),
+        onReasoningSummaryDelta: (delta) => summary.push(delta),
+        onPhase: (phase) => phases.push(phase),
+      },
+      new AbortController().signal,
+      fetchImpl,
+      () => 1_000,
+    );
+
+    expect(raw).toEqual(['同', '同思', '同思', '思']);
+    expect(summary).toEqual(['同', '同摘', '同摘', '摘']);
+    expect(answer).toEqual(['同', '同答', '同答', '答']);
+    expect(raw.join('')).toBe('同同思同思思');
+    expect(summary.join('')).toBe('同同摘同摘摘');
+    expect(answer.join('')).toBe('同同答同答答');
+    expect(phases).toEqual(['reasoning', 'answering']);
+  });
+
+  it('deduplicates only repeated explicit SSE event identifiers', async () => {
+    const payload = [
+      'id: token-1\n',
+      'data: {"choices":[{"delta":{"content":"ha"}}]}\n\n',
+      'id: token-1\n',
+      'data: {"choices":[{"delta":{"content":"ha"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"ha"}}]}\n\n',
+      'id: token-2\n',
+      'data: {"choices":[{"delta":{"content":" "}}]}\n\n',
+      'id: token-3\n',
+      'data: {"choices":[{"delta":{"content":"ha"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ].join('');
+    const answer: string[] = [];
+
+    await streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      { ...ignoreHandlers, onAnswerDelta: (delta) => answer.push(delta) },
+      new AbortController().signal,
+      async () => new Response(
+        ReadableStream.from([new TextEncoder().encode(payload)]) as unknown as BodyInit,
+        { status: 200 },
+      ),
+    );
+
+    expect(answer).toEqual(['ha', 'ha', ' ', 'ha']);
+    expect(answer.join('')).toBe('haha ha');
+  });
+
   it('ignores zero-length answer, raw reasoning, and summary deltas', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
       'data: {"choices":[{"delta":{"reasoning_content":""}}]}\n\n',
       'data: {"choices":[{"delta":{"reasoning_summary":""}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
       'data: [DONE]\n\n',
     ];
     const answer: string[] = [];
@@ -547,11 +757,11 @@ describe('OpenAI-compatible model provider', () => {
       () => 1_000,
     );
 
-    expect(answer).toEqual([]);
+    expect(answer).toEqual(['ok']);
     expect(raw).toEqual([]);
     expect(summary).toEqual([]);
-    expect(phases).toEqual([]);
-    expect(metrics.timeToFirstTokenMs).toBeUndefined();
+    expect(phases).toEqual(['answering']);
+    expect(metrics.timeToFirstTokenMs).toBe(0);
     expect(metrics.reasoningObserved).toBe(false);
   });
 
@@ -560,6 +770,7 @@ describe('OpenAI-compatible model provider', () => {
       'data: {"choices":[{"delta":{"reasoning_content":" "}}]}\n\n',
       'data: {"choices":[{"delta":{"reasoning_summary":"  "}}]}\n\n',
       'data: {"choices":[{"delta":{"content":" "}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
       'data: [DONE]\n\n',
     ];
     const answer: string[] = [];
@@ -584,8 +795,27 @@ describe('OpenAI-compatible model provider', () => {
 
     expect(raw).toEqual([' ']);
     expect(summary).toEqual(['  ']);
-    expect(answer).toEqual([' ']);
+    expect(answer).toEqual([' ', 'ok']);
     expect(phases).toEqual(['reasoning', 'answering']);
+  });
+
+  it('fails a stream whose only final-answer deltas are whitespace', async () => {
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"  "},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    const answer: string[] = [];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+
+    await expect(streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      { ...ignoreHandlers, onAnswerDelta: (delta) => answer.push(delta) },
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow('Model stream ended without producing a final answer.');
+    expect(answer).toEqual(['  ']);
   });
 
   it('does not retry a rejected reasoning parameter without reasoning', async () => {
@@ -611,8 +841,8 @@ describe('OpenAI-compatible model provider', () => {
       fetchImpl,
     )).rejects.toSatisfy((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      expect(message).toContain('HTTP 400');
-      expect(message).toContain('reasoning_effort is unsupported');
+      expect(message).toBe('Model request failed with HTTP 400.');
+      expect(message).not.toContain('reasoning_effort is unsupported');
       expect(message).not.toContain('local-not-used');
       expect(message).not.toContain('Bearer');
       return true;
@@ -691,7 +921,10 @@ describe('OpenAI-compatible model provider', () => {
         }), { status: 400 });
       }
       return new Response(
-        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
         { status: 200 },
       );
     };
@@ -712,15 +945,23 @@ describe('OpenAI-compatible model provider', () => {
     expect(JSON.parse(String(requests[1]?.body)).stream_options).toBeUndefined();
   });
 
-  it('retries once without stream_options while preserving reasoning parameters', async () => {
+  it('retries once for a bounded structured stream-usage code while preserving reasoning parameters', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       requests.push(init ?? {});
       if (requests.length === 1) {
-        return new Response('unsupported parameter: stream_options.include_usage', { status: 400 });
+        return new Response(JSON.stringify({
+          error: {
+            code: 'unsupported_stream_options',
+            message: 'private provider diagnostic that must not be surfaced',
+          },
+        }), { status: 400 });
       }
       return new Response(
-        ReadableStream.from(['data: [DONE]\n\n'].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
         { status: 200 },
       );
     };
@@ -746,13 +987,16 @@ describe('OpenAI-compatible model provider', () => {
     const secondBody = JSON.parse(String(requests[1]?.body));
     expect(firstBody.chat_template_kwargs).toEqual({ enable_thinking: true });
     expect(firstBody.stream_options).toEqual({ include_usage: true });
+    expect(firstBody.max_tokens).toBe(profile.maxOutputTokens);
     expect(secondBody.chat_template_kwargs).toEqual({ enable_thinking: true });
     expect(secondBody.stream_options).toBeUndefined();
+    expect(secondBody.max_tokens).toBe(profile.maxOutputTokens);
   });
 
   it('supports the reasoning field alias without mixing it into the answer', async () => {
     const chunks = [
       'data: {"choices":[{"delta":{"reasoning":"raw alias"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"final"}}]}\n\n',
       'data: [DONE]\n\n',
     ];
     const raw: string[] = [];
@@ -777,7 +1021,7 @@ describe('OpenAI-compatible model provider', () => {
     );
 
     expect(raw).toEqual(['raw alias']);
-    expect(answer).toEqual([]);
+    expect(answer).toEqual(['final']);
   });
 
   it('extracts finish reason and token speed from streamed provider metadata', async () => {

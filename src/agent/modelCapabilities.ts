@@ -7,6 +7,9 @@ import type {
   ReasoningProtocol,
 } from '../shared/domain.js';
 import { reasoningConfigurationIssue, type ReasoningConfigurationIssue } from '../shared/reasoningConfiguration.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../shared/modelProfileLimits.js';
+
+export { DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../shared/modelProfileLimits.js';
 
 export function qwenCapabilities(): ModelCapabilities {
   return {
@@ -104,6 +107,13 @@ export function normalizeMaxConcurrency(value: unknown, capabilities: ModelCapab
   const fallback = capabilities.concurrency.defaultLimit;
   const normalized = positiveIntegerOr(value, fallback);
   return Math.min(maxLimit, Math.max(1, normalized));
+}
+
+export function normalizeMaxOutputTokens(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    return DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+  return Math.min(value, MAX_OUTPUT_TOKENS);
 }
 
 export function validateReasoningSelection(profile: RuntimeModelProfile): void {

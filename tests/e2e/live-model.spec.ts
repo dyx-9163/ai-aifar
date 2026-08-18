@@ -10,6 +10,102 @@ const liveModelName = process.env.PRIVATE_AI_LIVE_MODEL_NAME ?? 'Qwen3.5-9B';
 const liveApiKey = process.env.PRIVATE_AI_LIVE_MODEL_API_KEY?.trim();
 const liveOptIn = process.env.PRIVATE_AI_LIVE_MODEL_E2E === '1';
 const packagedExecutable = join(process.cwd(), 'out', 'Private AI Desktop-win32-x64', 'Private AI Desktop.exe');
+const outputLimitWithoutAnswer = 'Model reached the output-token limit before producing a final answer. Increase the profile output limit or start a new chat.';
+
+test('never completes an empty-answer turn at the shipped 2048 output bound', async () => {
+  test.setTimeout(180_000);
+  test.skip(
+    !liveOptIn,
+    'Live model skipped: set PRIVATE_AI_LIVE_MODEL_E2E=1 to opt in to the real endpoint.',
+  );
+  const probe = await probeLiveEndpoint();
+  test.skip(!probe.reachable, probe.reason);
+
+  const userData = mkdtempSync(join(tmpdir(), 'private-ai-live-model-2048-'));
+  const database = openDatabase(join(userData, 'app.sqlite'));
+  database.updateSettings({ reasoningDisplayMode: 'raw' });
+  const profile = database.saveModelProfile({
+    name: 'Live Qwen 2048 bound',
+    provider: 'openai-compatible',
+    baseUrl: liveBaseUrl,
+    model: liveModelName,
+    apiKey: liveApiKey,
+    capabilities: {
+      text: true,
+      vision: false,
+      longContext: false,
+      reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+      concurrency: { defaultLimit: 1, configurable: true, maxLimit: 4 },
+      streaming: true,
+      usage: { tokens: true, reasoningTokens: true },
+    },
+    reasoning: { mode: 'enabled', protocol: 'qwen', display: 'raw' },
+    maxConcurrency: 1,
+    maxOutputTokens: 2048,
+    isDefault: true,
+  });
+  const thread = database.createThread('Live Qwen 2048 bound');
+  database.close();
+
+  let app: ElectronApplication | undefined;
+  try {
+    app = await electron.launch({
+      executablePath: packagedExecutable,
+      args: [],
+      env: { ...process.env, PRIVATE_AI_DESKTOP_USER_DATA: userData },
+    });
+    const page = await app.firstWindow();
+    await page.evaluate(() => {
+      const target = window as typeof window & { __live2048Events?: AgentEvent[] };
+      target.__live2048Events = [];
+      window.desktop.subscribe((event) => target.__live2048Events?.push(event));
+    });
+
+    await page.getByTestId(`thread-row-${thread.id}`).getByRole('button').first().click();
+    await page.getByTestId('composer-input').fill('请先思考 17×19，再用一句简短中文给出最终答案。');
+    await page.getByTestId('composer-send').click();
+    const runtime = page.getByTestId(`thread-row-${thread.id}`).getByTestId('thread-runtime-status');
+    await expect.poll(
+      () => runtime.getAttribute('data-runtime-status'),
+      { timeout: 150_000 },
+    ).toMatch(/^(completed|failed)$/);
+
+    const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
+    const turn = snapshot.turns.find((candidate) => candidate.threadId === thread.id);
+    expect(turn?.modelProfileId).toBe(profile.id);
+    expect(turn?.id).toBeTruthy();
+    const items = snapshot.items[thread.id] ?? [];
+    const answers = items.filter((item) => item.kind === 'message' && item.role === 'assistant');
+    const events = await page.evaluate(() => (
+      window as typeof window & { __live2048Events?: AgentEvent[] }
+    ).__live2048Events ?? []);
+    const terminalEvents = events.filter((event) => (
+      event.type === 'turn.completed' || event.type === 'turn.failed'
+    ) && event.turnId === turn?.id);
+
+    if (turn?.status === 'completed') {
+      expect(turn.incomplete).toBe(false);
+      expect(answers).toHaveLength(1);
+      expect(answers[0]?.text.trim().length).toBeGreaterThan(0);
+      expect(terminalEvents.map((event) => event.type)).toEqual(['turn.completed']);
+      await expect(page.getByTestId('assistant-message-content')).not.toHaveText('');
+    } else {
+      expect(turn?.status).toBe('failed');
+      expect(turn?.incomplete).toBe(true);
+      expect(turn?.error).toBe(outputLimitWithoutAnswer);
+      expect(answers).toHaveLength(0);
+      expect(terminalEvents.map((event) => event.type)).toEqual(['turn.failed']);
+      const failure = terminalEvents[0];
+      expect(failure?.type).toBe('turn.failed');
+      if (failure?.type === 'turn.failed') {
+        expect(failure.error).toBe(outputLimitWithoutAnswer);
+      }
+    }
+  } finally {
+    await app?.close().catch(() => undefined);
+    rmSync(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
 
 test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', async () => {
   test.setTimeout(180_000);
@@ -41,6 +137,7 @@ test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', 
     },
     reasoning: { mode: 'enabled', protocol: 'qwen', display: 'raw' },
     maxConcurrency: 1,
+    maxOutputTokens: 4096,
     isDefault: true,
   });
   const thread = database.createThread('Live Qwen acceptance');

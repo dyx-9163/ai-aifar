@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { LanguagePreference, ModelProfileInput, RuntimeSettingsInput } from './shared/domain.js';
+import type { LanguagePreference, ModelConnectionResult, ModelProfileInput, RuntimeSettingsInput } from './shared/domain.js';
 import type { AgentEvent } from './shared/protocol.js';
 
 contextBridge.exposeInMainWorld('desktop', {
@@ -20,7 +20,8 @@ contextBridge.exposeInMainWorld('desktop', {
   updateSettings: (settings: RuntimeSettingsInput) => ipcRenderer.invoke('desktop:request', { type: 'settings.update', settings }),
   saveModelProfile: (profile: ModelProfileInput) => ipcRenderer.invoke('desktop:request', { type: 'modelProfile.save', profile }),
   deleteModelProfile: (id: string) => ipcRenderer.invoke('desktop:request', { type: 'modelProfile.delete', id }),
-  testModelProfile: (profile: ModelProfileInput) => ipcRenderer.invoke('desktop:request', { type: 'modelProfile.test', profile }),
+  testModelProfile: (profile: ModelProfileInput): Promise<ModelConnectionResult> =>
+    ipcRenderer.invoke('desktop:request', { type: 'modelProfile.test', profile }),
   subscribe: (listener: (event: AgentEvent) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, value: AgentEvent) => listener(value);
     ipcRenderer.on('agent:event', wrapped);

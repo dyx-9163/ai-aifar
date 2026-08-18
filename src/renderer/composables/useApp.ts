@@ -11,6 +11,7 @@ import type {
   ChatGroup,
   Item,
   LanguagePreference,
+  ModelConnectionResult,
   ModelProfile,
   ModelProfileInput,
   ModelResponseSpeed,
@@ -354,7 +355,7 @@ export function useApp() {
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
   }
 
-  async function testModelProfile(profile: ModelProfileInput): Promise<{ ok: true; message: string }> {
+  async function testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult> {
     return window.desktop.testModelProfile(profile);
   }
 

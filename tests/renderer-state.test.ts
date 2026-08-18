@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
-import type { AppSnapshot, Item, ModelCapabilities, ModelProfile, ReasoningItem } from '../src/shared/domain';
+import type { AppSnapshot, Item, ModelCapabilities, ModelConnectionResult, ModelProfile, ReasoningItem } from '../src/shared/domain';
 import { openAiCapabilities, qwenCapabilities } from '../src/agent/modelCapabilities';
+import {
+  isBuiltInLocalQwen,
+  isLocalQwenServiceProfile,
+  LOCAL_QWEN_BASE_URL,
+  LOCAL_QWEN_MODEL,
+  LOCAL_QWEN_PROFILE_ID,
+} from '../src/shared/localQwenIdentity';
 import {
   appendOptimisticUserMessage,
   applyAssistantDeltaToSnapshot,
@@ -18,6 +25,8 @@ import {
   connectionTestStateForFingerprint,
   effortValidationIssue,
   formOperationCanApply,
+  maxOutputTokensIsValid,
+  modelConnectionDiagnostic,
   modelProfileFormFingerprint,
   reasoningConfigurationValidationIssue,
   reconcileEffortSelection,
@@ -73,6 +82,7 @@ function modelProfileFixture(capabilities: ModelCapabilities): ModelProfile {
     capabilities,
     reasoning: { mode: 'enabled', protocol: 'none', display: 'auto' },
     maxConcurrency: 1,
+    maxOutputTokens: 2048,
     responseSpeed: 'standard',
     isDefault: true,
     createdAt: '2026-08-17T00:00:00.000Z',
@@ -302,6 +312,7 @@ describe('renderer state reducer', () => {
       rawOutput: true,
       summaryOutput: true,
       maxConcurrency: 4,
+      maxOutputTokens: 2048,
     };
 
     const input = buildModelProfileInput(form, existing);
@@ -324,6 +335,7 @@ describe('renderer state reducer', () => {
       },
       reasoning: { mode: 'enabled', protocol: 'custom', effort: 'vendor-max', display: 'raw' },
       maxConcurrency: 4,
+      maxOutputTokens: 2048,
       responseSpeed: 'quality',
     });
     expect(input.apiKey).toBeUndefined();
@@ -348,6 +360,7 @@ describe('renderer state reducer', () => {
       rawOutput: false,
       summaryOutput: false,
       maxConcurrency: 1,
+      maxOutputTokens: 2048,
     });
 
     expect(input.capabilities).toMatchObject({
@@ -410,7 +423,7 @@ describe('renderer state reducer', () => {
       name: 'New endpoint', baseUrl: 'http://localhost/v1', model: 'm', apiKey: '', isDefault: true,
       reasoningMode: 'disabled', reasoningProtocol: 'none', reasoningEffort: '', profileReasoningDisplay: 'auto',
       reasoningInputMode: 'unsupported', effortOptions: [], defaultEffort: '', rawOutput: false, summaryOutput: false,
-      maxConcurrency: 1,
+      maxConcurrency: 1, maxOutputTokens: 2048,
     });
     const saved = modelProfileFixture(openAiCapabilities([]));
     let resolveSave: ((profile: ModelProfile) => void) | undefined;
@@ -430,11 +443,117 @@ describe('renderer state reducer', () => {
     })).resolves.toMatchObject({ ok: false, error: new Error('save rejected') });
   });
 
-  it('resets a connection result when any tested profile input changes', () => {
-    const first = { name: 'A', maxConcurrency: 1 };
+  it('round-trips the output token bound and invalidates a tested fingerprint when it changes', () => {
+    const existing = modelProfileFixture(openAiCapabilities([]));
+    const form: ModelProfileFormValues = {
+      id: existing.id,
+      name: existing.name,
+      baseUrl: existing.baseUrl,
+      model: existing.model,
+      apiKey: '',
+      isDefault: existing.isDefault,
+      reasoningMode: existing.reasoning.mode,
+      reasoningProtocol: existing.reasoning.protocol,
+      reasoningEffort: '',
+      profileReasoningDisplay: existing.reasoning.display,
+      reasoningInputMode: existing.capabilities.reasoning.inputMode,
+      effortOptions: [],
+      defaultEffort: '',
+      rawOutput: false,
+      summaryOutput: false,
+      maxConcurrency: existing.maxConcurrency,
+      maxOutputTokens: 2048,
+    };
+    const input = buildModelProfileInput(form, existing);
+
+    expect(input.maxOutputTokens).toBe(2048);
+    const first = { ...input, maxOutputTokens: 2048 };
     const tested = modelProfileFormFingerprint(first);
     expect(connectionTestStateForFingerprint('connected', tested, modelProfileFormFingerprint(first))).toBe('connected');
-    expect(connectionTestStateForFingerprint('connected', tested, modelProfileFormFingerprint({ ...first, maxConcurrency: 2 }))).toBe('untested');
+    expect(connectionTestStateForFingerprint(
+      'connected',
+      tested,
+      modelProfileFormFingerprint({ ...first, maxOutputTokens: 4096 }),
+    )).toBe('untested');
+  });
+
+  it('validates output tokens as a positive integer within the shared upper bound', () => {
+    expect(maxOutputTokensIsValid(1)).toBe(true);
+    expect(maxOutputTokensIsValid(2048)).toBe(true);
+    expect(maxOutputTokensIsValid(32768)).toBe(true);
+    expect(maxOutputTokensIsValid(0)).toBe(false);
+    expect(maxOutputTokensIsValid(1.5)).toBe(false);
+    expect(maxOutputTokensIsValid(32769)).toBe(false);
+  });
+
+  it('offers local runtime guidance for strict equivalent Qwen service profiles after ID collision repair', () => {
+    const builtIn = {
+      id: LOCAL_QWEN_PROFILE_ID,
+      provider: 'openai-compatible' as const,
+      baseUrl: LOCAL_QWEN_BASE_URL,
+      model: LOCAL_QWEN_MODEL,
+    };
+    expect(isBuiltInLocalQwen(builtIn)).toBe(true);
+    expect(isBuiltInLocalQwen({ ...builtIn, id: 'custom-qwen' })).toBe(false);
+    expect(isLocalQwenServiceProfile({ ...builtIn, id: 'local-qwen35-2' })).toBe(true);
+    expect(isLocalQwenServiceProfile({ ...builtIn, provider: 'another-provider' as never })).toBe(false);
+    expect(isLocalQwenServiceProfile({ ...builtIn, baseUrl: 'http://127.0.0.1:9000/v1' })).toBe(false);
+    expect(isLocalQwenServiceProfile({ ...builtIn, model: 'another-model' })).toBe(false);
+  });
+
+  it.each([
+    [{ ok: true, status: 'connected', message: '', model: 'Qwen3.5-9B', clientConcurrency: 2, serviceSlots: 2 }, false,
+      'connected Qwen3.5-9B slots=2 client=2'],
+    [{ ok: true, status: 'concurrency-warning', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1, serviceSlots: 3 }, false,
+      'warning Qwen3.5-9B slots=3 client=1'],
+    [{ ok: true, status: 'slots-unverified', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1 }, false,
+      'unverified Qwen3.5-9B'],
+    [{ ok: false, status: 'model-mismatch', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1 }, false,
+      'mismatch Qwen3.5-9B'],
+    [{ ok: false, status: 'offline', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1 }, false,
+      'offline Qwen3.5-9B'],
+    [{ ok: false, status: 'offline', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1 }, true,
+      'offline Qwen3.5-9B command=model-runtime\\start-model.ps1'],
+  ] satisfies Array<[ModelConnectionResult, boolean, string]>)('renders a typed diagnostic without lifecycle coupling', (result, builtIn, expected) => {
+    const templates: Record<string, string> = {
+      connectionConnectedDiagnostic: 'connected {model} slots={slots} client={concurrency}',
+      connectionConcurrencyWarningDiagnostic: 'warning {model} slots={slots} client={concurrency}',
+      connectionSlotsUnverifiedDiagnostic: 'unverified {model}',
+      connectionModelMismatchDiagnostic: 'mismatch {model}',
+      connectionOfflineDiagnostic: 'offline {model}',
+      connectionOfflineLocalQwenCommand: 'command=model-runtime\\start-model.ps1',
+    };
+
+    expect(modelConnectionDiagnostic(result, (key) => templates[key] ?? key, builtIn)).toBe(expected);
+  });
+
+  it('caps an arbitrary configured model identifier in renderer diagnostics', () => {
+    const configuredModel = `private-${'m'.repeat(4_096)}`;
+    const displayedModel = `${configuredModel.slice(0, 95)}…`;
+    const diagnostic = modelConnectionDiagnostic({
+      ok: false,
+      status: 'model-mismatch',
+      message: 'Configured model is not advertised by the model endpoint.',
+      model: configuredModel,
+      clientConcurrency: 1,
+    }, (key) => key === 'connectionModelMismatchDiagnostic' ? 'mismatch {model}' : key, false);
+
+    expect([...displayedModel]).toHaveLength(96);
+    expect(diagnostic).toBe(`mismatch ${displayedModel}`);
+    expect(diagnostic).not.toContain(configuredModel);
+  });
+
+  it('rejects an unknown connection status instead of presenting it as offline', () => {
+    const futureResult = {
+      ok: false,
+      status: 'future-status',
+      message: 'future',
+      model: 'model',
+      clientConcurrency: 1,
+    } as unknown as ModelConnectionResult;
+
+    expect(() => modelConnectionDiagnostic(futureResult, (key) => key, false))
+      .toThrow('Unsupported model connection status.');
   });
 
   it('does not apply a pending profile A save after the form switches to edited profile B', async () => {

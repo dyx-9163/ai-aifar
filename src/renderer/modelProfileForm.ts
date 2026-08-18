@@ -1,5 +1,7 @@
 import type {
   ModelCapabilities,
+  ModelConnectionResult,
+  ModelConnectionStatus,
   ModelProfile,
   ModelProfileInput,
   ReasoningDisplayMode,
@@ -11,6 +13,7 @@ import {
   reasoningConfigurationIssue,
   type ReasoningConfigurationIssue,
 } from '../shared/reasoningConfiguration';
+import { MAX_OUTPUT_TOKENS } from '../shared/modelProfileLimits';
 
 export interface ModelProfileFormValues {
   id?: string;
@@ -29,6 +32,7 @@ export interface ModelProfileFormValues {
   rawOutput: boolean;
   summaryOutput: boolean;
   maxConcurrency: number;
+  maxOutputTokens: number;
 }
 
 export interface EffortSelectionInput {
@@ -40,7 +44,58 @@ export interface EffortSelectionInput {
 }
 
 export type EffortValidationIssue = 'effortOptionsRequired' | 'defaultEffortInvalid' | 'currentEffortInvalid';
-export type ConnectionTestState = 'untested' | 'testing' | 'connected' | 'failed';
+export type ConnectionTestState = 'untested' | 'testing' | 'failed' | ModelConnectionStatus;
+
+/** Maximum Unicode code points shown for a configured model identifier in Settings diagnostics. */
+export const MAX_MODEL_IDENTIFIER_DISPLAY_LENGTH = 96;
+
+export function maxOutputTokensIsValid(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= MAX_OUTPUT_TOKENS;
+}
+
+type ConnectionDiagnosticTranslationKey =
+  | 'connectionConnectedDiagnostic'
+  | 'connectionConcurrencyWarningDiagnostic'
+  | 'connectionSlotsUnverifiedDiagnostic'
+  | 'connectionModelMismatchDiagnostic'
+  | 'connectionOfflineDiagnostic'
+  | 'connectionOfflineLocalQwenCommand';
+
+export function modelConnectionDiagnostic(
+  result: ModelConnectionResult,
+  translate: (key: ConnectionDiagnosticTranslationKey) => string,
+  showLocalQwenCommand: boolean,
+): string {
+  let key: ConnectionDiagnosticTranslationKey;
+  switch (result.status) {
+    case 'connected':
+      key = 'connectionConnectedDiagnostic';
+      break;
+    case 'concurrency-warning':
+      key = 'connectionConcurrencyWarningDiagnostic';
+      break;
+    case 'slots-unverified':
+      key = 'connectionSlotsUnverifiedDiagnostic';
+      break;
+    case 'model-mismatch':
+      key = 'connectionModelMismatchDiagnostic';
+      break;
+    case 'offline':
+      key = 'connectionOfflineDiagnostic';
+      break;
+    default:
+      return assertNever(result);
+  }
+
+  const diagnostic = replaceDiagnosticValues(translate(key), result);
+  return result.status === 'offline' && showLocalQwenCommand
+    ? `${diagnostic} ${translate('connectionOfflineLocalQwenCommand')}`
+    : diagnostic;
+}
+
+function assertNever(_value: never): never {
+  throw new Error('Unsupported model connection status.');
+}
 
 export interface FormOperationSnapshot {
   token: number;
@@ -105,6 +160,7 @@ export function buildModelProfileInput(
       display: form.profileReasoningDisplay,
     },
     maxConcurrency: form.maxConcurrency,
+    maxOutputTokens: form.maxOutputTokens,
     responseSpeed: existing?.responseSpeed,
   };
 }
@@ -174,6 +230,27 @@ export function connectionTestStateForFingerprint(
 
 function reasoningEffortIsActive(input: EffortSelectionInput): boolean {
   return input.inputMode === 'effort' && (input.reasoningMode === 'enabled' || input.reasoningMode === 'auto');
+}
+
+function replaceDiagnosticValues(template: string, result: ModelConnectionResult): string {
+  const serviceSlots = result.status === 'connected' || result.status === 'concurrency-warning'
+    ? result.serviceSlots
+    : undefined;
+  return template
+    .replace('{model}', modelIdentifierForDisplay(result.model))
+    .replace('{concurrency}', String(result.clientConcurrency))
+    .replace('{slots}', serviceSlots === undefined ? '—' : String(serviceSlots));
+}
+
+function modelIdentifierForDisplay(value: string): string {
+  const displayed: string[] = [];
+  for (const codePoint of value) {
+    if (displayed.length === MAX_MODEL_IDENTIFIER_DISPLAY_LENGTH) {
+      return `${displayed.slice(0, MAX_MODEL_IDENTIFIER_DISPLAY_LENGTH - 1).join('')}…`;
+    }
+    displayed.push(codePoint);
+  }
+  return displayed.join('');
 }
 
 function canonicalCapabilities(): ModelCapabilities {

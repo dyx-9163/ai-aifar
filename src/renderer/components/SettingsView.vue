@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue';
 import type {
   AppSettings,
   LanguagePreference,
+  ModelConnectionResult,
   ModelProfile,
   ModelProfileInput,
   ReasoningDisplayMode,
@@ -11,6 +12,8 @@ import type {
   ReasoningProtocol,
   RuntimeSettingsInput,
 } from '../../shared/domain';
+import { isLocalQwenServiceProfile } from '../../shared/localQwenIdentity';
+import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../../shared/modelProfileLimits';
 import type { Translator } from '../i18n';
 import {
   buildModelProfileInput,
@@ -18,6 +21,8 @@ import {
   connectionTestStateForFingerprint,
   effortValidationIssue,
   formOperationCanApply,
+  maxOutputTokensIsValid,
+  modelConnectionDiagnostic,
   modelProfileFormFingerprint,
   reconcileEffortSelection,
   reasoningConfigurationValidationIssue,
@@ -33,7 +38,7 @@ const props = defineProps<{
   settings: AppSettings;
   t: Translator;
   saveModelProfile: (profile: ModelProfileInput) => Promise<ModelProfile>;
-  testModelProfile: (profile: ModelProfileInput) => Promise<{ ok: boolean; message: string }>;
+  testModelProfile: (profile: ModelProfileInput) => Promise<ModelConnectionResult>;
 }>();
 
 const emit = defineEmits<{
@@ -47,6 +52,8 @@ const emit = defineEmits<{
 const modelStatus = ref(props.t('apiKeyNotice'));
 const activeSection = ref<'general' | 'models' | 'runtime'>('models');
 const connectionTestState = ref<ConnectionTestState>('untested');
+const connectionResult = ref<ModelConnectionResult>();
+const connectionGuidanceForLocalQwen = ref(false);
 const testedFingerprint = ref<string>();
 const saving = ref(false);
 const testingConnection = ref(false);
@@ -72,6 +79,7 @@ const form = reactive({
   rawOutput: false,
   summaryOutput: false,
   maxConcurrency: 1,
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
 });
 
 const effortOptions = computed(() => [...new Set(
@@ -82,7 +90,15 @@ const effortOptions = computed(() => [...new Set(
 )]);
 const editingProfile = computed(() => props.modelProfiles.find((profile) => profile.id === form.id));
 const maxConcurrencyLimit = computed(() => editingProfile.value?.capabilities.concurrency.maxLimit ?? 32);
+const connectionDiagnostic = computed(() => {
+  const result = connectionResult.value;
+  if (!result) return '';
+  return modelConnectionDiagnostic(result, props.t, connectionGuidanceForLocalQwen.value);
+});
 const capabilityError = computed(() => {
+  if (!maxOutputTokensIsValid(form.maxOutputTokens)) {
+    return props.t('maxOutputTokensError').replace('{max}', String(MAX_OUTPUT_TOKENS));
+  }
   if (!Number.isInteger(form.maxConcurrency) || form.maxConcurrency < 1 || form.maxConcurrency > maxConcurrencyLimit.value) {
     return props.t('maxConcurrencyError').replace('{max}', String(maxConcurrencyLimit.value));
   }
@@ -138,6 +154,10 @@ watch(
       testedFingerprint.value,
       fingerprint,
     );
+    if (connectionTestState.value === 'untested') {
+      connectionResult.value = undefined;
+      connectionGuidanceForLocalQwen.value = false;
+    }
   },
   { flush: 'sync' },
 );
@@ -159,9 +179,12 @@ function loadProfile(profile: ModelProfile): void {
   form.rawOutput = profile.capabilities.reasoning.outputModes.includes('raw');
   form.summaryOutput = profile.capabilities.reasoning.outputModes.includes('summary');
   form.maxConcurrency = profile.maxConcurrency;
+  form.maxOutputTokens = profile.maxOutputTokens;
   synchronizeEffortSelection();
   testedFingerprint.value = undefined;
   connectionTestState.value = 'untested';
+  connectionResult.value = undefined;
+  connectionGuidanceForLocalQwen.value = false;
   modelStatus.value = profile.apiKeyConfigured ? props.t('savedProfileLoadedKeepKey') : props.t('savedProfileLoaded');
 }
 
@@ -182,9 +205,12 @@ function resetForm(): void {
   form.rawOutput = false;
   form.summaryOutput = false;
   form.maxConcurrency = 1;
+  form.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
   synchronizeEffortSelection();
   testedFingerprint.value = undefined;
   connectionTestState.value = 'untested';
+  connectionResult.value = undefined;
+  connectionGuidanceForLocalQwen.value = false;
   modelStatus.value = props.t('readyToAddModel');
 }
 
@@ -206,6 +232,7 @@ function inputFromForm(): ModelProfileInput {
     rawOutput: form.rawOutput,
     summaryOutput: form.summaryOutput,
     maxConcurrency: form.maxConcurrency,
+    maxOutputTokens: form.maxOutputTokens,
   };
   return buildModelProfileInput(values, editingProfile.value);
 }
@@ -251,6 +278,8 @@ async function testProfile(): Promise<void> {
   testedFingerprint.value = submitted.fingerprint;
   connectionTestState.value = 'testing';
   testingConnection.value = true;
+  connectionResult.value = undefined;
+  connectionGuidanceForLocalQwen.value = false;
   try {
     const result = await props.testModelProfile(input);
     const current = captureFormOperation(activeConnectionOperationToken.value, inputFromForm(), formRevision.value);
@@ -261,12 +290,16 @@ async function testProfile(): Promise<void> {
       }
       return;
     }
-    connectionTestState.value = result.ok ? 'connected' : 'failed';
-    modelStatus.value = result.ok ? props.t('connectionSucceededCapabilitiesUnverified') : result.message;
+    connectionTestState.value = result.status;
+    connectionResult.value = result;
+    connectionGuidanceForLocalQwen.value = isLocalQwenServiceProfile(input);
+    modelStatus.value = props.t('connectionTestCompleted');
   } catch (error) {
     const current = captureFormOperation(activeConnectionOperationToken.value, inputFromForm(), formRevision.value);
     if (formOperationCanApply(submitted, current)) {
       connectionTestState.value = 'failed';
+      connectionResult.value = undefined;
+      connectionGuidanceForLocalQwen.value = false;
       modelStatus.value = error instanceof Error ? error.message : props.t('modelConnectionFailed');
     }
   } finally {
@@ -515,6 +548,18 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                   :disabled="editingProfile?.capabilities.concurrency.configurable === false"
                 />
               </label>
+              <label class="field-stack">
+                <span>{{ t('maximumOutputTokens') }}</span>
+                <input
+                  v-model.number="form.maxOutputTokens"
+                  class="text-input"
+                  data-testid="max-output-tokens-input"
+                  type="number"
+                  min="1"
+                  :max="MAX_OUTPUT_TOKENS"
+                  step="1"
+                />
+              </label>
               <p v-if="form.reasoningInputMode === 'custom'" class="settings-warning capability-wide">
                 {{ t('customCapabilityWarning') }}
               </p>
@@ -526,6 +571,16 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
         </div>
 
         <p class="settings-note">{{ modelStatus }}</p>
+        <p
+          v-if="connectionDiagnostic"
+          class="model-connection-diagnostic"
+          data-testid="model-connection-diagnostic"
+          :data-state="connectionTestState"
+          role="status"
+          aria-live="polite"
+        >
+          {{ connectionDiagnostic }}
+        </p>
 
         <div class="approval-actions">
           <button type="button" class="secondary-button compact" :disabled="!form.id || saving" @click="deleteProfile">{{ t('delete') }}</button>

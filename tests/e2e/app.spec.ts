@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from 'playwright/test';
 import { openDatabase } from '../../src/agent/database';
+import { qwenCapabilities } from '../../src/agent/modelCapabilities';
+import {
+  LOCAL_QWEN_BASE_URL,
+  LOCAL_QWEN_MODEL,
+  LOCAL_QWEN_PROFILE_ID,
+} from '../../src/agent/localQwenProfile';
 import type { ReasoningDisplayMode, ReasoningOutputMode, ThreadSummary, TurnRecord } from '../../src/shared/domain';
 import type { AgentEvent } from '../../src/shared/protocol';
 import { startFakeModelServer, type FakeModelServer } from './fakeModelServer';
@@ -64,6 +70,78 @@ test('fake model server releases a controlled provider HTTP failure', async () =
     await expect(response.json()).resolves.toEqual({ error: { message: 'controlled failure' } });
   } finally {
     await server.close();
+  }
+});
+
+test('shows output bounds and read-only direct-service diagnostics in Settings', async () => {
+  const userData = createUserData('settings-diagnostics');
+  const server = await startFakeModelServer(8080);
+  server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slots: 1 });
+  const seedDb = openDatabase(join(userData, 'app.sqlite'));
+  seedDb.saveModelProfile({
+    id: LOCAL_QWEN_PROFILE_ID,
+    name: 'Local Qwen3.5-9B',
+    provider: 'openai-compatible',
+    baseUrl: LOCAL_QWEN_BASE_URL,
+    model: LOCAL_QWEN_MODEL,
+    capabilities: qwenCapabilities(),
+    reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
+    maxConcurrency: 1,
+    maxOutputTokens: 2048,
+    isDefault: true,
+  });
+  seedDb.close();
+  let app: ElectronApplication | undefined;
+  let serverClosed = false;
+  try {
+    app = await launchPackagedApp(userData);
+    const page = await app.firstWindow();
+    await page.getByTitle('Open settings').click();
+    const maxOutputTokens = page.getByTestId('max-output-tokens-input');
+    await expect(maxOutputTokens).toHaveValue('2048', { timeout: 2_000 });
+    for (const invalid of ['0', '1.5', '32769']) {
+      await maxOutputTokens.fill(invalid);
+      await expect(page.getByTestId('capability-validation-error')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled();
+    }
+    await maxOutputTokens.fill('2048');
+    await expect(page.getByTestId('capability-validation-error')).toHaveCount(0);
+
+    const testConnection = page.getByRole('button', { name: 'Test connection' });
+    const status = page.getByTestId('capability-test-status');
+    const diagnostic = page.getByTestId('model-connection-diagnostic');
+
+    await testConnection.click();
+    await expect(status).toHaveAttribute('data-state', 'connected');
+    await expect(diagnostic).toContainText(LOCAL_QWEN_MODEL);
+
+    server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slots: 3 });
+    await testConnection.click();
+    await expect(status).toHaveAttribute('data-state', 'concurrency-warning');
+    await expect(diagnostic).toContainText('3');
+    await expect(diagnostic).toContainText('1');
+
+    server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slotsStatus: 404 });
+    await testConnection.click();
+    await expect(status).toHaveAttribute('data-state', 'slots-unverified');
+
+    server.setConnectionState({ modelIds: ['another-model'], slots: 1 });
+    await testConnection.click();
+    await expect(status).toHaveAttribute('data-state', 'model-mismatch');
+    await expect(diagnostic).toContainText(LOCAL_QWEN_MODEL);
+
+    await server.close();
+    serverClosed = true;
+    await testConnection.click();
+    await expect(status).toHaveAttribute('data-state', 'offline');
+    await expect(diagnostic).toContainText('model-runtime\\start-model.ps1');
+    await expect(diagnostic.locator('button')).toHaveCount(0);
+    await expect(diagnostic.locator('a')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^(Start|Stop|Restart|Status)$/ })).toHaveCount(0);
+  } finally {
+    await closeElectron(app);
+    if (!serverClosed) await server.close();
+    removeUserData(userData);
   }
 });
 

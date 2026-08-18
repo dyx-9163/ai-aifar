@@ -1,7 +1,9 @@
 import type { RuntimeModelProfile } from './database.js';
-import type { MetricSource, ModelRunMetrics, ModelRunPhase } from '../shared/domain.js';
+import type { MetricSource, ModelConnectionResult, ModelRunMetrics, ModelRunPhase } from '../shared/domain.js';
 import { safeErrorText } from '../shared/redaction.js';
 import { validateReasoningSelection } from './modelCapabilities.js';
+import { inspectModelConnection } from './modelConnection.js';
+import { createStreamTextNormalizer } from './streamTextNormalizer.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -31,6 +33,7 @@ type ParsedStreamChunk = {
 
 const DEFAULT_MODEL_RUN_TIMEOUT_MS = 5 * 60 * 1_000;
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 10_000;
+const MAX_PROVIDER_ERROR_BYTES = 8_192;
 
 export async function streamChatCompletion(
   profile: RuntimeModelProfile,
@@ -124,39 +127,28 @@ export async function testModelProfile(
   profile: RuntimeModelProfile,
   fetchImpl: FetchLike = fetch,
   timeoutMs = DEFAULT_CONNECTION_TEST_TIMEOUT_MS,
-): Promise<{ ok: true; message: string }> {
-  const headers: Record<string, string> = {};
-  if (profile.apiKey) {
-    headers.Authorization = `Bearer ${profile.apiKey}`;
-  }
-
+): Promise<ModelConnectionResult> {
   const controller = new AbortController();
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
+  const timeout = new Promise<ModelConnectionResult>((resolve) => {
     timer = setTimeout(() => {
       timedOut = true;
       controller.abort(new DOMException('Model connection test timed out.', 'TimeoutError'));
-      reject(new Error(`Model connection test timed out after ${timeoutMs}ms.`));
+      resolve(connectionTimeoutResult(profile, timeoutMs));
     }, Math.max(1, timeoutMs));
   });
-  let response: Response;
   try {
-    response = await Promise.race([
-      fetchImpl(`${profile.baseUrl.replace(/\/$/, '')}/models`, { headers, signal: controller.signal }),
+    return await Promise.race([
+      inspectModelConnection(profile, fetchImpl, controller.signal),
       timeout,
     ]);
   } catch (error) {
-    if (timedOut) throw new Error(`Model connection test timed out after ${timeoutMs}ms.`);
+    if (timedOut) return connectionTimeoutResult(profile, timeoutMs);
     throw new Error(safeErrorText(error, profile.apiKey ? [profile.apiKey] : [], 500));
   } finally {
     if (timer) clearTimeout(timer);
   }
-  if (!response.ok) {
-    throw new Error(`Model endpoint returned HTTP ${response.status}.`);
-  }
-
-  return { ok: true, message: `Connected to ${profile.name} (${profile.model}).` };
 }
 
 async function readSseDeltas(
@@ -169,11 +161,95 @@ async function readSseDeltas(
   let buffer = '';
   const metrics: StreamedMetrics = {};
   let currentPhase: ModelRunPhase = 'connecting';
+  const answer = createStreamTextNormalizer('incremental');
+  const rawReasoning = createStreamTextNormalizer('incremental');
+  const reasoningSummary = createStreamTextNormalizer('incremental');
+  const seenEventDataById = new Map<string, string>();
+  let eventDataLines: string[] = [];
+  let eventId: string | undefined;
+
+  const dispatchEvent = async (): Promise<boolean> => {
+    const data = eventDataLines.join('\n');
+    const identity = eventId;
+    eventDataLines = [];
+    eventId = undefined;
+    if (!data) return false;
+
+    if (identity) {
+      const previousData = seenEventDataById.get(identity);
+      if (previousData !== undefined) {
+        if (previousData !== data) {
+          throw new Error('Model stream reused an SSE event identifier with conflicting data.');
+        }
+        return false;
+      }
+      seenEventDataById.set(identity, data);
+    }
+
+    if (data.trim() === '[DONE]') {
+      assertFinalAnswer(answer.value(), metrics.finishReason);
+      return true;
+    }
+
+    const chunk = parseStreamChunk(data);
+    const answerDelta = chunk.answerDelta === undefined ? undefined : answer.push(chunk.answerDelta);
+    const rawReasoningDelta = chunk.rawReasoningDelta === undefined
+      ? undefined
+      : rawReasoning.push(chunk.rawReasoningDelta);
+    const reasoningSummaryDelta = chunk.reasoningSummaryDelta === undefined
+      ? undefined
+      : reasoningSummary.push(chunk.reasoningSummaryDelta);
+    const hasReasoning = rawReasoningDelta !== undefined || reasoningSummaryDelta !== undefined;
+    if (hasReasoning && currentPhase === 'connecting') {
+      currentPhase = 'reasoning';
+      await handlers.onPhase(currentPhase);
+    }
+    if (rawReasoningDelta !== undefined) {
+      await handlers.onRawReasoningDelta(rawReasoningDelta);
+    }
+    if (reasoningSummaryDelta !== undefined) {
+      await handlers.onReasoningSummaryDelta(reasoningSummaryDelta);
+    }
+    if (answerDelta !== undefined) {
+      if (currentPhase !== 'answering') {
+        currentPhase = 'answering';
+        await handlers.onPhase(currentPhase);
+      }
+      await handlers.onAnswerDelta(answerDelta);
+    }
+    if (hasReasoning) {
+      metrics.reasoningObserved = true;
+    }
+    if (chunk.finishReason !== undefined) {
+      metrics.finishReason = chunk.finishReason;
+    }
+    Object.assign(metrics, chunk.usage);
+    return false;
+  };
+
+  const consumeLine = async (line: string): Promise<boolean> => {
+    if (line === '') return dispatchEvent();
+    if (line.startsWith(':')) return false;
+    const separator = line.indexOf(':');
+    const field = separator === -1 ? line : line.slice(0, separator);
+    let value = separator === -1 ? '' : line.slice(separator + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'data') {
+      eventDataLines.push(value);
+    } else if (field === 'id' && !value.includes('\0')) {
+      eventId = value;
+    }
+    return false;
+  };
 
   try {
     while (true) {
       const { done, value } = await readWithAbort(reader, signal);
       if (done) {
+        buffer += decoder.decode();
+        if (buffer && await consumeLine(buffer.replace(/\r$/, ''))) return metrics;
+        if (eventDataLines.length > 0 && await dispatchEvent()) return metrics;
+        assertFinalAnswer(answer.value(), metrics.finishReason);
         return metrics;
       }
       if (!value) {
@@ -185,45 +261,7 @@ async function readSseDeltas(
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) {
-          continue;
-        }
-
-        const data = trimmed.slice('data:'.length).trim();
-        if (!data) {
-          continue;
-        }
-        if (data === '[DONE]') {
-          return metrics;
-        }
-
-        const chunk = parseStreamChunk(data);
-        const hasReasoning = chunk.rawReasoningDelta !== undefined || chunk.reasoningSummaryDelta !== undefined;
-        if (hasReasoning && currentPhase === 'connecting') {
-          currentPhase = 'reasoning';
-          await handlers.onPhase(currentPhase);
-        }
-        if (chunk.rawReasoningDelta !== undefined) {
-          await handlers.onRawReasoningDelta(chunk.rawReasoningDelta);
-        }
-        if (chunk.reasoningSummaryDelta !== undefined) {
-          await handlers.onReasoningSummaryDelta(chunk.reasoningSummaryDelta);
-        }
-        if (chunk.answerDelta !== undefined) {
-          if (currentPhase !== 'answering') {
-            currentPhase = 'answering';
-            await handlers.onPhase(currentPhase);
-          }
-          await handlers.onAnswerDelta(chunk.answerDelta);
-        }
-        if (hasReasoning) {
-          metrics.reasoningObserved = true;
-        }
-        if (chunk.finishReason !== undefined) {
-          metrics.finishReason = chunk.finishReason;
-        }
-        Object.assign(metrics, chunk.usage);
+        if (await consumeLine(line.replace(/\r$/, ''))) return metrics;
       }
     }
   } finally {
@@ -340,10 +378,10 @@ async function requestChatCompletion(
     if (retry.ok) {
       return retry;
     }
-    throw await modelRequestError(retry, profile.apiKey);
+    throw await modelRequestError(retry);
   }
 
-  throw modelRequestErrorFromBody(first.status, firstBody, profile.apiKey);
+  throw modelRequestErrorFromBody(first.status, firstBody);
 }
 
 function buildChatCompletionBody(
@@ -356,6 +394,7 @@ function buildChatCompletionBody(
     messages,
     stream: true,
     temperature: 0.2,
+    max_tokens: profile.maxOutputTokens,
   };
 
   if (includeUsage && profile.capabilities.usage.tokens) {
@@ -429,20 +468,55 @@ function parseStreamChunk(data: string): ParsedStreamChunk {
   return chunk;
 }
 
-async function modelRequestError(response: Response, apiKey: string | undefined): Promise<Error> {
-  return modelRequestErrorFromBody(response.status, await readErrorBody(response), apiKey);
+async function modelRequestError(response: Response): Promise<Error> {
+  return modelRequestErrorFromBody(response.status, await readErrorBody(response));
 }
 
-function modelRequestErrorFromBody(status: number, body: string, apiKey: string | undefined): Error {
-  const excerpt = redactResponseExcerpt(parseStructuredProviderError(body)?.message ?? body, apiKey);
-  return new Error(`Model request failed with HTTP ${status}${excerpt ? `: ${excerpt}` : '.'}`);
+function modelRequestErrorFromBody(status: number, body: string): Error {
+  const metadata = parseStructuredProviderError(body);
+  if (isContextLimitError(status, metadata)) {
+    return new Error('Model request exceeds the available context. Start a new chat or lower the history limit.');
+  }
+  if (status === 401 || status === 403) {
+    return new Error(`Model request was rejected (HTTP ${status}). Check the profile credentials.`);
+  }
+  if (status === 404) {
+    return new Error('Model request failed with HTTP 404. Check the configured base URL and model.');
+  }
+  if (status === 429) {
+    return new Error('Model service rate-limited the request (HTTP 429). Try again later.');
+  }
+  if (status >= 500 && status <= 599) {
+    return new Error(`Model service failed to process the request (HTTP ${status}).`);
+  }
+  return new Error(`Model request failed with HTTP ${status}.`);
 }
 
 async function readErrorBody(response: Response): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let remaining = MAX_PROVIDER_ERROR_BYTES;
+  let result = '';
   try {
-    return await response.text();
+    while (remaining > 0) {
+      const { done, value } = await reader.read();
+      if (done) {
+        result += decoder.decode();
+        break;
+      }
+      if (!value) continue;
+      const accepted = value.subarray(0, remaining);
+      result += decoder.decode(accepted, { stream: accepted.byteLength === value.byteLength });
+      remaining -= accepted.byteLength;
+      if (accepted.byteLength < value.byteLength || remaining === 0) break;
+    }
+    result += decoder.decode();
+    return result;
   } catch {
     return '';
+  } finally {
+    cancelReaderWithoutBlocking(reader);
   }
 }
 
@@ -455,17 +529,19 @@ function isStreamUsageCompatibilityError(status: number, body: string): boolean 
   if (structured?.code) {
     return isStreamUsageCode(structured.code);
   }
-  return explicitlyRejectsStreamUsage(structured?.message ?? body);
+  return false;
 }
 
-function parseStructuredProviderError(body: string): { param?: string; code?: string; message?: string } | undefined {
+type StructuredProviderError = { param?: string; code?: string; type?: string };
+
+function parseStructuredProviderError(body: string): StructuredProviderError | undefined {
   try {
-    const parsed = JSON.parse(body) as { error?: { param?: unknown; code?: unknown; message?: unknown } };
+    const parsed = JSON.parse(body) as { error?: { param?: unknown; code?: unknown; type?: unknown } };
     if (!parsed.error || typeof parsed.error !== 'object') return undefined;
     return {
-      param: typeof parsed.error.param === 'string' ? parsed.error.param : undefined,
-      code: typeof parsed.error.code === 'string' ? parsed.error.code : undefined,
-      message: typeof parsed.error.message === 'string' ? parsed.error.message : undefined,
+      param: boundedProviderIdentifier(parsed.error.param),
+      code: boundedProviderIdentifier(parsed.error.code),
+      type: boundedProviderIdentifier(parsed.error.type),
     };
   } catch {
     return undefined;
@@ -483,20 +559,47 @@ function isStreamUsageCode(code: string): boolean {
   return /(?:^|[._-])(?:stream_options|include_usage)(?:$|[._-])/.test(code.trim().toLowerCase());
 }
 
-function explicitlyRejectsStreamUsage(message: string): boolean {
-  const target = '(?:stream_options(?:\\.include_usage)?|include_usage)';
-  const problem = '(?:unsupported|not\\s+supported|unknown|unrecognized|invalid)';
-  const normalized = message.toLowerCase();
-  return new RegExp(`${problem}(?:\\s+request)?(?:\\s+parameter)?\\s*[:=]?\\s*["']?${target}\\b`).test(normalized)
-    || new RegExp(`\\b${target}\\b\\s+(?:is\\s+)?${problem}`).test(normalized);
+function boundedProviderIdentifier(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9._-]{1,96}$/.test(value) ? value : undefined;
+}
+
+function isContextLimitError(status: number, metadata: StructuredProviderError | undefined): boolean {
+  if (status === 413) return true;
+  const identifiers = [metadata?.code, metadata?.type, metadata?.param]
+    .filter((value): value is string => value !== undefined)
+    .map((value) => value.toLowerCase());
+  return identifiers.some((value) => [
+    'context_length_exceeded',
+    'context_window_exceeded',
+    'exceed_context_size_error',
+    'input_too_long',
+    'prompt_too_long',
+    'request_too_large',
+  ].includes(value));
 }
 
 function nonEmptyStreamText(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function redactResponseExcerpt(body: string, apiKey: string | undefined): string {
-  return safeErrorText(body, apiKey ? [apiKey] : [], 320, '');
+function connectionTimeoutResult(profile: RuntimeModelProfile, timeoutMs: number): ModelConnectionResult {
+  return {
+    ok: false,
+    status: 'offline',
+    message: `Model connection test timed out after ${timeoutMs}ms.`,
+    model: profile.model,
+    clientConcurrency: profile.maxConcurrency,
+  };
+}
+
+function assertFinalAnswer(answer: string, finishReason: string | undefined): void {
+  if (answer.trim().length > 0) return;
+  if (finishReason === 'length') {
+    throw new Error(
+      'Model reached the output-token limit before producing a final answer. Increase the profile output limit or start a new chat.',
+    );
+  }
+  throw new Error('Model stream ended without producing a final answer.');
 }
 
 function throwIfAborted(signal: AbortSignal): void {

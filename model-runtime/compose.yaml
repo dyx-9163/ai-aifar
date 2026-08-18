@@ -1,0 +1,126 @@
+name: ai-aifar-model
+
+services:
+  llama-cpu:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    profiles: ["cpu"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../models/Qwen_Qwen3.5-9B-Q4_K_M.gguf:/models/Qwen_Qwen3.5-9B-Q4_K_M.gguf:ro
+      - ../models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf:/models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf:ro
+    command:
+      - --model
+      - /models/Qwen_Qwen3.5-9B-Q4_K_M.gguf
+      - --mmproj
+      - /models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf
+      - --alias
+      - Qwen3.5-9B
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --parallel
+      - ${LLAMA_PARALLEL}
+      - --ctx-size
+      - ${LLAMA_CTX_SIZE}
+      - --n-predict
+      - ${LLAMA_N_PREDICT}
+      - --n-gpu-layers
+      - "0"
+      - --cont-batching
+      - --metrics
+      - --slots
+      - --jinja
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+
+  llama-hybrid:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    profiles: ["hybrid"]
+    gpus: all
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../models/Qwen_Qwen3.5-9B-Q4_K_M.gguf:/models/Qwen_Qwen3.5-9B-Q4_K_M.gguf:ro
+      - ../models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf:/models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf:ro
+    command:
+      - --model
+      - /models/Qwen_Qwen3.5-9B-Q4_K_M.gguf
+      - --mmproj
+      - /models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf
+      - --alias
+      - Qwen3.5-9B
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --parallel
+      - ${LLAMA_PARALLEL}
+      - --ctx-size
+      - ${LLAMA_CTX_SIZE}
+      - --n-predict
+      - ${LLAMA_N_PREDICT}
+      - --n-gpu-layers
+      - ${LLAMA_GPU_LAYERS_HYBRID}
+      - --cont-batching
+      - --metrics
+      - --slots
+      - --jinja
+      - --flash-attn
+      - "on"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+
+  llama-gpu:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    profiles: ["gpu"]
+    gpus: all
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../models/Qwen_Qwen3.5-9B-Q4_K_M.gguf:/models/Qwen_Qwen3.5-9B-Q4_K_M.gguf:ro
+      - ../models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf:/models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf:ro
+    command:
+      - --model
+      - /models/Qwen_Qwen3.5-9B-Q4_K_M.gguf
+      - --mmproj
+      - /models/mmproj-Qwen_Qwen3.5-9B-bf16.gguf
+      - --alias
+      - Qwen3.5-9B
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --parallel
+      - ${LLAMA_PARALLEL}
+      - --ctx-size
+      - ${LLAMA_CTX_SIZE}
+      - --n-predict
+      - ${LLAMA_N_PREDICT}
+      - --n-gpu-layers
+      - "999"
+      - --cont-batching
+      - --metrics
+      - --slots
+      - --jinja
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s

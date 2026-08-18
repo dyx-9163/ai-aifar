@@ -228,6 +228,7 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
     isCapabilitiesInput(value.capabilities) &&
     isReasoningInput(value.reasoning) &&
     (value.maxConcurrency === undefined || isPositiveInteger(value.maxConcurrency)) &&
+    (value.maxOutputTokens === undefined || isPositiveInteger(value.maxOutputTokens)) &&
     (value.responseSpeed === undefined || isModelResponseSpeed(value.responseSpeed)) &&
     (value.isDefault === undefined || typeof value.isDefault === 'boolean')
   );

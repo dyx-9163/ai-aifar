@@ -3,6 +3,7 @@ import type {
   Approval,
   Item,
   MessageItem,
+  ModelConnectionResult,
   ModelProfileInput,
   ModelRunMetrics,
   ReasoningItem,
@@ -36,6 +37,7 @@ import {
 } from './modelProvider.js';
 import {
   normalizeMaxConcurrency,
+  normalizeMaxOutputTokens,
   normalizeProfileCapabilities,
   normalizeReasoningSettings,
 } from './modelCapabilities.js';
@@ -414,7 +416,7 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
     return profile;
   }
   if (message.type === 'modelProfile.delete') return database.deleteModelProfile(message.id);
-  if (message.type === 'modelProfile.test') return testModelProfile(runtimeProfileFromInput(message.profile, database));
+  if (message.type === 'modelProfile.test') return testRuntimeModelProfileConnection(message.profile, database);
   if (message.type === 'language.set') return database.setLanguage(message.language);
   if (message.type === 'settings.update') return database.updateSettings(message.settings);
   if (message.type === 'approval.respond') {
@@ -448,6 +450,14 @@ function persistStreamEvent(database: AppDatabase, event: SequencedEvent, create
   }
 }
 
+export function testRuntimeModelProfileConnection(
+  input: ModelProfileInput,
+  db: AppDatabase,
+  connectionTest: (profile: RuntimeModelProfile) => Promise<ModelConnectionResult> = testModelProfile,
+): Promise<ModelConnectionResult> {
+  return connectionTest(runtimeProfileFromInput(input, db));
+}
+
 function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): RuntimeModelProfile {
   const existing = input.id ? db.getModelProfileForRuntime(input.id) : undefined;
   const reasoningInput = { ...existing?.reasoning, ...input.reasoning };
@@ -471,6 +481,7 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
       input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit,
       capabilities,
     ),
+    maxOutputTokens: normalizeMaxOutputTokens(input.maxOutputTokens ?? existing?.maxOutputTokens),
     responseSpeed: input.responseSpeed ?? existing?.responseSpeed ?? 'standard',
     isDefault: input.isDefault ?? existing?.isDefault ?? false,
     createdAt: existing?.createdAt ?? new Date().toISOString(),

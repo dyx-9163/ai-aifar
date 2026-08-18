@@ -20,10 +20,17 @@ import type {
 } from '../shared/domain.js';
 import {
   normalizeMaxConcurrency,
+  normalizeMaxOutputTokens,
   normalizeModelCapabilities,
   normalizeProfileCapabilities,
   normalizeReasoningSettings,
 } from './modelCapabilities.js';
+import {
+  isLegacyLocalQwenPlaceholder,
+  LOCAL_QWEN_BASE_URL,
+  LOCAL_QWEN_MODEL,
+  localQwenProfileInput,
+} from './localQwenProfile.js';
 
 export interface AppDatabase {
   getSnapshot(): AppSnapshot;
@@ -114,6 +121,7 @@ type ModelProfileRow = {
   capabilities: string;
   reasoning: string;
   max_concurrency: number;
+  max_output_tokens: number;
   response_speed: string | null;
   is_default: number;
   created_at: string;
@@ -534,6 +542,7 @@ class SqliteAppDatabase implements AppDatabase {
         input.maxConcurrency ?? existing?.maxConcurrency ?? capabilities.concurrency.defaultLimit,
         capabilities,
       ),
+      maxOutputTokens: normalizeMaxOutputTokens(input.maxOutputTokens ?? existing?.maxOutputTokens),
       responseSpeed: normalizeResponseSpeed(input.responseSpeed ?? existing?.responseSpeed),
       isDefault: Boolean(input.isDefault),
       createdAt: existing?.createdAt ?? now,
@@ -547,8 +556,8 @@ class SqliteAppDatabase implements AppDatabase {
       }
       this.db
         .prepare(
-          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, max_concurrency, response_speed, is_default, created_at, updated_at)
-           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :maxConcurrency, :responseSpeed, :isDefault, :createdAt, :updatedAt)
+          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at)
+           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :maxConcurrency, :maxOutputTokens, :responseSpeed, :isDefault, :createdAt, :updatedAt)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              provider = excluded.provider,
@@ -558,6 +567,7 @@ class SqliteAppDatabase implements AppDatabase {
              capabilities = excluded.capabilities,
              reasoning = excluded.reasoning,
              max_concurrency = excluded.max_concurrency,
+             max_output_tokens = excluded.max_output_tokens,
              response_speed = excluded.response_speed,
              is_default = excluded.is_default,
              updated_at = excluded.updated_at`,
@@ -572,6 +582,7 @@ class SqliteAppDatabase implements AppDatabase {
           capabilities: JSON.stringify(profile.capabilities),
           reasoning: JSON.stringify(profile.reasoning),
           maxConcurrency: profile.maxConcurrency,
+          maxOutputTokens: profile.maxOutputTokens,
           responseSpeed: profile.responseSpeed,
           isDefault: profile.isDefault ? 1 : 0,
           createdAt: profile.createdAt,
@@ -691,6 +702,7 @@ class SqliteAppDatabase implements AppDatabase {
         api_key TEXT,
         capabilities TEXT NOT NULL,
         max_concurrency INTEGER NOT NULL DEFAULT 1,
+        max_output_tokens INTEGER NOT NULL DEFAULT 2048,
         is_default INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -732,6 +744,12 @@ class SqliteAppDatabase implements AppDatabase {
     this.applyMigration(3, () => this.migrateLegacyTurnCompletion());
     this.applyMigration(4, () => this.ensureColumn('turns', 'metrics', 'ALTER TABLE turns ADD COLUMN metrics TEXT'));
     this.applyMigration(5, () => this.repairMislabelledLegacyCompletion());
+    this.applyMigration(6, () => this.ensureColumn(
+      'model_profiles',
+      'max_output_tokens',
+      'ALTER TABLE model_profiles ADD COLUMN max_output_tokens INTEGER NOT NULL DEFAULT 2048',
+    ));
+    this.applyMigration(7, () => this.repairOrSeedLocalQwenProfile());
     this.interruptUnfinishedTurns();
   }
 
@@ -891,6 +909,86 @@ class SqliteAppDatabase implements AppDatabase {
 
   private repairMislabelledLegacyCompletion(): void {
     this.completeLegacyTurns('interrupted');
+  }
+
+  private repairOrSeedLocalQwenProfile(): void {
+    const preset = localQwenProfileInput();
+    const rows = this.db
+      .prepare('SELECT id, provider, base_url, model FROM model_profiles')
+      .all() as Array<{ id: string; provider: ModelProfile['provider']; base_url: string; model: string }>;
+    const placeholders = rows.filter((row) => isLegacyLocalQwenPlaceholder({
+      provider: row.provider,
+      baseUrl: row.base_url,
+      model: row.model,
+    }));
+
+    if (placeholders.length > 0) {
+      const update = this.db.prepare(`
+        UPDATE model_profiles
+        SET model = :model,
+            capabilities = :capabilities,
+            reasoning = :reasoning,
+            max_concurrency = :maxConcurrency,
+            max_output_tokens = :maxOutputTokens,
+            updated_at = :updatedAt
+        WHERE id = :id
+      `);
+      const updatedAt = new Date().toISOString();
+      for (const placeholder of placeholders) {
+        update.run({
+          id: placeholder.id,
+          model: preset.model,
+          capabilities: JSON.stringify(preset.capabilities),
+          reasoning: JSON.stringify(preset.reasoning),
+          maxConcurrency: preset.maxConcurrency,
+          maxOutputTokens: preset.maxOutputTokens,
+          updatedAt,
+        });
+      }
+      return;
+    }
+
+    const equivalent = rows.some((row) =>
+      row.provider === 'openai-compatible' &&
+      row.base_url === LOCAL_QWEN_BASE_URL &&
+      row.model === LOCAL_QWEN_MODEL);
+    if (equivalent) {
+      return;
+    }
+
+    const occupiedIds = new Set(rows.map((row) => row.id));
+    let presetId = preset.id;
+    for (let suffix = 2; occupiedIds.has(presetId); suffix += 1) {
+      presetId = `${preset.id}-${suffix}`;
+    }
+
+    const now = new Date().toISOString();
+    const isDefault = this.defaultModelProfileId() === undefined;
+    this.db.prepare(`
+      INSERT INTO model_profiles (
+        id, name, provider, base_url, model, api_key, capabilities, reasoning,
+        max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at
+      ) VALUES (
+        :id, :name, :provider, :baseUrl, :model, NULL, :capabilities, :reasoning,
+        :maxConcurrency, :maxOutputTokens, 'standard', :isDefault, :createdAt, :updatedAt
+      )
+    `).run({
+      id: presetId,
+      name: preset.name,
+      provider: preset.provider,
+      baseUrl: preset.baseUrl,
+      model: preset.model,
+      capabilities: JSON.stringify(preset.capabilities),
+      reasoning: JSON.stringify(preset.reasoning),
+      maxConcurrency: preset.maxConcurrency,
+      maxOutputTokens: preset.maxOutputTokens,
+      isDefault: isDefault ? 1 : 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (isDefault) {
+      this.upsertSetting('activeModelProfileId', presetId);
+    }
   }
 
   private completeLegacyTurns(status: 'running' | 'interrupted'): void {
@@ -1099,6 +1197,7 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
     capabilities,
     reasoning,
     maxConcurrency: normalizeMaxConcurrency(row.max_concurrency, capabilities),
+    maxOutputTokens: normalizeMaxOutputTokens(row.max_output_tokens),
     responseSpeed: normalizeResponseSpeed(row.response_speed),
     isDefault: row.is_default === 1,
     createdAt: row.created_at,

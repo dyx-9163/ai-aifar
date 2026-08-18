@@ -5,6 +5,7 @@ import type {
   AppSnapshot,
   ChatGroup,
   LanguagePreference,
+  ModelConnectionResult,
   ModelProfile,
   ModelProfileInput,
   RuntimeSettingsInput,
@@ -29,7 +30,7 @@ declare global {
       updateSettings(settings: RuntimeSettingsInput): Promise<AppSettings>;
       saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile>;
       deleteModelProfile(id: string): Promise<void>;
-      testModelProfile(profile: ModelProfileInput): Promise<{ ok: true; message: string }>;
+      testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult>;
       subscribe(listener: (event: AgentEvent) => void): () => void;
     };
   }

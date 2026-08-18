@@ -3,24 +3,44 @@ import { createServer, type ServerResponse } from 'node:http';
 export interface FakeModelServer {
   baseUrl: string;
   requestCount(): number;
+  setConnectionState(state: FakeConnectionState): void;
   releaseNext(parts: Array<{ answer?: string; rawReasoning?: string; summary?: string }>): void;
   failNext(status: number, body: unknown): void;
   close(): Promise<void>;
+}
+
+export interface FakeConnectionState {
+  modelIds?: string[];
+  modelStatus?: number;
+  slots?: number;
+  slotsStatus?: number;
 }
 
 interface PendingResponse {
   response: ServerResponse;
 }
 
-export async function startFakeModelServer(): Promise<FakeModelServer> {
+export async function startFakeModelServer(port = 0): Promise<FakeModelServer> {
   const pending: PendingResponse[] = [];
   let completionRequestCount = 0;
+  let connectionState: FakeConnectionState = { modelIds: ['task-9-fake'], slots: 1 };
 
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (request.method === 'GET' && url.pathname === '/v1/models') {
-      response.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
-      response.end(JSON.stringify({ object: 'list', data: [{ id: 'task-9-fake', object: 'model' }] }));
+      const status = connectionState.modelStatus ?? 200;
+      response.writeHead(status, { 'content-type': 'application/json', connection: 'close' });
+      response.end(JSON.stringify({
+        object: 'list',
+        data: (connectionState.modelIds ?? ['task-9-fake']).map((id) => ({ id, object: 'model' })),
+      }));
+      return;
+    }
+
+    if (request.method === 'GET' && url.pathname === '/slots') {
+      const status = connectionState.slotsStatus ?? 200;
+      response.writeHead(status, { 'content-type': 'application/json', connection: 'close' });
+      response.end(JSON.stringify(Array.from({ length: connectionState.slots ?? 1 }, (_value, id) => ({ id }))));
       return;
     }
 
@@ -37,7 +57,7 @@ export async function startFakeModelServer(): Promise<FakeModelServer> {
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.off('error', reject);
       resolve();
     });
@@ -52,6 +72,9 @@ export async function startFakeModelServer(): Promise<FakeModelServer> {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requestCount: () => completionRequestCount,
+    setConnectionState(state) {
+      connectionState = { ...state };
+    },
     releaseNext(parts) {
       const next = takePendingResponse(pending);
 
