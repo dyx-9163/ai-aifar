@@ -460,10 +460,12 @@ describe('worker turn runtime', () => {
   });
 
   it('keeps quote and backslash API-key encodings out of SQLite and renderer events', async () => {
-    const specialKey = ['worker-key-', '"', '\\', '?/'].join('');
+    const specialKey = ['worker key-', '"', '\\', '?/[]'].join('');
     const escapedKey = JSON.stringify(specialKey).slice(1, -1);
+    const encodedKey = mixedPercentCase(encodeURIComponent(specialKey).replace(/%20/g, '+'));
+    const encodedTwice = mixedPercentCase(encodeURIComponent(encodedKey));
     const harness = createHarness(async () => {
-      throw new Error(`provider rejected escaped=${escapedKey}; encoded=${encodeURIComponent(specialKey)}`);
+      throw new Error(`provider rejected escaped=${escapedKey}; encoded=${encodedKey}; repeated=${encodedTwice}`);
     }, specialKey);
     const thread = harness.database.createThread('Encoded failure');
     const { turnId } = harness.runtime.startTurn({
@@ -736,5 +738,25 @@ async function eventually(assertion: () => void): Promise<void> {
 
 function containsSecretRepresentation(text: string, secret: string): boolean {
   const jsonEscaped = JSON.stringify(secret).slice(1, -1);
-  return [secret, jsonEscaped, encodeURIComponent(secret)].some((candidate) => text.includes(candidate));
+  const encoded = encodeURIComponent(secret);
+  const formEncoded = encoded.replace(/%20/g, '+');
+  return [
+    secret,
+    jsonEscaped,
+    encoded,
+    mixedPercentCase(encoded),
+    mixedPercentCase(encodeURIComponent(encoded)),
+    mixedPercentCase(formEncoded),
+    mixedPercentCase(encodeURIComponent(formEncoded)),
+  ].some((candidate) => text.includes(candidate));
+}
+
+function mixedPercentCase(value: string): string {
+  let letter = 0;
+  return value.replace(/%([0-9A-F]{2})/g, (_escape, hex: string) => `%${[...hex].map((digit) => {
+    if (!/[A-F]/.test(digit)) return digit;
+    const mixed = letter % 2 === 0 ? digit.toLowerCase() : digit.toUpperCase();
+    letter += 1;
+    return mixed;
+  }).join('')}`);
 }

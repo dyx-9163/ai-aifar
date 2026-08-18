@@ -325,7 +325,15 @@ test('keeps answer raw reasoning and summary separate through UI copy and SQLite
 test('redacts a provider failure secret from the failed turn event UI and SQLite', async () => {
   const userData = createUserData('provider-failure');
   const server = await startFakeModelServer();
-  const seeded = seedWorkspace(userData, server, 1, ['Provider failure']);
+  const seeded = seedWorkspace(
+    userData,
+    server,
+    1,
+    ['Provider failure'],
+    ['raw'],
+    'auto',
+    ['task9 key-', '"', '\\', '?/[]'].join(''),
+  );
   let app: ElectronApplication | undefined;
   let eventFixture = '';
   let turnId = '';
@@ -341,14 +349,17 @@ test('redacts a provider failure secret from the failed turn event UI and SQLite
 
     await submitOnThread(page, thread.id, 'trigger provider failure');
     await expect.poll(() => server.requestCount()).toBe(1);
+    const secretRepresentations = encodedSecretRepresentations(seeded.apiKey);
     server.failNext(401, {
-      error: { message: `provider rejected credential ${seeded.apiKey}` },
+      error: { message: `provider rejected credential ${secretRepresentations.join(' | ')}` },
     });
 
     await expectThreadRuntime(page, thread.id, 'failed');
     const visibleError = page.getByTestId('turn-error');
     await expect(visibleError).toBeVisible();
-    await expect(visibleError).not.toContainText(seeded.apiKey);
+    for (const representation of secretRepresentations) {
+      await expect(visibleError).not.toContainText(representation);
+    }
     expect((await visibleError.innerText()).trim()).not.toBe('');
 
     const snapshot = await page.evaluate(() => window.desktop.getSnapshot());
@@ -363,7 +374,9 @@ test('redacts a provider failure secret from the failed turn event UI and SQLite
       expect(failureEvent.error.trim()).not.toBe('');
     }
     eventFixture = JSON.stringify(failureEvents);
-    expect(eventFixture).not.toContain(seeded.apiKey);
+    for (const representation of secretRepresentations) {
+      expect(eventFixture).not.toContain(representation);
+    }
 
     await closeElectron(app);
     app = undefined;
@@ -430,10 +443,11 @@ function seedWorkspace(
   titles: string[],
   outputModes: ReasoningOutputMode[] = ['raw'],
   reasoningDisplayMode: ReasoningDisplayMode = 'auto',
+  apiKeyOverride?: string,
 ): SeededWorkspace {
   const databasePath = join(userData, 'app.sqlite');
   const database = openDatabase(databasePath);
-  const apiKey = `task9-${randomUUID()}`;
+  const apiKey = apiKeyOverride ?? `task9-${randomUUID()}`;
   database.updateSettings({ reasoningDisplayMode });
   const profile = database.saveModelProfile({
     name: `Task 9 fake ${maxConcurrency}`,
@@ -563,8 +577,33 @@ function verifyFailedTurn(databasePath: string, turnId: string, apiKey: string):
     } | undefined;
     expect(turn?.status).toBe('failed');
     expect(turn?.error?.trim()).not.toBe('');
-    expect(turn?.error).not.toContain(apiKey);
+    for (const representation of encodedSecretRepresentations(apiKey)) {
+      expect(turn?.error).not.toContain(representation);
+    }
   } finally {
     database.close();
   }
+}
+
+function encodedSecretRepresentations(secret: string): string[] {
+  const encoded = encodeURIComponent(secret);
+  const formEncoded = encoded.replace(/%20/g, '+');
+  return [
+    secret,
+    JSON.stringify(secret).slice(1, -1),
+    mixedPercentCase(encoded),
+    mixedPercentCase(encodeURIComponent(encoded)),
+    mixedPercentCase(formEncoded),
+    mixedPercentCase(encodeURIComponent(formEncoded)),
+  ];
+}
+
+function mixedPercentCase(value: string): string {
+  let letter = 0;
+  return value.replace(/%([0-9A-F]{2})/g, (_escape, hex: string) => `%${[...hex].map((digit) => {
+    if (!/[A-F]/.test(digit)) return digit;
+    const mixed = letter % 2 === 0 ? digit.toLowerCase() : digit.toUpperCase();
+    letter += 1;
+    return mixed;
+  }).join('')}`);
 }
