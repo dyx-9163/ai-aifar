@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import type { ModelProfileInput } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
@@ -12,9 +12,14 @@ const app = useApp();
 const theme = ref<'light' | 'dark'>('dark');
 const view = ref<'chat' | 'settings'>('chat');
 const runtimeError = ref('');
+const approvalError = ref('');
 
 const activeThreadId = computed(() => app.state.value.activeThreadId);
 const t = computed(() => createTranslator(app.state.value.snapshot.settings.language));
+
+watch(activeThreadId, () => {
+  approvalError.value = '';
+});
 
 onMounted(() => {
   document.documentElement.dataset.theme = theme.value;
@@ -94,6 +99,15 @@ async function updateModelRuntime(patch: {
     runtimeError.value = error instanceof Error ? error.message : t.value('modelConnectionFailed');
   }
 }
+
+async function respondApproval(approvalId: string, approved: boolean): Promise<void> {
+  approvalError.value = '';
+  try {
+    await app.respondApproval(approvalId, approved);
+  } catch {
+    approvalError.value = t.value('approvalResponseFailed');
+  }
+}
 </script>
 
 <template>
@@ -146,9 +160,11 @@ async function updateModelRuntime(patch: {
       :turns="app.activeTurns.value"
       :settings="app.state.value.snapshot.settings"
       :busy="app.activeBusy.value"
+      :approval-response-in-flight="app.approvalResponseInFlightId.value === app.activePendingApproval.value?.id"
+      :approval-error="approvalError"
       :t="t"
-      @approve="app.respondApproval($event, true)"
-      @reject="app.respondApproval($event, false)"
+      @approve="respondApproval($event, true)"
+      @reject="respondApproval($event, false)"
     />
 
     <SettingsView

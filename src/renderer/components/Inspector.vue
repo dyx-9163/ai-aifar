@@ -10,6 +10,8 @@ const props = defineProps<{
   turns: TurnRecord[];
   settings: AppSettings;
   busy: boolean;
+  approvalResponseInFlight: boolean;
+  approvalError?: string;
   t: Translator;
 }>();
 
@@ -88,14 +90,19 @@ function speedValue(metrics: ModelRunMetrics): string {
       </div>
     </section>
 
-    <section v-if="pendingApproval" class="approval-panel">
-      <p class="pane-label">{{ t('approval') }}</p>
-      <h2>{{ pendingApproval.title }}</h2>
-      <p>{{ pendingApproval.description }}</p>
-      <div class="approval-actions">
-        <button type="button" class="secondary-button" :disabled="pendingApproval.status !== 'pending'" @click="$emit('reject', pendingApproval.id)">{{ t('reject') }}</button>
-        <button type="button" class="primary-action compact" :disabled="pendingApproval.status !== 'pending'" @click="$emit('approve', pendingApproval.id)">{{ t('approve') }}</button>
-      </div>
+    <section v-if="pendingApproval || approvalError" class="approval-panel">
+      <template v-if="pendingApproval">
+        <p class="pane-label">{{ t('approval') }}</p>
+        <h2>{{ pendingApproval.title }}</h2>
+        <p>{{ pendingApproval.description }}</p>
+        <div class="approval-actions">
+          <button type="button" class="secondary-button" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('reject', pendingApproval.id)">{{ t('reject') }}</button>
+          <button type="button" class="primary-action compact" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('approve', pendingApproval.id)">{{ t('approve') }}</button>
+        </div>
+      </template>
+      <p v-if="approvalError" class="runtime-control-error" data-testid="approval-response-error" role="status">
+        {{ approvalError }}
+      </p>
     </section>
 
     <section class="inspector-section">

@@ -745,7 +745,45 @@ function reconcileSnapshot(
   for (const threadId of threadIds) {
     items[threadId] = reconcileThreadItems(current.items[threadId] ?? [], incoming.items[threadId] ?? [], statuses);
   }
-  return { ...incoming, items };
+  return {
+    ...incoming,
+    items,
+    approvals: reconcileApprovals(current.approvals, incoming.approvals, statuses, incoming.threads.map((thread) => thread.id)),
+  };
+}
+
+function reconcileApprovals(
+  current: Approval[],
+  incoming: Approval[],
+  statuses: Map<string, ThreadRuntimeState['status']>,
+  incomingThreadIds: string[],
+): Approval[] {
+  const approvals = new Map(incoming.map((approval) => [approval.id, approval]));
+  for (const approval of current) {
+    const snapshotApproval = approvals.get(approval.id);
+    if (!snapshotApproval) {
+      approvals.set(approval.id, approval);
+      continue;
+    }
+    approvals.set(
+      approval.id,
+      approval.status !== 'pending' && snapshotApproval.status === 'pending'
+        ? approval
+        : snapshotApproval,
+    );
+  }
+
+  const knownThreads = new Set(incomingThreadIds);
+  return [...approvals.values()].flatMap((approval) => {
+    const terminal = isTerminalStatus(statuses.get(approval.turnId));
+    if (!knownThreads.has(approval.threadId) && terminal) {
+      return [];
+    }
+    if (approval.status === 'pending' && terminal) {
+      return [{ ...approval, status: 'rejected' as const }];
+    }
+    return [approval];
+  });
 }
 
 function reconcileThreadItems(

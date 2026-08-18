@@ -191,6 +191,80 @@ describe('renderer state reducer', () => {
     expect(ready).toBe(false);
   });
 
+  it('reconciles approvals monotonically across buffered events and an older initial snapshot', async () => {
+    let state = { ...emptyState(), activeThreadId: 'thread-1' };
+    let listener: ((event: AgentEvent) => void) | undefined;
+    let resolveSnapshot!: (snapshot: AppSnapshot) => void;
+    const sync = startInitialAgentSync({
+      readState: () => state,
+      writeState: (next) => { state = next; },
+      getSnapshot: () => new Promise<AppSnapshot>((resolve) => { resolveSnapshot = resolve; }),
+      subscribe: (next) => {
+        listener = next;
+        return () => undefined;
+      },
+      onReady: () => undefined,
+    });
+    listener?.(approvalEvent());
+    resolveSnapshot({
+      ...emptyState().snapshot,
+      groups: [{
+        id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
+      }],
+      threads: [{
+        id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'running',
+        createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
+      }],
+      turns: [{
+        id: 'turn-1', threadId: 'thread-1', status: 'running', createdAt: '2026-08-17T00:00:00.000Z', incomplete: true,
+      }],
+    });
+    await sync.ready;
+
+    expect(state.snapshot.approvals).toContainEqual(expect.objectContaining({ id: 'approval-1', status: 'pending' }));
+    sync.dispose();
+
+    state = reduceEvent(state, {
+      type: 'turn.cancelled', threadId: 'thread-1', turnId: 'turn-1', modelProfileId: 'model-1', sequence: 3,
+    });
+    state = reduceEvent(state, {
+      type: 'snapshot',
+      snapshot: {
+        ...state.snapshot,
+        approvals: [{
+          id: 'approval-1', threadId: 'thread-1', turnId: 'turn-1', title: 'Approve change',
+          description: 'Stale pending approval.', status: 'pending', createdAt: '2026-08-17T00:00:00.000Z',
+        }],
+      },
+    });
+    expect(state.snapshot.approvals).toContainEqual(expect.objectContaining({ id: 'approval-1', status: 'rejected' }));
+    expect(state.pendingApproval).toBeUndefined();
+  });
+
+  it('unsubscribes and stops buffering when initial snapshot loading rejects', async () => {
+    let state = emptyState();
+    let listener: ((event: AgentEvent) => void) | undefined;
+    const unsubscribe = vi.fn();
+    const sync = startInitialAgentSync({
+      readState: () => state,
+      writeState: (next) => { state = next; },
+      getSnapshot: async () => { throw new Error('snapshot unavailable'); },
+      subscribe: (next) => {
+        listener = next;
+        return unsubscribe;
+      },
+      onReady: () => undefined,
+    });
+
+    await expect(sync.ready).rejects.toThrow('snapshot unavailable');
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    const failedState = state;
+    listener?.(approvalEvent());
+    expect(state).toBe(failedState);
+    sync.dispose();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('patches only exposed model fields while preserving existing custom capabilities', () => {
     const existing: ModelProfile = {
       ...modelProfileFixture({
@@ -649,9 +723,88 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it.each([
+    { name: 'false', respond: async () => false },
+    { name: 'rejection', respond: async () => { throw new Error('agent unavailable'); } },
+  ])('refreshes authoritative approvals after approval acknowledgement $name', async ({ respond }) => {
+    const originalWindow = globalThis.window;
+    let snapshotCalls = 0;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          respondApproval: respond,
+          getSnapshot: async () => {
+            snapshotCalls += 1;
+            return emptyState().snapshot;
+          },
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        activeThreadId: 'thread-1',
+        snapshot: {
+          ...app.state.value.snapshot,
+          approvals: [{
+            id: 'approval-1', threadId: 'thread-1', turnId: 'turn-1', title: 'First', description: 'First approval',
+            status: 'pending', createdAt: '2026-08-17T00:00:00.000Z',
+          }],
+        },
+      };
+
+      await expect(app.respondApproval('approval-1', true)).rejects.toThrow();
+      expect(snapshotCalls).toBe(1);
+      expect(app.state.value.snapshot.approvals).toEqual([]);
+      expect(app.approvalResponseInFlightId.value).toBeUndefined();
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
+  it('exposes the exact approval response while it is in flight', async () => {
+    const originalWindow = globalThis.window;
+    let resolveResponse!: () => void;
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          respondApproval: () => new Promise<void>((resolve) => { resolveResponse = resolve; }),
+        },
+      },
+      configurable: true,
+    });
+    try {
+      const app = useApp();
+      app.state.value = {
+        ...app.state.value,
+        snapshot: {
+          ...app.state.value.snapshot,
+          approvals: [{
+            id: 'approval-1', threadId: 'thread-1', turnId: 'turn-1', title: 'First', description: 'First approval',
+            status: 'pending', createdAt: '2026-08-17T00:00:00.000Z',
+          }],
+        },
+      };
+      const response = app.respondApproval('approval-1', true);
+      expect(app.approvalResponseInFlightId.value).toBe('approval-1');
+      resolveResponse();
+      await response;
+      expect(app.approvalResponseInFlightId.value).toBeUndefined();
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('translates app chrome in English and Chinese', () => {
     expect(createTranslator('en-US')('settings')).toBe('Settings');
     expect(createTranslator('zh-CN')('settings')).toBe('设置');
+    expect(createTranslator('en-US')('approvalResponseFailed')).toBe(
+      'Could not respond to this approval. Its current state has been refreshed.',
+    );
+    expect(createTranslator('zh-CN')('approvalResponseFailed')).toBe('审批响应失败，已刷新其当前状态。');
   });
 
   it('recognizes only supported language preferences', () => {

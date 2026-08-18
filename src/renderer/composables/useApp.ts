@@ -49,6 +49,7 @@ export function startInitialAgentSync(options: {
 }): { ready: Promise<void>; dispose(): void } {
   let disposed = false;
   let buffering = true;
+  let unsubscribed = false;
   const bufferedEvents: AgentEvent[] = [];
   const unsubscribe = options.subscribe((event) => {
     if (disposed) return;
@@ -58,26 +59,37 @@ export function startInitialAgentSync(options: {
     }
     options.writeState(reduceEvent(options.readState(), event));
   });
-  const ready = (async () => {
-    const snapshot = await options.getSnapshot();
-    if (disposed) return;
-    let next = options.readState();
-    for (const event of bufferedEvents) {
-      next = reduceEvent(next, event);
+  const stop = () => {
+    if (disposed && unsubscribed) return;
+    disposed = true;
+    if (!unsubscribed) {
+      unsubscribed = true;
+      unsubscribe();
     }
-    next = reduceEvent(next, { type: 'snapshot', snapshot });
-    if (disposed) return;
-    options.writeState(next);
-    buffering = false;
-    options.onReady();
+  };
+  const ready = (async () => {
+    try {
+      const snapshot = await options.getSnapshot();
+      if (disposed) return;
+      let next = options.readState();
+      for (const event of bufferedEvents) {
+        next = reduceEvent(next, event);
+      }
+      next = reduceEvent(next, { type: 'snapshot', snapshot });
+      if (disposed) return;
+      options.writeState(next);
+      buffering = false;
+      options.onReady();
+    } catch (error) {
+      stop();
+      throw error;
+    }
   })();
 
   return {
     ready,
     dispose() {
-      if (disposed) return;
-      disposed = true;
-      unsubscribe();
+      stop();
     },
   };
 }
@@ -85,6 +97,7 @@ export function startInitialAgentSync(options: {
 export function useApp() {
   const state = ref<RendererState>(emptyState());
   const loading = ref(true);
+  const approvalResponseInFlightId = ref<string>();
 
   const activeThread = computed(() =>
     state.value.snapshot.threads.find((thread) => thread.id === state.value.activeThreadId),
@@ -135,7 +148,11 @@ export function useApp() {
       onReady: () => { loading.value = false; },
     });
     unsubscribe = sync.dispose;
-    await sync.ready;
+    try {
+      await sync.ready;
+    } finally {
+      loading.value = false;
+    }
   });
 
   onUnmounted(() => {
@@ -233,16 +250,48 @@ export function useApp() {
     if (!approval || approval.status !== 'pending') {
       throw new Error(`Approval "${approvalId}" is no longer pending.`);
     }
-    await window.desktop.respondApproval(approvalId, approved);
-    const settled = { ...approval, status: approved ? 'approved' as const : 'rejected' as const, respondedAt: new Date().toISOString() };
-    state.value = {
-      ...state.value,
-      snapshot: {
-        ...state.value.snapshot,
-        approvals: state.value.snapshot.approvals.map((candidate) => candidate.id === approvalId ? settled : candidate),
-      },
-      pendingApproval: state.value.pendingApproval?.id === approvalId ? settled : state.value.pendingApproval,
-    };
+    approvalResponseInFlightId.value = approvalId;
+    try {
+      const accepted = await window.desktop.respondApproval(approvalId, approved);
+      if (accepted === false) {
+        throw new Error(`Approval "${approvalId}" is no longer pending.`);
+      }
+      const settled = {
+        ...approval,
+        status: approved ? 'approved' as const : 'rejected' as const,
+        respondedAt: new Date().toISOString(),
+      };
+      state.value = {
+        ...state.value,
+        snapshot: {
+          ...state.value.snapshot,
+          approvals: state.value.snapshot.approvals.map((candidate) => candidate.id === approvalId ? settled : candidate),
+        },
+        pendingApproval: state.value.pendingApproval?.id === approvalId ? settled : state.value.pendingApproval,
+      };
+    } catch (error) {
+      try {
+        const snapshot = await window.desktop.getSnapshot();
+        state.value = reduceEvent(state.value, { type: 'snapshot', snapshot });
+        if (!snapshot.approvals.some((candidate) => candidate.id === approvalId)) {
+          state.value = {
+            ...state.value,
+            snapshot: {
+              ...state.value.snapshot,
+              approvals: state.value.snapshot.approvals.filter((candidate) => candidate.id !== approvalId),
+            },
+            pendingApproval: state.value.pendingApproval?.id === approvalId ? undefined : state.value.pendingApproval,
+          };
+        }
+      } catch {
+        // Preserve the acknowledgement failure; a later event/snapshot can still reconcile state.
+      }
+      throw error;
+    } finally {
+      if (approvalResponseInFlightId.value === approvalId) {
+        approvalResponseInFlightId.value = undefined;
+      }
+    }
   }
 
   async function saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile> {
@@ -338,6 +387,7 @@ export function useApp() {
     activeBusy,
     activeTurnId,
     activePendingApproval,
+    approvalResponseInFlightId,
     activeModelProfile,
     activeModelProfileId,
     visibleEvents,

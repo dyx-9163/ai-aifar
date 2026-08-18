@@ -24,7 +24,7 @@ declare global {
       setThreadModel(threadId: string, modelProfileId?: string): Promise<void>;
       startTurn(threadId: string, text: string, modelProfileId?: string): Promise<{ turnId: string }>;
       cancelTurn(threadId: string, turnId: string): Promise<boolean>;
-      respondApproval(approvalId: string, approved: boolean): Promise<void>;
+      respondApproval(approvalId: string, approved: boolean): Promise<boolean | void>;
       setLanguage(language: LanguagePreference): Promise<void>;
       updateSettings(settings: RuntimeSettingsInput): Promise<AppSettings>;
       saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile>;
