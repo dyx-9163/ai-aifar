@@ -127,6 +127,45 @@ describe('OpenAI-compatible model provider', () => {
     expect(containsSecretRepresentation(message, specialKey)).toBe(false);
   });
 
+  it('hard-times out the whole model run when fetch ignores abort', async () => {
+    let resolveFetch!: (response: Response) => void;
+    let requestSignal: AbortSignal | undefined;
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    };
+    const completion = streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+      () => Date.now(),
+      20,
+    );
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      completion.then(
+        () => ({ type: 'completed' as const }),
+        (error: unknown) => ({ type: 'rejected' as const, error }),
+      ),
+      new Promise<{ type: 'guard-expired' }>((resolve) => {
+        guard = setTimeout(() => resolve({ type: 'guard-expired' }), 125);
+      }),
+    ]);
+    if (guard) clearTimeout(guard);
+    resolveFetch(new Response('data: [DONE]\n\n', { status: 200 }));
+    if (outcome.type === 'guard-expired') {
+      await completion.catch(() => undefined);
+    }
+
+    expect(outcome).toMatchObject({
+      type: 'rejected',
+      error: expect.objectContaining({ message: 'Model request timed out after 20ms.' }),
+    });
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it('stops at the DONE sentinel and releases a provider stream that remains open', async () => {
     let sourceController!: ReadableStreamDefaultController<Uint8Array>;
     let cancelCalls = 0;
@@ -161,6 +200,37 @@ describe('OpenAI-compatible model provider', () => {
       sourceController.close();
       await completion;
     }
+
+    expect(outcome).toBe('completed');
+    expect(cancelCalls).toBe(1);
+  });
+
+  it('does not wait for a provider reader cancel that never settles', async () => {
+    let cancelCalls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      },
+      cancel() {
+        cancelCalls += 1;
+        return new Promise<void>(() => undefined);
+      },
+    });
+    const completion = streamChatCompletion(
+      profile,
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      async () => new Response(body as unknown as BodyInit, { status: 200 }),
+    );
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      completion.then(() => 'completed' as const),
+      new Promise<'guard-expired'>((resolve) => {
+        guard = setTimeout(() => resolve('guard-expired'), 75);
+      }),
+    ]);
+    if (guard) clearTimeout(guard);
 
     expect(outcome).toBe('completed');
     expect(cancelCalls).toBe(1);

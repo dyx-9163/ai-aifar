@@ -53,58 +53,62 @@ export async function streamChatCompletion(
 
   const requestSignal = linkedTimeoutSignal(signal, timeoutMs);
   try {
-    const response = await requestChatCompletion(profile, messages, headers, requestSignal.signal, fetchImpl);
+    const operation = (async () => {
+      throwIfAborted(requestSignal.signal);
+      const response = await requestChatCompletion(profile, messages, headers, requestSignal.signal, fetchImpl);
 
-    if (!response.body) {
-      throw new Error('Model response did not include a readable stream.');
-    }
+      if (!response.body) {
+        throw new Error('Model response did not include a readable stream.');
+      }
 
-    let firstTokenAt: number | undefined;
-    const trackFirstToken = () => {
-      firstTokenAt ??= nowMs();
-    };
-    const streamedMetrics = await readSseDeltas(
-      response.body,
-      {
-        onAnswerDelta: async (text) => {
-          trackFirstToken();
-          await handlers.onAnswerDelta(text);
+      let firstTokenAt: number | undefined;
+      const trackFirstToken = () => {
+        firstTokenAt ??= nowMs();
+      };
+      const streamedMetrics = await readSseDeltas(
+        response.body,
+        {
+          onAnswerDelta: async (text) => {
+            trackFirstToken();
+            await handlers.onAnswerDelta(text);
+          },
+          onRawReasoningDelta: async (text) => {
+            trackFirstToken();
+            await handlers.onRawReasoningDelta(text);
+          },
+          onReasoningSummaryDelta: async (text) => {
+            trackFirstToken();
+            await handlers.onReasoningSummaryDelta(text);
+          },
+          onPhase: handlers.onPhase,
         },
-        onRawReasoningDelta: async (text) => {
-          trackFirstToken();
-          await handlers.onRawReasoningDelta(text);
-        },
-        onReasoningSummaryDelta: async (text) => {
-          trackFirstToken();
-          await handlers.onReasoningSummaryDelta(text);
-        },
-        onPhase: handlers.onPhase,
-      },
-      requestSignal.signal,
-    );
-    const durationMs = Math.max(1, nowMs() - startedAt);
-    const completionTokens = streamedMetrics.completionTokens;
-    const serverRate = streamedMetrics.serverTokensPerSecond;
-    const tokensPerSecond = serverRate ?? (completionTokens ? completionTokens / (durationMs / 1000) : undefined);
-    const speedSource: MetricSource = serverRate ? 'server' : completionTokens ? 'client' : 'unavailable';
-    const usageSource: MetricSource =
-      streamedMetrics.promptTokens || streamedMetrics.completionTokens || streamedMetrics.totalTokens ? 'server' : 'unavailable';
-    const reasoningTokens = streamedMetrics.reasoningTokens;
+        requestSignal.signal,
+      );
+      const durationMs = Math.max(1, nowMs() - startedAt);
+      const completionTokens = streamedMetrics.completionTokens;
+      const serverRate = streamedMetrics.serverTokensPerSecond;
+      const tokensPerSecond = serverRate ?? (completionTokens ? completionTokens / (durationMs / 1000) : undefined);
+      const speedSource: MetricSource = serverRate ? 'server' : completionTokens ? 'client' : 'unavailable';
+      const usageSource: MetricSource =
+        streamedMetrics.promptTokens || streamedMetrics.completionTokens || streamedMetrics.totalTokens ? 'server' : 'unavailable';
+      const reasoningTokens = streamedMetrics.reasoningTokens;
 
-    return {
-      modelProfileId: profile.id,
-      modelName: profile.model,
-      reasoningRequested: profile.reasoning.mode,
-      reasoningProtocol: profile.reasoning.protocol,
-      reasoningObserved: Boolean((reasoningTokens && reasoningTokens > 0) || streamedMetrics.reasoningObserved),
-      responseSpeed: profile.responseSpeed,
-      durationMs,
-      timeToFirstTokenMs: firstTokenAt ? Math.max(0, firstTokenAt - startedAt) : undefined,
-      ...streamedMetrics,
-      tokensPerSecond,
-      speedSource,
-      usageSource,
-    };
+      return {
+        modelProfileId: profile.id,
+        modelName: profile.model,
+        reasoningRequested: profile.reasoning.mode,
+        reasoningProtocol: profile.reasoning.protocol,
+        reasoningObserved: Boolean((reasoningTokens && reasoningTokens > 0) || streamedMetrics.reasoningObserved),
+        responseSpeed: profile.responseSpeed,
+        durationMs,
+        timeToFirstTokenMs: firstTokenAt ? Math.max(0, firstTokenAt - startedAt) : undefined,
+        ...streamedMetrics,
+        tokensPerSecond,
+        speedSource,
+        usageSource,
+      };
+    })();
+    return await Promise.race([operation, requestSignal.aborted]);
   } catch (error) {
     if (requestSignal.timedOut() && !signal.aborted) {
       throw new Error(`Model request timed out after ${timeoutMs}ms.`);
@@ -223,12 +227,20 @@ async function readSseDeltas(
       }
     }
   } finally {
-    try {
-      await reader.cancel();
-    } catch {
-      // The provider may have already errored or released its side of the stream.
-    }
+    cancelReaderWithoutBlocking(reader);
+  }
+}
+
+function cancelReaderWithoutBlocking(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    void reader.cancel().catch(() => undefined);
+  } catch {
+    // The provider may have already errored or released its side of the stream.
+  }
+  try {
     reader.releaseLock();
+  } catch {
+    // A provider-controlled pending read may retain the lock; it must not retain scheduler capacity.
   }
 }
 
@@ -259,12 +271,22 @@ async function readWithAbort(
 
 function linkedTimeoutSignal(signal: AbortSignal, timeoutMs: number): {
   signal: AbortSignal;
+  aborted: Promise<never>;
   timedOut(): boolean;
   dispose(): void;
 } {
   const controller = new AbortController();
   let timedOut = false;
-  const onAbort = () => controller.abort(abortReason(signal));
+  let rejectAborted!: (reason: unknown) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAborted = reject;
+  });
+  const abort = (reason: unknown) => {
+    if (controller.signal.aborted) return;
+    controller.abort(reason);
+    rejectAborted(reason);
+  };
+  const onAbort = () => abort(abortReason(signal));
   if (signal.aborted) {
     onAbort();
   } else {
@@ -272,10 +294,11 @@ function linkedTimeoutSignal(signal: AbortSignal, timeoutMs: number): {
   }
   const timer = setTimeout(() => {
     timedOut = true;
-    controller.abort(new DOMException('Model request timed out.', 'TimeoutError'));
+    abort(new DOMException('Model request timed out.', 'TimeoutError'));
   }, Math.max(1, timeoutMs));
   return {
     signal: controller.signal,
+    aborted,
     timedOut: () => timedOut,
     dispose() {
       clearTimeout(timer);
@@ -304,13 +327,16 @@ async function requestChatCompletion(
     });
 
   const first = await send(true);
+  throwIfAborted(signal);
   if (first.ok) {
     return first;
   }
 
   const firstBody = await readErrorBody(first);
+  throwIfAborted(signal);
   if (profile.capabilities.usage.tokens && isStreamUsageCompatibilityError(first.status, firstBody)) {
     const retry = await send(false);
+    throwIfAborted(signal);
     if (retry.ok) {
       return retry;
     }
