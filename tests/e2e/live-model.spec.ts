@@ -137,6 +137,17 @@ test('runs real Qwen thinking with raw-only reasoning and turn-scoped metrics', 
     expect(persistedAnswer?.role).toBe('assistant');
     expect(persistedAnswer?.text.trim()).not.toBe('');
 
+    await expect.poll(() => page.evaluate(
+      ({ threadId, turnId, modelProfileId }) => (
+        (window as typeof window & { __task9LiveEvents?: AgentEvent[] }).__task9LiveEvents ?? []
+      ).some((event) => (
+        event.type === 'model.metrics'
+        && event.threadId === threadId
+        && event.turnId === turnId
+        && event.modelProfileId === modelProfileId
+      )),
+      { threadId: thread.id, turnId: turn?.id, modelProfileId: profile.id },
+    ), { timeout: 5_000 }).toBe(true);
     const events = await page.evaluate(() => (
       window as typeof window & { __task9LiveEvents?: AgentEvent[] }
     ).__task9LiveEvents ?? []);
