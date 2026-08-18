@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, MessageChannelMain, shell, utilityProcess } from 'electron';
 import path from 'node:path';
+import { AgentRequestBroker, type AgentReply } from './main/agentRequestBroker.js';
 import { isAgentEvent, isDesktopRequest, type DesktopRequest } from './shared/protocol.js';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -13,32 +14,36 @@ if (customUserDataPath) {
 let mainWindow: BrowserWindow | null = null;
 let agentProcess: Electron.UtilityProcess | null = null;
 let agentPort: Electron.MessagePortMain | null = null;
-let nextRequestId = 1;
-const pendingRequests = new Map<string, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>();
-
-type AgentReply = { type: 'agent.reply'; requestId: string; ok: true; data?: unknown } | { type: 'agent.reply'; requestId: string; ok: false; error: string };
+const agentRequests = new AgentRequestBroker(30_000);
 
 function startAgentRuntime(): void {
   if (agentProcess) {
     return;
   }
 
-  agentProcess = utilityProcess.fork(path.join(__dirname, 'worker.js'), [], {
+  const process = utilityProcess.fork(path.join(__dirname, 'worker.js'), [], {
     serviceName: 'private-ai-agent-runtime',
   });
+  agentProcess = process;
 
-  agentProcess.once('exit', () => {
-    agentProcess = null;
-    agentPort?.close();
-    agentPort = null;
+  process.once('exit', () => {
+    if (agentProcess === process) {
+      stopAgentRuntime('Agent runtime exited unexpectedly.');
+    }
   });
 
   const { port1, port2 } = new MessageChannelMain();
   agentPort = port2;
+  agentRequests.connect(port2);
   agentPort.on('message', (event) => handleAgentMessage(event.data));
+  agentPort.once('close', () => {
+    if (agentPort === port2) {
+      stopAgentRuntime('Agent runtime port closed unexpectedly.', true);
+    }
+  });
   agentPort.start();
 
-  agentProcess.postMessage(
+  process.postMessage(
     {
       type: 'agent.port',
       version: app.getVersion(),
@@ -119,43 +124,35 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  agentProcess?.kill();
-  agentProcess = null;
-  agentPort?.close();
-  agentPort = null;
+  stopAgentRuntime('Application is quitting.', true);
   mainWindow = null;
 });
 
 function sendAgentRequest(request: DesktopRequest): Promise<unknown> {
-  if (!agentPort) {
-    return Promise.reject(new Error('Agent runtime is not ready.'));
-  }
-
-  const requestId = `request-${nextRequestId++}`;
-  return new Promise((resolve, reject) => {
-    pendingRequests.set(requestId, { resolve, reject });
-    agentPort?.postMessage({ type: 'agent.request', requestId, request });
-  });
+  return agentRequests.request(request);
 }
 
 function handleAgentMessage(message: unknown): void {
   if (isAgentReply(message)) {
-    const pending = pendingRequests.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-    pendingRequests.delete(message.requestId);
-    if (message.ok) {
-      pending.resolve(message.data);
-    } else {
-      pending.reject(new Error(message.error));
-    }
+    agentRequests.handleReply(message);
     return;
   }
 
   if (isAgentEvent(message)) {
     mainWindow?.webContents.send('agent:event', message);
   }
+}
+
+function stopAgentRuntime(reason: string, killProcess = false): void {
+  const process = agentProcess;
+  const port = agentPort;
+  agentProcess = null;
+  agentPort = null;
+  agentRequests.disconnect(reason);
+  if (killProcess) {
+    process?.kill();
+  }
+  port?.close();
 }
 
 function isAgentReply(value: unknown): value is AgentReply {
