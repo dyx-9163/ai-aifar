@@ -351,7 +351,7 @@ function nextAnimationFrame(): Promise<void> {
           :data-runtime-status="activeRuntime?.status ?? 'idle'"
           :data-queue-position="activeRuntime?.queuePosition"
         >{{ runtimeStatus }}</span>
-        <span v-if="runtimeError" class="runtime-control-error" :title="runtimeError">{{ runtimeError }}</span>
+        <span v-if="runtimeError" class="runtime-control-error" data-testid="model-runtime-error" :title="runtimeError">{{ runtimeError }}</span>
       </div>
     </header>
 

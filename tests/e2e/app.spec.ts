@@ -86,6 +86,16 @@ test('queues FIFO at concurrency one and background completion does not steal fo
     await expect(threadRow(page, chatB.id)).toHaveClass(/active/);
     expect(server.requestCount()).toBe(1);
 
+    page.once('dialog', (dialog) => dialog.accept());
+    await threadRow(page, chatA.id).locator('.delete-chat-button').click();
+    await expect(threadRow(page, chatA.id).getByTestId('thread-delete-error')).toHaveText(
+      'Stop or cancel the active turn before deleting this chat.',
+    );
+    await expect(page.getByTestId('model-runtime-error')).toHaveCount(0);
+    await selectThread(page, chatA.id);
+    await expect(page.getByTestId('thread-delete-error')).toHaveCount(0);
+    await selectThread(page, chatB.id);
+
     server.releaseNext([{ answer: 'first complete' }]);
     await expect.poll(() => server.requestCount()).toBe(2);
     await expectThreadRuntime(page, chatB.id, 'running');

@@ -6,6 +6,7 @@ import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
 import Sidebar from './components/Sidebar.vue';
 import { useApp } from './composables/useApp';
+import { deleteFailureFeedback, type DeleteFeedback } from './deleteFeedback';
 import { createTranslator } from './i18n';
 
 const app = useApp();
@@ -13,12 +14,14 @@ const theme = ref<'light' | 'dark'>('dark');
 const view = ref<'chat' | 'settings'>('chat');
 const runtimeError = ref('');
 const approvalError = ref('');
+const deleteFeedback = ref<DeleteFeedback>();
 
 const activeThreadId = computed(() => app.state.value.activeThreadId);
 const t = computed(() => createTranslator(app.state.value.snapshot.settings.language));
 
 watch(activeThreadId, () => {
   approvalError.value = '';
+  deleteFeedback.value = undefined;
 });
 
 onMounted(() => {
@@ -26,17 +29,20 @@ onMounted(() => {
 });
 
 async function createThread(): Promise<void> {
+  deleteFeedback.value = undefined;
   view.value = 'chat';
   await app.createThread('New task', app.state.value.activeGroupId);
 }
 
 function selectThread(threadId: string): void {
+  deleteFeedback.value = undefined;
   view.value = 'chat';
   app.state.value.activeThreadId = threadId;
   app.state.value.activeGroupId = app.state.value.snapshot.threads.find((thread) => thread.id === threadId)?.groupId;
 }
 
 function selectGroup(groupId: string): void {
+  deleteFeedback.value = undefined;
   view.value = 'chat';
   app.state.value.activeGroupId = groupId;
   app.state.value.activeThreadId = app.state.value.snapshot.threads.find((thread) => thread.groupId === groupId)?.id;
@@ -47,6 +53,7 @@ async function createGroup(): Promise<void> {
   if (!name?.trim()) {
     return;
   }
+  deleteFeedback.value = undefined;
   view.value = 'chat';
   await app.createGroup(name.trim());
 }
@@ -55,11 +62,11 @@ async function deleteThread(threadId: string): Promise<void> {
   if (!window.confirm(t.value('deleteChatConfirm'))) {
     return;
   }
-  runtimeError.value = '';
+  deleteFeedback.value = undefined;
   try {
     await app.deleteThread(threadId);
   } catch (error) {
-    runtimeError.value = error instanceof Error ? error.message : t.value('deleteActiveChatFailed');
+    deleteFeedback.value = deleteFailureFeedback('thread', threadId, error, t.value);
   }
 }
 
@@ -67,11 +74,11 @@ async function deleteGroup(groupId: string): Promise<void> {
   if (!window.confirm(t.value('deleteGroupConfirm'))) {
     return;
   }
-  runtimeError.value = '';
+  deleteFeedback.value = undefined;
   try {
     await app.deleteGroup(groupId);
   } catch (error) {
-    runtimeError.value = error instanceof Error ? error.message : t.value('deleteActiveGroupFailed');
+    deleteFeedback.value = deleteFailureFeedback('group', groupId, error, t.value);
   }
 }
 
@@ -118,6 +125,7 @@ async function respondApproval(approvalId: string, approved: boolean): Promise<v
       :active-thread-id="activeThreadId"
       :active-group-id="app.state.value.activeGroupId"
       :runtime-by-thread="app.state.value.runtimeByThread"
+      :delete-feedback="deleteFeedback"
       :loading="app.loading.value"
       :theme="theme"
       :t="t"

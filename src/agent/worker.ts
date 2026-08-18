@@ -13,6 +13,10 @@ import {
   type DesktopRequest,
   type SequencedAgentEvent,
 } from '../shared/protocol.js';
+import {
+  ACTIVE_GROUP_DELETE_ERROR,
+  ACTIVE_THREAD_DELETE_ERROR,
+} from '../shared/operationErrors.js';
 import { safeErrorText } from '../shared/redaction.js';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './database.js';
 import { buildChatMessages } from './chatContext.js';
@@ -369,7 +373,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     },
     deleteThread(threadId) {
       if (scheduler.hasActiveThread(threadId)) {
-        throw new Error('Cannot delete a chat while it has an active turn. Stop or cancel the turn first.');
+        throw new Error(ACTIVE_THREAD_DELETE_ERROR);
       }
       database.deleteThread(threadId);
     },
@@ -378,7 +382,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         (thread) => thread.groupId === groupId && scheduler.hasActiveThread(thread.id),
       );
       if (activeThread) {
-        throw new Error('Cannot delete a group while one of its chats has an active turn. Stop or cancel the turn first.');
+        throw new Error(ACTIVE_GROUP_DELETE_ERROR);
       }
       database.deleteGroup(groupId);
     },

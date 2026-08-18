@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { ChatGroup, ThreadRuntimeState, ThreadSummary } from '../../shared/domain';
+import type { DeleteFeedback } from '../deleteFeedback';
 import type { Translator } from '../i18n';
 import { threadRuntimePresentation } from '../modelControls';
 
@@ -10,6 +11,7 @@ const props = defineProps<{
   activeThreadId?: string;
   activeGroupId?: string;
   runtimeByThread: Record<string, ThreadRuntimeState>;
+  deleteFeedback?: DeleteFeedback;
   loading: boolean;
   theme: 'light' | 'dark';
   t: Translator;
@@ -77,6 +79,13 @@ function runtimeActive(thread: ThreadSummary): boolean {
           <span class="group-name">{{ entry.group.name }}</span>
           <span class="group-count">{{ entry.threads.length }}</span>
         </button>
+        <p
+          v-if="deleteFeedback?.kind === 'group' && deleteFeedback.targetId === entry.group.id"
+          class="sidebar-operation-error"
+          data-testid="group-delete-error"
+          :data-target-id="entry.group.id"
+          role="status"
+        >{{ deleteFeedback.message }}</p>
         <article
           v-for="thread in entry.threads"
           :key="thread.id"
@@ -97,6 +106,13 @@ function runtimeActive(thread: ThreadSummary): boolean {
             </span>
           </button>
           <button class="delete-chat-button" type="button" :title="t('deleteChat')" @click.stop="$emit('deleteThread', thread.id)">×</button>
+          <p
+            v-if="deleteFeedback?.kind === 'thread' && deleteFeedback.targetId === thread.id"
+            class="sidebar-operation-error"
+            data-testid="thread-delete-error"
+            :data-target-id="thread.id"
+            role="status"
+          >{{ deleteFeedback.message }}</p>
         </article>
       </section>
 

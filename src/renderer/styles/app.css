@@ -289,6 +289,15 @@ button {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
+.sidebar-operation-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0 10px 8px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
