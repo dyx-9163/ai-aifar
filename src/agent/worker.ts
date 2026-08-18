@@ -251,6 +251,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         finalMetrics = metrics;
         throwIfAborted(signal);
         await context.next({ type: 'model.metrics', metrics });
+        throwIfAborted(signal);
       } else {
         outcome = await executeDemo(
           {
@@ -267,7 +268,11 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
 
       if (outcome === 'awaiting-approval') return;
-      database.completeTurn(turn.turnId, now(), finalMetrics);
+      throwIfAborted(signal);
+      if (!database.completeTurn(turn.turnId, now(), finalMetrics)) {
+        if (signal.aborted) throw abortReason(signal);
+        throw new Error(`Turn "${turn.turnId}" is no longer running.`);
+      }
       try {
         await context.next({ type: 'turn.completed' });
       } catch {
@@ -334,8 +339,15 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       return { turnId };
     },
     cancelTurn(turnId) {
+      const turn = database.getSnapshot().turns.find((candidate) => candidate.id === turnId);
+      if (!turn || !['queued', 'running', 'cancelling'].includes(turn.status)) return false;
       const cancelled = scheduler.cancel(turnId);
-      if (cancelled) approvalResolvers.delete(`approval-${turnId}`);
+      if (cancelled) {
+        if (turn.status === 'running') {
+          database.updateTurn(turnId, { status: 'cancelling', incomplete: true });
+        }
+        approvalResolvers.delete(`approval-${turnId}`);
+      }
       return cancelled;
     },
     respondApproval(approvalId, approved) {

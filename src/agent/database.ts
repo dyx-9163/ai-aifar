@@ -41,7 +41,7 @@ export interface AppDatabase {
     patch: Partial<Pick<TurnRecord, 'status' | 'startedAt' | 'completedAt' | 'error' | 'incomplete'>>,
   ): void;
   failTurn(turnId: string, completedAt: string, error: string): void;
-  completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): void;
+  completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): boolean;
   interruptUnfinishedTurns(): void;
   appendItem(item: Item): void;
   upsertApproval(approval: Approval): void;
@@ -407,16 +407,19 @@ class SqliteAppDatabase implements AppDatabase {
     });
   }
 
-  completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): void {
+  completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): boolean {
+    let completed = false;
     this.transaction(() => {
-      this.db
+      const result = this.db
         .prepare(
           `UPDATE turns
            SET status = 'completed', completed_at = :completedAt, incomplete = 0,
                metrics = COALESCE(:metrics, metrics), updated_at = :completedAt
-           WHERE id = :turnId`,
+           WHERE id = :turnId AND status = 'running'`,
         )
         .run({ turnId, completedAt, metrics: metrics ? JSON.stringify(metrics) : null });
+      if (result.changes !== 1) return;
+      completed = true;
 
       const rows = this.db
         .prepare(`SELECT id, payload FROM items WHERE turn_id = :turnId AND kind IN ('message', 'reasoning')`)
@@ -429,6 +432,7 @@ class SqliteAppDatabase implements AppDatabase {
         }
       }
     });
+    return completed;
   }
 
   interruptUnfinishedTurns(): void {

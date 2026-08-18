@@ -527,6 +527,42 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('lets accepted cancellation win while model metrics delivery is blocked', async () => {
+    const metricsEntered = deferred<void>();
+    const releaseMetrics = deferred<void>();
+    const harness = createHarness(
+      async () => metrics(),
+      undefined,
+      true,
+      undefined,
+      false,
+      {
+        type: 'model.metrics',
+        wait: async () => {
+          metricsEntered.resolve();
+          await releaseMetrics.promise;
+        },
+      },
+    );
+    const thread = harness.database.createThread('Cancel during metrics');
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start', threadId: thread.id, text: 'run', modelProfileId: harness.profile.id,
+    });
+    await metricsEntered.promise;
+
+    expect(harness.runtime.cancelTurn(turnId)).toBe(true);
+    releaseMetrics.resolve();
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.cancelled'));
+
+    expect(typesFor(harness.events, turnId).filter((type) => (
+      type === 'turn.completed' || type === 'turn.failed' || type === 'turn.cancelled'
+    ))).toEqual(['turn.cancelled']);
+    expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: turnId, status: 'cancelled', incomplete: true,
+    }));
+    harness.database.close();
+  });
+
   it('ignores provider deltas and terminals that arrive after completion', async () => {
     let capturedHandlers: ModelStreamHandlers | undefined;
     const harness = createHarness(async (_profile, _messages, handlers) => {
@@ -561,6 +597,7 @@ function createHarness(
   deterministicIds = true,
   rejectEventType?: AgentEvent['type'],
   failApprovalSettlement = false,
+  blockedEvent?: { type: AgentEvent['type']; wait(): Promise<void> },
 ): {
   database: AppDatabase;
   databasePath: string;
@@ -605,7 +642,8 @@ function createHarness(
   let clock = 0;
   const runtime = createWorkerTurnRuntime({
     database: runtimeDatabase,
-    postEvent: (event) => {
+    postEvent: async (event) => {
+      if (event.type === blockedEvent?.type) await blockedEvent.wait();
       if (event.type === rejectEventType) throw new Error(`delivery failed for ${event.type}`);
       events.push(event);
     },

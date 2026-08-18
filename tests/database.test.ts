@@ -302,6 +302,33 @@ describe('sqlite app database', () => {
     }
   });
 
+  it('refuses to complete a turn once authoritative cancellation has started', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const thread = db.createThread('Cancellation CAS');
+      db.createTurn(turnRecord('turn-cancelling', thread.id, 'model-1', 'running'));
+      db.appendItem({
+        id: 'item-turn-cancelling-assistant', threadId: thread.id, turnId: 'turn-cancelling',
+        kind: 'message', role: 'assistant', text: 'partial', incomplete: true,
+        createdAt: '2026-08-17T00:00:01.000Z',
+      });
+      db.updateTurn('turn-cancelling', { status: 'cancelling', incomplete: true });
+
+      expect(db.completeTurn('turn-cancelling', '2026-08-17T00:00:03.000Z', {
+        reasoningRequested: 'enabled', reasoningProtocol: 'qwen', reasoningObserved: true,
+        durationMs: 2_000, speedSource: 'client', usageSource: 'unavailable',
+      })).toBe(false);
+      expect(db.getSnapshot().turns).toContainEqual(expect.objectContaining({
+        id: 'turn-cancelling', status: 'cancelling', incomplete: true, metrics: undefined,
+      }));
+      expect(db.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+        id: 'item-turn-cancelling-assistant', incomplete: true,
+      }));
+    } finally {
+      db.close();
+    }
+  });
+
   it('updates only the supplied persisted turn lifecycle fields', () => {
     const db = openDatabase(createDbPath());
     const thread = db.createThread('Turn lifecycle');
