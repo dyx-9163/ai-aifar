@@ -13,6 +13,7 @@ import type {
   ReasoningOutputMode,
   ReasoningProtocol,
   RuntimeSettingsInput,
+  WorkspaceTrustLevel,
   ThemePreference,
   TurnAttachment,
 } from './domain.js';
@@ -25,13 +26,16 @@ export type DesktopRequest =
   | { type: 'thread.create'; title: string; groupId?: string }
   | { type: 'thread.delete'; threadId: string }
   | { type: 'thread.setModel'; threadId: string; modelProfileId?: string }
-  | { type: 'turn.start'; threadId: string; text: string; modelProfileId?: string; attachments?: TurnAttachment[] }
+  | { type: 'turn.start'; threadId: string; text: string; modelProfileId?: string; workspaceId?: string; attachments?: TurnAttachment[] }
   | { type: 'turn.cancel'; threadId: string; turnId: string }
+  | { type: 'turn.undo'; turnId: string }
   | { type: 'approval.respond'; approvalId: string; approved: boolean }
   | { type: 'modelProfile.save'; profile: ModelProfileInput }
   | { type: 'modelProfile.delete'; id: string }
   | { type: 'modelProfile.test'; profile: ModelProfileInput }
   | { type: 'settings.update'; settings: RuntimeSettingsInput }
+  | { type: 'workspace.register'; path: string; trustLevel: WorkspaceTrustLevel }
+  | { type: 'workspace.delete'; workspaceId: string }
   | { type: 'language.set'; language: LanguagePreference }
   | { type: 'theme.set'; theme: ThemePreference };
 
@@ -287,9 +291,11 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
     case 'thread.setModel':
       return hasString(value, 'threadId') && hasOptionalString(value, 'modelProfileId');
     case 'turn.start':
-      return hasString(value, 'threadId') && hasString(value, 'text') && hasOptionalString(value, 'modelProfileId') && hasOptionalTurnAttachments(value);
+      return hasString(value, 'threadId') && hasString(value, 'text') && hasOptionalString(value, 'modelProfileId') && hasOptionalString(value, 'workspaceId') && hasOptionalTurnAttachments(value);
     case 'turn.cancel':
       return hasString(value, 'threadId') && hasString(value, 'turnId');
+    case 'turn.undo':
+      return hasString(value, 'turnId');
     case 'approval.respond':
       return hasString(value, 'approvalId') && hasBoolean(value, 'approved');
     case 'modelProfile.save':
@@ -299,6 +305,10 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
       return hasString(value, 'id');
     case 'settings.update':
       return isRuntimeSettingsInput(value.settings);
+    case 'workspace.register':
+      return hasString(value, 'path') && (value.trustLevel === 'read-only' || value.trustLevel === 'read-write');
+    case 'workspace.delete':
+      return hasString(value, 'workspaceId');
     case 'language.set':
       return value.language === 'zh-CN' || value.language === 'en-US';
     case 'theme.set':

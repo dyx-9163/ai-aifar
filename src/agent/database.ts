@@ -17,6 +17,9 @@ import type {
   RuntimeSettingsInput,
   ThreadSummary,
   TurnRecord,
+  UndoableTurnSummary,
+  WorkspaceRecord,
+  WorkspaceRegistrationInput,
 } from '../shared/domain.js';
 import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import {
@@ -56,7 +59,32 @@ export interface AppDatabase {
   saveModelProfile(profile: ModelProfileInput): ModelProfile;
   deleteModelProfile(id: string): void;
   getModelProfileForRuntime(id?: string): RuntimeModelProfile | undefined;
+  registerWorkspace(input: WorkspaceRegistrationInput): WorkspaceRecord;
+  deleteWorkspace(workspaceId: string): void;
+  getWorkspace(workspaceId: string): WorkspaceRecord | undefined;
+  touchWorkspace(workspaceId: string): void;
+  recordFileCheckpoint(input: FileCheckpointInput): void;
+  listTurnCheckpoints(turnId: string): FileCheckpointRecord[];
+  deleteTurnCheckpoints(turnId: string): void;
   close(): void;
+}
+
+export interface FileCheckpointInput {
+  workspaceId: string;
+  turnId: string;
+  relativePath: string;
+  previousAction: 'existed' | 'absent';
+  /** The file content before the turn touched it; null when the file did not exist. */
+  previousContent: string | null;
+  /** SHA-256 of the pre-turn content; empty string when the file did not exist. */
+  previousContentHash: string;
+  /** SHA-256 of the content written by the latest patch in the turn. */
+  latestContentHash: string;
+}
+
+export interface FileCheckpointRecord extends FileCheckpointInput {
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type RuntimeModelProfile = ModelProfile & { apiKey?: string };
@@ -110,6 +138,36 @@ type ApprovalRow = {
 type SettingRow = {
   key: string;
   value: string;
+};
+
+type WorkspaceRow = {
+  id: string;
+  display_name: string;
+  root_path: string;
+  canonical_root_path: string;
+  trust_level: WorkspaceRecord['trustLevel'];
+  network_policy: WorkspaceRecord['networkPolicy'];
+  created_at: string;
+  last_opened_at: string;
+  updated_at: string;
+};
+
+type FileCheckpointRow = {
+  workspace_id: string;
+  turn_id: string;
+  relative_path: string;
+  previous_action: FileCheckpointRecord['previousAction'];
+  previous_content: string | null;
+  previous_content_hash: string;
+  latest_content_hash: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type UndoableTurnRow = {
+  turn_id: string;
+  workspace_id: string;
+  file_count: number;
 };
 
 type ModelProfileRow = {
@@ -193,6 +251,15 @@ class SqliteAppDatabase implements AppDatabase {
       approvals,
       modelProfiles: this.readModelProfiles(false),
       settings: this.readSettings(),
+      workspaces: this.readWorkspaces(),
+      undoableTurns: this.db
+        .prepare(
+          `SELECT turn_id, workspace_id, COUNT(*) AS file_count
+           FROM file_checkpoints
+           GROUP BY turn_id, workspace_id`,
+        )
+        .all()
+        .map((row) => mapUndoableTurn(row as UndoableTurnRow)),
     };
   }
 
@@ -233,6 +300,15 @@ class SqliteAppDatabase implements AppDatabase {
         groupId,
         deletedAt,
       });
+      this.db
+        .prepare(
+          `DELETE FROM file_checkpoints WHERE turn_id IN (
+             SELECT tr.id FROM turns tr
+             INNER JOIN threads t ON t.id = tr.thread_id
+             WHERE t.group_id = :groupId
+           )`,
+        )
+        .run({ groupId });
     });
   }
 
@@ -276,6 +352,13 @@ class SqliteAppDatabase implements AppDatabase {
       this.db
         .prepare('UPDATE threads SET deleted_at = :deletedAt, updated_at = :deletedAt WHERE id = :threadId')
         .run({ threadId, deletedAt });
+      this.db
+        .prepare(
+          `DELETE FROM file_checkpoints WHERE turn_id IN (
+             SELECT id FROM turns WHERE thread_id = :threadId
+           )`,
+        )
+        .run({ threadId });
     });
   }
 
@@ -610,6 +693,156 @@ class SqliteAppDatabase implements AppDatabase {
     });
   }
 
+  registerWorkspace(input: WorkspaceRegistrationInput): WorkspaceRecord {
+    const now = new Date().toISOString();
+    const canonicalRootPath = requireTrimmed(input.canonicalRootPath, 'Workspace path');
+    const existing = this.db
+      .prepare('SELECT * FROM workspaces WHERE canonical_root_path = :canonicalRootPath')
+      .get({ canonicalRootPath }) as WorkspaceRow | undefined;
+
+    if (existing) {
+      this.transaction(() => {
+        this.db
+          .prepare(
+            `UPDATE workspaces
+             SET display_name = :displayName, trust_level = :trustLevel, last_opened_at = :lastOpenedAt, updated_at = :updatedAt
+             WHERE id = :id`,
+          )
+          .run({
+            id: existing.id,
+            displayName: requireTrimmed(input.displayName, 'Workspace name'),
+            trustLevel: input.trustLevel,
+            lastOpenedAt: now,
+            updatedAt: now,
+          });
+      });
+      return mapWorkspace({
+        ...existing,
+        display_name: requireTrimmed(input.displayName, 'Workspace name'),
+        trust_level: input.trustLevel,
+        last_opened_at: now,
+        updated_at: now,
+      });
+    }
+
+    const record: WorkspaceRecord = {
+      id: randomUUID(),
+      displayName: requireTrimmed(input.displayName, 'Workspace name'),
+      rootPath: requireTrimmed(input.rootPath, 'Workspace path'),
+      canonicalRootPath,
+      trustLevel: input.trustLevel,
+      networkPolicy: 'disabled',
+      createdAt: now,
+      lastOpenedAt: now,
+    };
+
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO workspaces (id, display_name, root_path, canonical_root_path, trust_level, network_policy, created_at, last_opened_at, updated_at)
+           VALUES (:id, :displayName, :rootPath, :canonicalRootPath, :trustLevel, :networkPolicy, :createdAt, :lastOpenedAt, :updatedAt)`,
+        )
+        .run({
+          id: record.id,
+          displayName: record.displayName,
+          rootPath: record.rootPath,
+          canonicalRootPath: record.canonicalRootPath,
+          trustLevel: record.trustLevel,
+          networkPolicy: record.networkPolicy,
+          createdAt: record.createdAt,
+          lastOpenedAt: record.lastOpenedAt,
+          updatedAt: now,
+        });
+    });
+
+    return record;
+  }
+
+  deleteWorkspace(workspaceId: string): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM workspaces WHERE id = :workspaceId').run({ workspaceId });
+      this.db.prepare('DELETE FROM file_checkpoints WHERE workspace_id = :workspaceId').run({ workspaceId });
+    });
+  }
+
+  getWorkspace(workspaceId: string): WorkspaceRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM workspaces WHERE id = :workspaceId').get({ workspaceId }) as
+      | WorkspaceRow
+      | undefined;
+    return row ? mapWorkspace(row) : undefined;
+  }
+
+  touchWorkspace(workspaceId: string): void {
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.db
+        .prepare('UPDATE workspaces SET last_opened_at = :lastOpenedAt, updated_at = :updatedAt WHERE id = :workspaceId')
+        .run({ workspaceId, lastOpenedAt: now, updatedAt: now });
+    });
+  }
+
+  recordFileCheckpoint(input: FileCheckpointInput): void {
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT id FROM file_checkpoints
+           WHERE workspace_id = :workspaceId AND turn_id = :turnId AND relative_path = :relativePath`,
+        )
+        .get({ workspaceId: input.workspaceId, turnId: input.turnId, relativePath: input.relativePath });
+      if (existing) {
+        // The pre-turn state is immutable; only the latest written hash moves forward.
+        this.db
+          .prepare(
+            `UPDATE file_checkpoints SET latest_content_hash = :latestContentHash, updated_at = :updatedAt
+             WHERE workspace_id = :workspaceId AND turn_id = :turnId AND relative_path = :relativePath`,
+          )
+          .run({
+            latestContentHash: input.latestContentHash,
+            updatedAt: now,
+            workspaceId: input.workspaceId,
+            turnId: input.turnId,
+            relativePath: input.relativePath,
+          });
+        return;
+      }
+      this.db
+        .prepare(
+          `INSERT INTO file_checkpoints (
+             workspace_id, turn_id, relative_path, previous_action, previous_content,
+             previous_content_hash, latest_content_hash, created_at, updated_at
+           ) VALUES (
+             :workspaceId, :turnId, :relativePath, :previousAction, :previousContent,
+             :previousContentHash, :latestContentHash, :createdAt, :updatedAt
+           )`,
+        )
+        .run({
+          workspaceId: input.workspaceId,
+          turnId: input.turnId,
+          relativePath: input.relativePath,
+          previousAction: input.previousAction,
+          previousContent: input.previousContent,
+          previousContentHash: input.previousContentHash,
+          latestContentHash: input.latestContentHash,
+          createdAt: now,
+          updatedAt: now,
+        });
+    });
+  }
+
+  listTurnCheckpoints(turnId: string): FileCheckpointRecord[] {
+    return this.db
+      .prepare('SELECT * FROM file_checkpoints WHERE turn_id = :turnId ORDER BY id ASC')
+      .all({ turnId })
+      .map((row) => mapFileCheckpoint(row as FileCheckpointRow));
+  }
+
+  deleteTurnCheckpoints(turnId: string): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM file_checkpoints WHERE turn_id = :turnId').run({ turnId });
+    });
+  }
+
   getModelProfileForRuntime(id?: string): RuntimeModelProfile | undefined {
     const selectedId = id || this.readSettings().activeModelProfileId || this.defaultModelProfileId();
     const row = selectedId
@@ -694,6 +927,32 @@ class SqliteAppDatabase implements AppDatabase {
         value TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        canonical_root_path TEXT NOT NULL UNIQUE,
+        trust_level TEXT NOT NULL,
+        network_policy TEXT NOT NULL DEFAULT 'disabled',
+        created_at TEXT NOT NULL,
+        last_opened_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS file_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        previous_action TEXT NOT NULL,
+        previous_content TEXT,
+        previous_content_hash TEXT NOT NULL,
+        latest_content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, turn_id, relative_path)
+      );
+
       CREATE TABLE IF NOT EXISTS model_profiles (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -752,6 +1011,13 @@ class SqliteAppDatabase implements AppDatabase {
     ));
     this.applyMigration(7, () => this.repairOrSeedLocalQwenProfile());
     this.interruptUnfinishedTurns();
+  }
+
+  private readWorkspaces(): WorkspaceRecord[] {
+    return this.db
+      .prepare('SELECT * FROM workspaces ORDER BY last_opened_at DESC, display_name ASC')
+      .all()
+      .map((row) => mapWorkspace(row as WorkspaceRow));
   }
 
   private readSettings(): AppSettings {
@@ -1182,6 +1448,41 @@ function mapChatGroup(row: ChatGroupRow): ChatGroup {
     name: row.name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapFileCheckpoint(row: FileCheckpointRow): FileCheckpointRecord {
+  return {
+    workspaceId: row.workspace_id,
+    turnId: row.turn_id,
+    relativePath: row.relative_path,
+    previousAction: row.previous_action,
+    previousContent: row.previous_content,
+    previousContentHash: row.previous_content_hash,
+    latestContentHash: row.latest_content_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapUndoableTurn(row: UndoableTurnRow): UndoableTurnSummary {
+  return {
+    turnId: row.turn_id,
+    workspaceId: row.workspace_id,
+    fileCount: Number(row.file_count),
+  };
+}
+
+function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    rootPath: row.root_path,
+    canonicalRootPath: row.canonical_root_path,
+    trustLevel: row.trust_level === 'read-write' ? 'read-write' : 'read-only',
+    networkPolicy: row.network_policy === 'allowlisted' ? 'allowlisted' : 'disabled',
+    createdAt: row.created_at,
+    lastOpenedAt: row.last_opened_at,
   };
 }
 

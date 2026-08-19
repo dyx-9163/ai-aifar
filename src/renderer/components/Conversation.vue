@@ -9,6 +9,8 @@ import type {
   ThreadSummary,
   TurnAttachment,
   TurnRecord,
+  UndoableTurnSummary,
+  WorkspaceRecord,
 } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
@@ -40,6 +42,9 @@ const props = defineProps<{
   modelProfiles: ModelProfile[];
   activeModelProfileId?: string;
   activeModelProfile?: ModelProfile;
+  workspaces: WorkspaceRecord[];
+  selectedWorkspaceId?: string;
+  latestUndoableTurn?: UndoableTurnSummary;
   runtimeError?: string;
   t: Translator;
 }>();
@@ -49,6 +54,8 @@ const emit = defineEmits<{
   cancel: [];
   openSettings: [];
   selectModel: [modelProfileId?: string];
+  selectWorkspace: [workspaceId?: string];
+  undoTurn: [turnId: string];
   updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
 
@@ -335,6 +342,16 @@ function nextAnimationFrame(): Promise<void> {
         <h1>{{ thread?.title ?? t('localAgentWorkspace') }}</h1>
       </div>
       <div class="conversation-controls">
+        <button
+          v-if="latestUndoableTurn"
+          type="button"
+          class="undo-turn-button"
+          data-testid="undo-turn-button"
+          :title="t('undoFileChangesHint')"
+          @click="emit('undoTurn', latestUndoableTurn.turnId)"
+        >
+          {{ t('undoFileChanges') }} ({{ latestUndoableTurn.fileCount }})
+        </button>
         <label class="model-picker">
           <span>{{ t('model') }}</span>
           <select :value="activeModelProfileId ?? ''" class="model-select" @change="handleModelChange">
@@ -506,9 +523,12 @@ function nextAnimationFrame(): Promise<void> {
       :active-busy="activeBusy"
       :active-runtime="activeRuntime"
       :supports-vision="supportsVision"
+      :workspaces="workspaces"
+      :selected-workspace-id="selectedWorkspaceId"
       :t="t"
       @submit="(text, attachments) => emit('submit', text, attachments)"
       @cancel="emit('cancel')"
+      @select-workspace="(workspaceId) => emit('selectWorkspace', workspaceId)"
     />
   </section>
 </template>

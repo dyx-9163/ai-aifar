@@ -10,6 +10,11 @@ describe('desktop protocol guards', () => {
     expect(isDesktopRequest({ type: 'turn.start', threadId: 't1', text: 'hi', modelProfileId: 'model-1' })).toBe(true);
   });
 
+  it('accepts a turn request bound to a workspace', () => {
+    expect(isDesktopRequest({ type: 'turn.start', threadId: 't1', text: 'hi', workspaceId: 'ws-1' })).toBe(true);
+    expect(isDesktopRequest({ type: 'turn.start', threadId: 't1', text: 'hi', workspaceId: 42 })).toBe(false);
+  });
+
   it('accepts a thread model selection request', () => {
     expect(isDesktopRequest({ type: 'thread.setModel', threadId: 't1', modelProfileId: 'model-1' })).toBe(true);
   });
@@ -270,6 +275,18 @@ describe('desktop protocol guards', () => {
     expect(isDesktopRequest({ type: 'settings.update', settings: { contextMessageLimit: 0 } })).toBe(false);
     expect(isDesktopRequest({ type: 'settings.update', settings: { contextMessageLimit: 201 } })).toBe(false);
     expect(isDesktopRequest({ type: 'settings.update', settings: { showModelMetrics: 'yes' } })).toBe(false);
+  });
+
+  it('accepts workspace registration and deletion requests', () => {
+    expect(isDesktopRequest({ type: 'workspace.register', path: 'd:\\projects\\demo', trustLevel: 'read-only' })).toBe(true);
+    expect(isDesktopRequest({ type: 'workspace.register', path: 'd:\\projects\\demo', trustLevel: 'read-write' })).toBe(true);
+    expect(isDesktopRequest({ type: 'workspace.delete', workspaceId: 'workspace-1' })).toBe(true);
+  });
+
+  it('rejects malformed workspace requests', () => {
+    expect(isDesktopRequest({ type: 'workspace.register', path: '', trustLevel: 'read-only' })).toBe(false);
+    expect(isDesktopRequest({ type: 'workspace.register', path: 'd:\\projects\\demo', trustLevel: 'full-access' })).toBe(false);
+    expect(isDesktopRequest({ type: 'workspace.delete', workspaceId: '' })).toBe(false);
   });
 
   it('accepts a streamed message event', () => {

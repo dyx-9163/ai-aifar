@@ -256,6 +256,41 @@ export interface ModelRunMetrics {
   thinkingEnabled?: boolean;
 }
 
+export type WorkspaceTrustLevel = 'read-only' | 'read-write';
+
+export type WorkspaceNetworkPolicy = 'disabled' | 'allowlisted';
+
+export interface WorkspaceRecord {
+  id: string;
+  displayName: string;
+  /** The path the user originally selected, before canonicalization. */
+  rootPath: string;
+  /** Realpath-normalized root used for all containment checks. */
+  canonicalRootPath: string;
+  trustLevel: WorkspaceTrustLevel;
+  networkPolicy: WorkspaceNetworkPolicy;
+  createdAt: string;
+  lastOpenedAt: string;
+}
+
+export interface WorkspaceRegistrationInput {
+  displayName: string;
+  rootPath: string;
+  canonicalRootPath: string;
+  trustLevel: WorkspaceTrustLevel;
+}
+
+export interface UndoableTurnSummary {
+  turnId: string;
+  workspaceId: string;
+  fileCount: number;
+}
+
+export interface TurnRollbackReport {
+  restored: string[];
+  skipped: string[];
+}
+
 export interface AppSnapshot {
   groups: ChatGroup[];
   threads: ThreadSummary[];
@@ -264,6 +299,8 @@ export interface AppSnapshot {
   approvals: Approval[];
   modelProfiles: ModelProfile[];
   settings: AppSettings;
+  workspaces: WorkspaceRecord[];
+  undoableTurns: UndoableTurnSummary[];
 }
 
 export interface TurnRecord {

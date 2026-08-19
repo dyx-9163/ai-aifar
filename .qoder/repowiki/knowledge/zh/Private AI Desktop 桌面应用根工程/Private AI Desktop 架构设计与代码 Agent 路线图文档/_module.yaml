@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: docs
+title: Private AI Desktop 架构设计与代码 Agent 路线图文档
+scope:
+    - docs/
+    - .superpowers/
+source_files: []
+depends_on: []
+related_to: []

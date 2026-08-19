@@ -6,6 +6,25 @@
   <component name="ChangeListManager">
     <list default="true" id="7194cd2f-233b-440c-9baa-3797cadb02a4" name="Changes" comment="update">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/package.json" beforeDir="false" afterPath="$PROJECT_DIR$/package.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agent/database.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agent/database.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agent/worker.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agent/worker.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agentClient/core.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/agentClient/core.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/preload.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/preload.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/App.vue" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/App.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/components/Composer.vue" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/components/Composer.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/components/Conversation.vue" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/components/Conversation.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/components/SettingsView.vue" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/components/SettingsView.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/composables/useApp.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/composables/useApp.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/i18n/messages.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/i18n/messages.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/styles/app.css" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/styles/app.css" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/renderer/types.d.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/renderer/types.d.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/shared/domain.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/shared/domain.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/shared/protocol.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/shared/protocol.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/database.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/database.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/modelRuntimeConfig.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/modelRuntimeConfig.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/protocol.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/protocol.test.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/worker.test.ts" beforeDir="false" afterPath="$PROJECT_DIR$/tests/worker.test.ts" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -15,47 +34,47 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
-  "lastFilter": {
-    "state": "OPEN",
-    "assignee": "dyx-9163"
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;dyx-9163&quot;
   }
-}]]></component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/dyx-9163/ai-aifar.git",
-    "accountId": "e7e4bb7f-de4c-4e40-9878-02de80727468"
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/dyx-9163/ai-aifar.git&quot;,
+    &quot;accountId&quot;: &quot;e7e4bb7f-de4c-4e40-9878-02de80727468&quot;
   }
-}]]></component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 7,
-  "fromUser": false
-}]]></component>
+}</component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 7,
+  &quot;fromUser&quot;: false
+}</component>
   <component name="ProjectId" id="3I5GbFGF5cOobiOfyNt8nzjmm4p" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.go.formatter.settings.were.checked": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "main",
-    "ignore.virus.scanning.warn.message": "true",
-    "kotlin-language-version-configured": "true",
-    "last_opened_file_path": "D:/workspace/AI/2026-08-14/ai-aifar",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "pnpm",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.go.formatter.settings.were.checked&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/workspace/AI/2026-08-14/ai-aifar&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;pnpm&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -72,6 +91,7 @@
       <option name="presentableId" value="Default" />
       <updated>1787047085485</updated>
       <workItem from="1787047086590" duration="723000" />
+      <workItem from="1787120205494" duration="3223000" />
     </task>
     <task id="LOCAL-00001" summary="update">
       <option name="closed" value="true" />
@@ -81,7 +101,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787047628080</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="update">
+      <option name="closed" value="true" />
+      <created>1787120246527</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1787120246527</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,10 +8,13 @@ import { openDatabase, type AppDatabase, type RuntimeModelProfile } from '../src
 import { streamChatCompletion, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import {
   createWorkerTurnRuntime,
+  registerWorkspaceFromPath,
   requireAcceptedApprovalResponse,
   testRuntimeModelProfileConnection,
   type WorkerTurnRuntime,
 } from '../src/agent/worker';
+import { WorkspaceSecurityError } from '../src/agent/workspace/pathSecurity';
+import { rollbackTurnFileChanges } from '../src/agent/workspace/fileCheckpoints';
 
 const tempDirectories: string[] = [];
 const openDatabases: AppDatabase[] = [];
@@ -739,6 +742,249 @@ describe('worker turn runtime', () => {
   });
 });
 
+describe('workspace registration', () => {
+  function openWorkspaceDatabase(): AppDatabase {
+    const directory = mkdtempSync(join(tmpdir(), 'private-ai-worker-'));
+    tempDirectories.push(directory);
+    const database = openDatabase(join(directory, 'app.db'));
+    openDatabases.push(database);
+    return database;
+  }
+
+  it('canonicalizes the selected directory before persisting it', () => {
+    const database = openWorkspaceDatabase();
+    const directory = mkdtempSync(join(tmpdir(), 'private-ai-workspace-'));
+    tempDirectories.push(directory);
+
+    const record = registerWorkspaceFromPath(database, { path: directory, trustLevel: 'read-only' });
+
+    const expectedRoot = process.platform === 'win32'
+      ? realpathSync.native(directory).replace(/^([A-Z]):/, (match, letter: string) => `${letter.toLowerCase()}:`)
+      : realpathSync.native(directory);
+    expect(record.canonicalRootPath).toBe(expectedRoot);
+    expect(record.rootPath).toBe(directory);
+    expect(record.trustLevel).toBe('read-only');
+    expect(record.displayName.length).toBeGreaterThan(0);
+    expect(database.getSnapshot().workspaces).toHaveLength(1);
+  });
+
+  it('rejects missing directories without persisting anything', () => {
+    const database = openWorkspaceDatabase();
+    const directory = mkdtempSync(join(tmpdir(), 'private-ai-workspace-'));
+    tempDirectories.push(directory);
+
+    expect(() => registerWorkspaceFromPath(database, { path: join(directory, 'missing'), trustLevel: 'read-write' }))
+      .toThrow(WorkspaceSecurityError);
+    expect(database.getSnapshot().workspaces).toHaveLength(0);
+  });
+
+  it('rejects UNC network roots from the registration entry point', () => {
+    const database = openWorkspaceDatabase();
+
+    expect(() => registerWorkspaceFromPath(database, { path: '\\\\file-server\\share', trustLevel: 'read-only' }))
+      .toThrow(WorkspaceSecurityError);
+    expect(database.getSnapshot().workspaces).toHaveLength(0);
+  });
+
+  it('re-registering the same canonical root upserts the stored record', () => {
+    const database = openWorkspaceDatabase();
+    const directory = mkdtempSync(join(tmpdir(), 'private-ai-workspace-'));
+    tempDirectories.push(directory);
+
+    const first = registerWorkspaceFromPath(database, { path: directory, trustLevel: 'read-only' });
+    const second = registerWorkspaceFromPath(database, { path: directory, trustLevel: 'read-write' });
+
+    expect(second.id).toBe(first.id);
+    expect(second.trustLevel).toBe('read-write');
+    expect(database.getSnapshot().workspaces).toHaveLength(1);
+  });
+});
+
+describe('workspace agent turns', () => {
+  it('rejects a turn bound to an unregistered workspace', () => {
+    const harness = createHarness(async () => metrics());
+    const thread = harness.database.createThread('Unknown workspace');
+
+    expect(() => harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'hello',
+      modelProfileId: harness.profile.id,
+      workspaceId: 'missing-workspace',
+    })).toThrow('is not registered');
+    harness.database.close();
+  });
+
+  it('runs the agent loop with workspace tools when a workspace is bound', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-agentws-'));
+    tempDirectories.push(workspaceDirectory);
+    mkdirSync(join(workspaceDirectory, 'src'), { recursive: true });
+    writeFileSync(join(workspaceDirectory, 'src', 'main.ts'), 'export const answer = 42;\n');
+
+    let modelRuns = 0;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      modelRuns += 1;
+      if (modelRuns === 1) {
+        await handlers.onAnswerDelta('Checking the file.\n```tool\n{"tool": "read_file", "input": {"path": "src/main.ts"}}\n```');
+      } else {
+        await handlers.onAnswerDelta('The file exports answer = 42.');
+      }
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-only' });
+    const thread = harness.database.createThread('Agent workspace');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'What does src/main.ts export?',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    const types = typesFor(harness.events, turnId);
+    expect(types.filter((type) => type === 'tool.started')).toHaveLength(2);
+    expect(types).toContain('tool.output');
+    expect(types.filter((type) => type === 'answer.delta')).toHaveLength(1);
+    expect(modelRuns).toBe(2);
+    expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+      id: `item-${turnId}-assistant`,
+      text: 'The file exports answer = 42.',
+    }));
+    harness.database.close();
+  });
+
+  it('pauses a gated command for approval and resumes after the user responds', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-approvalws-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    let modelRuns = 0;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      modelRuns += 1;
+      if (modelRuns === 1) {
+        await handlers.onAnswerDelta(
+          '```tool\n{"tool": "run_command", "input": {"command": "node", "args": ["--version"]}}\n```',
+        );
+      } else {
+        await handlers.onAnswerDelta('Node is available.');
+      }
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Approval flow');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Check the node runtime',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
+    const approvalEvent = harness.events.find(
+      (event) => event.turnId === turnId && event.type === 'approval.required',
+    ) as Extract<AgentEvent, { type: 'approval.required' }>;
+    expect(approvalEvent.title).toContain('node');
+    expect(harness.runtime.respondApproval(approvalEvent.approvalId, true)).toBe(true);
+
+    // The approved command spawns a real process, so poll with macrotask waits.
+    await waitForTurn(harness.events, turnId, 'turn.completed');
+    expect(modelRuns).toBe(2);
+    const approval = harness.database
+      .getSnapshot()
+      .approvals.find((candidate) => candidate.id === approvalEvent.approvalId);
+    expect(approval?.status).toBe('approved');
+    harness.database.close();
+  }, 15_000);
+
+  it('skips execution and finishes the turn when the user rejects approval', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-rejectws-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    let modelRuns = 0;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      modelRuns += 1;
+      if (modelRuns === 1) {
+        await handlers.onAnswerDelta(
+          '```tool\n{"tool": "run_command", "input": {"command": "node", "args": ["--version"]}}\n```',
+        );
+      } else {
+        await handlers.onAnswerDelta('Understood, skipping the check.');
+      }
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Rejection flow');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Check the node runtime',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
+    const approvalEvent = harness.events.find(
+      (event) => event.turnId === turnId && event.type === 'approval.required',
+    ) as Extract<AgentEvent, { type: 'approval.required' }>;
+    expect(harness.runtime.respondApproval(approvalEvent.approvalId, false)).toBe(true);
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    expect(modelRuns).toBe(2);
+    const approval = harness.database
+      .getSnapshot()
+      .approvals.find((candidate) => candidate.id === approvalEvent.approvalId);
+    expect(approval?.status).toBe('rejected');
+    harness.database.close();
+  });
+
+  it('records undoable checkpoints when apply_patch writes files and rolls them back', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-undows-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    let modelRuns = 0;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      modelRuns += 1;
+      if (modelRuns === 1) {
+        await handlers.onAnswerDelta(
+          '```tool\n{"tool": "apply_patch", "input": {"path": "hello.ts", "edits": [{"startLine": 1, "endLine": 0, "replacement": "export const hello = true;"}]}}\n```',
+        );
+      } else {
+        await handlers.onAnswerDelta('Created hello.ts.');
+      }
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Undo flow');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Create hello.ts',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    const createdFile = join(workspace.canonicalRootPath, 'hello.ts');
+    expect(readFileSync(createdFile, 'utf-8')).toBe('export const hello = true;');
+    expect(harness.database.getSnapshot().undoableTurns).toEqual([
+      { turnId, workspaceId: workspace.id, fileCount: 1 },
+    ]);
+
+    const report = rollbackTurnFileChanges(harness.database, turnId);
+    expect(report).toEqual({ restored: ['hello.ts'], skipped: [] });
+    expect(existsSync(createdFile)).toBe(false);
+    harness.database.close();
+  });
+});
+
 function createHarness(
   streamModel: (
     profile: RuntimeModelProfile,
@@ -873,6 +1119,15 @@ function abortError(): Error {
 
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 40; index += 1) await Promise.resolve();
+}
+
+/** Polls with macrotask delays for assertions that depend on real I/O. */
+async function waitForTurn(events: AgentEvent[], turnId: string, type: string): Promise<void> {
+  for (let index = 0; index < 200; index += 1) {
+    if (typesFor(events, turnId).at(-1) === type) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Turn "${turnId}" never reached "${type}"; got: ${typesFor(events, turnId).join(', ')}`);
 }
 
 async function eventually(assertion: () => void): Promise<void> {

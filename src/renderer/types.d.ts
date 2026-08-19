@@ -11,6 +11,9 @@ import type {
   RuntimeSettingsInput,
   ThreadSummary,
   TurnAttachment,
+  TurnRollbackReport,
+  WorkspaceRecord,
+  WorkspaceTrustLevel,
 } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
 
@@ -25,14 +28,17 @@ declare global {
       createThread(title: string, groupId?: string): Promise<ThreadSummary>;
       deleteThread(threadId: string): Promise<void>;
       setThreadModel(threadId: string, modelProfileId?: string): Promise<void>;
-      startTurn(threadId: string, text: string, modelProfileId?: string, attachments?: TurnAttachment[]): Promise<{ turnId: string }>;
+      startTurn(threadId: string, text: string, modelProfileId?: string, workspaceId?: string, attachments?: TurnAttachment[]): Promise<{ turnId: string }>;
       cancelTurn(threadId: string, turnId: string): Promise<boolean>;
+      undoTurn(turnId: string): Promise<TurnRollbackReport>;
       respondApproval(approvalId: string, approved: boolean): Promise<boolean | void>;
       setLanguage(language: LanguagePreference): Promise<void>;
       updateSettings(settings: RuntimeSettingsInput): Promise<AppSettings>;
       saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile>;
       deleteModelProfile(id: string): Promise<void>;
       testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult>;
+      registerWorkspace(path: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord>;
+      deleteWorkspace(workspaceId: string): Promise<void>;
       subscribe(listener: (event: AgentEvent) => void): () => void;
     };
   }

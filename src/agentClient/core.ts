@@ -34,6 +34,8 @@ export function emptyAgentClientState(): AgentClientState {
       items: {},
       approvals: [],
       modelProfiles: [],
+      workspaces: [],
+      undoableTurns: [],
       settings: {
         theme: 'system',
         language: 'en-US',

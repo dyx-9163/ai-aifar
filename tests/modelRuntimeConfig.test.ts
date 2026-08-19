@@ -19,8 +19,8 @@ describe('direct llama.cpp runtime', () => {
   });
 
   it('publishes bounded defaults', () => {
-    expect(env).toContain('LLAMA_PARALLEL=1');
-    expect(env).toContain('LLAMA_CTX_SIZE=16384');
+    expect(env).toContain('LLAMA_PARALLEL=2');
+    expect(env).toContain('LLAMA_CTX_SIZE=32768');
     expect(env).toContain('LLAMA_N_PREDICT=2048');
     expect(env).not.toContain('LLAMA_HTTP_TIMEOUT=');
   });

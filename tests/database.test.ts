@@ -1217,3 +1217,94 @@ function createMislabelledV4Database(path: string): void {
   );
   legacy.close();
 }
+
+describe('workspace persistence', () => {
+  const registration = {
+    displayName: 'Demo Project',
+    rootPath: 'D:\\Projects\\demo',
+    canonicalRootPath: 'd:\\projects\\demo',
+    trustLevel: 'read-only' as const,
+  };
+
+  it('registers a workspace and exposes it through the snapshot', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const record = db.registerWorkspace(registration);
+      expect(record).toMatchObject({
+        displayName: 'Demo Project',
+        rootPath: 'D:\\Projects\\demo',
+        canonicalRootPath: 'd:\\projects\\demo',
+        trustLevel: 'read-only',
+        networkPolicy: 'disabled',
+      });
+
+      const snapshot = db.getSnapshot();
+      expect(snapshot.workspaces).toHaveLength(1);
+      expect(snapshot.workspaces[0]).toMatchObject({ id: record.id, displayName: 'Demo Project' });
+      expect(db.getWorkspace(record.id)?.canonicalRootPath).toBe('d:\\projects\\demo');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('upserts instead of duplicating when the canonical root is registered again', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const first = db.registerWorkspace(registration);
+      const second = db.registerWorkspace({ ...registration, displayName: 'Renamed', trustLevel: 'read-write' });
+
+      expect(second.id).toBe(first.id);
+      expect(second.trustLevel).toBe('read-write');
+      expect(second.displayName).toBe('Renamed');
+      expect(db.getSnapshot().workspaces).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('persists workspaces across database reopens', () => {
+    const path = createDbPath();
+    const first = openDatabase(path);
+    let workspaceId: string;
+    try {
+      workspaceId = first.registerWorkspace(registration).id;
+    } finally {
+      first.close();
+    }
+
+    const reopened = openDatabase(path);
+    try {
+      expect(reopened.getWorkspace(workspaceId)).toMatchObject({ id: workspaceId, trustLevel: 'read-only' });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('touchWorkspace advances lastOpenedAt and deleteWorkspace removes the record', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const record = db.registerWorkspace(registration);
+      db.touchWorkspace(record.id);
+      const touched = db.getWorkspace(record.id);
+      expect(touched).toBeDefined();
+      expect(touched!.lastOpenedAt >= record.lastOpenedAt).toBe(true);
+
+      db.deleteWorkspace(record.id);
+      expect(db.getWorkspace(record.id)).toBeUndefined();
+      expect(db.getSnapshot().workspaces).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects registration with blank names or paths', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      expect(() => db.registerWorkspace({ ...registration, displayName: '  ' })).toThrow();
+      expect(() => db.registerWorkspace({ ...registration, canonicalRootPath: ' ' })).toThrow();
+      expect(db.getSnapshot().workspaces).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+});

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import type {
   Approval,
   Item,
@@ -9,6 +10,8 @@ import type {
   ReasoningItem,
   TurnRecord,
   TurnAttachment,
+  WorkspaceRecord,
+  WorkspaceTrustLevel,
 } from '../shared/domain.js';
 import {
   isDesktopRequest,
@@ -23,6 +26,9 @@ import { isLocalQwenServiceProfile } from '../shared/localQwenIdentity.js';
 import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import { safeErrorText } from '../shared/redaction.js';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './database.js';
+import { normalizeWorkspacePath } from './workspace/pathSecurity.js';
+import { rollbackTurnFileChanges } from './workspace/fileCheckpoints.js';
+import { runAgentLoop } from './agentLoop.js';
 import { buildChatMessages } from './chatContext.js';
 import {
   demoTurnTitle,
@@ -224,6 +230,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     turn: ScheduledTurn,
     text: string,
     profile: RuntimeModelProfile | undefined,
+    workspace: WorkspaceRecord | undefined,
     history: ChatMessage[],
     attachments: TurnAttachment[],
     approvalResponse: Promise<boolean> | undefined,
@@ -241,28 +248,76 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
           toolId: `tool-${turn.turnId}-model`,
           title: `Call ${profile.name}`,
         });
-        const handlers: ModelStreamHandlers = {
-          onAnswerDelta: (delta) => context.next({ type: 'answer.delta', text: delta }),
-          onRawReasoningDelta: (delta) => context.next({ type: 'reasoning.raw.delta', text: delta }),
-          onReasoningSummaryDelta: (delta) => context.next({ type: 'reasoning.summary.delta', text: delta }),
-          onPhase: (phase) => context.next({ type: 'model.progress', phase }),
-        };
-        const metrics = await runModel(
-          profile,
-          [
-            {
-              role: 'system',
-              content: 'You are a helpful private AI assistant. Keep answers clear, practical, and concise.',
+        if (workspace) {
+          const requestApproval = async (request: { title: string; description: string }): Promise<boolean> => {
+            const approvalId = `approval-${turn.turnId}`;
+            const response = new Promise<boolean>((resolve) => {
+              approvalResolvers.set(approvalId, resolve);
+            });
+            await context.next({
+              type: 'approval.required',
+              approvalId,
+              title: request.title,
+              description: request.description,
+            });
+            return raceWithAbort(response, signal);
+          };
+          const loopOutcome = await runAgentLoop({
+            profile,
+            toolContext: {
+              canonicalRootPath: workspace.canonicalRootPath,
+              trustLevel: workspace.trustLevel,
+              recordFileChange: (change) => {
+                database.recordFileCheckpoint({
+                  workspaceId: workspace.id,
+                  turnId: turn.turnId,
+                  relativePath: change.relativePath,
+                  previousAction: change.previousAction,
+                  previousContent: change.previousContent,
+                  previousContentHash: change.previousContentHash,
+                  latestContentHash: change.newContentHash,
+                });
+              },
             },
-            ...withVisionAttachments(history, attachments),
-          ],
-          handlers,
-          signal,
-        );
-        finalMetrics = metrics;
+            workspaceDisplayName: workspace.displayName,
+            initialMessages: withVisionAttachments(history, attachments),
+            runModel,
+            emit: (payload) => context.next(payload),
+            signal,
+            turnId: turn.turnId,
+            requestApproval,
+            reasoningHandlers: {
+              onRawReasoningDelta: (delta) => context.next({ type: 'reasoning.raw.delta', text: delta }),
+              onReasoningSummaryDelta: (delta) => context.next({ type: 'reasoning.summary.delta', text: delta }),
+              onPhase: (phase) => context.next({ type: 'model.progress', phase }),
+            },
+          });
+          finalMetrics = loopOutcome.metrics;
+        } else {
+          const handlers: ModelStreamHandlers = {
+            onAnswerDelta: (delta) => context.next({ type: 'answer.delta', text: delta }),
+            onRawReasoningDelta: (delta) => context.next({ type: 'reasoning.raw.delta', text: delta }),
+            onReasoningSummaryDelta: (delta) => context.next({ type: 'reasoning.summary.delta', text: delta }),
+            onPhase: (phase) => context.next({ type: 'model.progress', phase }),
+          };
+          finalMetrics = await runModel(
+            profile,
+            [
+              {
+                role: 'system',
+                content: 'You are a helpful private AI assistant. Keep answers clear, practical, and concise.',
+              },
+              ...withVisionAttachments(history, attachments),
+            ],
+            handlers,
+            signal,
+          );
+        }
         throwIfAborted(signal);
-        await context.next({ type: 'model.metrics', metrics });
-        throwIfAborted(signal);
+        if (finalMetrics) {
+          await context.next({ type: 'model.metrics', metrics: finalMetrics });
+          throwIfAborted(signal);
+        }
       } else {
         outcome = await executeDemo(
           {
@@ -311,6 +366,10 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
 
       const selectedProfile = database.getModelProfileForRuntime(message.modelProfileId);
+      const workspace = message.workspaceId ? database.getWorkspace(message.workspaceId) : undefined;
+      if (message.workspaceId && !workspace) {
+        throw new Error(`Workspace "${message.workspaceId}" is not registered.`);
+      }
       const attachments = message.attachments ?? [];
       const selectedSupportsVision = Boolean(
         selectedProfile?.capabilities.vision ||
@@ -352,7 +411,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         threadId: message.threadId,
         modelProfileId,
         title: profile ? `Chat with ${profile.name}` : demoTurnTitle(message.text),
-        run: (signal) => execute(scheduled, message.text, profile, history, attachments, approvalResponse, signal),
+        run: (signal) => execute(scheduled, message.text, profile, workspace, history, attachments, approvalResponse, signal),
       };
       scheduler.enqueue(scheduled);
       return { turnId };
@@ -437,8 +496,38 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
     return undefined;
   }
   if (message.type === 'turn.cancel') return turnRuntime.cancelTurn(message.turnId);
+  if (message.type === 'turn.undo') {
+    const turn = database.getSnapshot().turns.find((candidate) => candidate.id === message.turnId);
+    if (turn && ['queued', 'running', 'cancelling'].includes(turn.status)) {
+      throw new Error(`Turn "${message.turnId}" is still active.`);
+    }
+    return rollbackTurnFileChanges(database, message.turnId);
+  }
   if (message.type === 'turn.start') return turnRuntime.startTurn(message);
+  if (message.type === 'workspace.register') {
+    return registerWorkspaceFromPath(database, { path: message.path, trustLevel: message.trustLevel });
+  }
+  if (message.type === 'workspace.delete') return database.deleteWorkspace(message.workspaceId);
   return undefined;
+}
+
+/**
+ * Canonicalizes a user-selected directory through the workspace path security
+ * rules before persisting it, so the stored `canonicalRootPath` is the exact
+ * value every later containment check compares against.
+ */
+export function registerWorkspaceFromPath(
+  db: Pick<AppDatabase, 'registerWorkspace'>,
+  input: { path: string; trustLevel: WorkspaceTrustLevel },
+  normalize: (value: string) => string = normalizeWorkspacePath,
+): WorkspaceRecord {
+  const canonicalRootPath = normalize(input.path);
+  return db.registerWorkspace({
+    displayName: basename(canonicalRootPath) || canonicalRootPath,
+    rootPath: input.path.trim(),
+    canonicalRootPath,
+    trustLevel: input.trustLevel,
+  });
 }
 
 export function requireAcceptedApprovalResponse(
@@ -641,6 +730,15 @@ function isTerminalPayload(payload: SequencedEventPayload): boolean {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
+}
+
+/** Rejects a pending promise with the abort reason when the turn is cancelled. */
+function raceWithAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(abortReason(signal)), { once: true });
+    pending.then(resolve, reject);
+  });
 }
 
 function abortReason(signal: AbortSignal): unknown {

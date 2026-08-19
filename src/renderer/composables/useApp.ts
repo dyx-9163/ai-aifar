@@ -20,8 +20,11 @@ import type {
   ReasoningProtocol,
   RuntimeSettingsInput,
   TurnAttachment,
+  TurnRollbackReport,
   ThreadRuntimeState,
   ThreadSummary,
+  WorkspaceRecord,
+  WorkspaceTrustLevel,
 } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 
@@ -100,6 +103,7 @@ export function useApp() {
   const state = ref<RendererState>(emptyState());
   const loading = ref(true);
   const approvalResponseInFlightId = ref<string>();
+  const selectedWorkspaceId = ref<string | undefined>(undefined);
 
   const activeThread = computed(() =>
     state.value.snapshot.threads.find((thread) => thread.id === state.value.activeThreadId),
@@ -146,7 +150,16 @@ export function useApp() {
       readState: () => state.value,
       writeState: (next) => { state.value = next; },
       getSnapshot: () => window.desktop.getSnapshot(),
-      subscribe: (listener) => window.desktop.subscribe(listener),
+      subscribe: (listener) => window.desktop.subscribe((event) => {
+        listener(event);
+        // Terminal events carry no snapshot, but a finished turn may have
+        // written files; refresh so undo checkpoints show up immediately.
+        if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.cancelled') {
+          void window.desktop.getSnapshot().then((snapshot) => {
+            state.value = reduceEvent(state.value, { type: 'snapshot', snapshot });
+          });
+        }
+      }),
       onReady: () => { loading.value = false; },
     });
     unsubscribe = sync.dispose;
@@ -193,6 +206,7 @@ export function useApp() {
     }
     const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
     const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
+    const workspaceId = selectedWorkspaceId.value || undefined;
     const previousRuntime = state.value.runtimeByThread[threadId];
     state.value = {
       ...replaceThreadRuntime(state.value, threadId, {
@@ -204,7 +218,7 @@ export function useApp() {
     };
     try {
       const response = await withTimeout(
-        window.desktop.startTurn(threadId, text, modelProfileId, safeAttachments),
+        window.desktop.startTurn(threadId, text, modelProfileId, workspaceId, safeAttachments),
         TURN_START_ACK_TIMEOUT_MS,
         'Agent runtime did not acknowledge the turn within 10s.',
       );
@@ -370,6 +384,23 @@ export function useApp() {
     return window.desktop.testModelProfile(profile);
   }
 
+  async function registerWorkspace(path: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord> {
+    const workspace = await window.desktop.registerWorkspace(path, trustLevel);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return workspace;
+  }
+
+  async function deleteWorkspace(workspaceId: string): Promise<void> {
+    await window.desktop.deleteWorkspace(workspaceId);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
+  async function undoTurn(turnId: string): Promise<TurnRollbackReport> {
+    const report = await window.desktop.undoTurn(turnId);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return report;
+  }
+
   async function setLanguage(language: LanguagePreference): Promise<void> {
     await window.desktop.setLanguage(language);
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
@@ -414,6 +445,13 @@ export function useApp() {
     updateActiveModelRuntime,
     deleteModelProfile,
     testModelProfile,
+    registerWorkspace,
+    deleteWorkspace,
+    undoTurn,
+    selectedWorkspaceId,
+    selectWorkspace(workspaceId: string | undefined): void {
+      selectedWorkspaceId.value = workspaceId || undefined;
+    },
     setLanguage,
     updateSettings,
     selectModelProfile,

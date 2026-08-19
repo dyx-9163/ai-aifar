@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import type { ModelConnectionResult, ModelProfileInput, TurnAttachment } from '../shared/domain';
+import type { ModelConnectionResult, ModelProfileInput, TurnAttachment, TurnRecord, UndoableTurnSummary } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -119,6 +119,27 @@ async function respondApproval(approvalId: string, approved: boolean): Promise<v
     approvalError.value = t.value('approvalResponseFailed');
   }
 }
+
+const latestUndoableTurn = computed<UndoableTurnSummary | undefined>(() => {
+  const threadId = app.state.value.activeThreadId;
+  if (!threadId) return undefined;
+  const turnsById = new Map(app.state.value.snapshot.turns.map((turn) => [turn.id, turn]));
+  const candidates = app.state.value.snapshot.undoableTurns
+    .map((entry) => ({ entry, turn: turnsById.get(entry.turnId) }))
+    .filter((pair): pair is { entry: UndoableTurnSummary; turn: TurnRecord } =>
+      Boolean(pair.turn && pair.turn.threadId === threadId));
+  candidates.sort((left, right) => right.turn.createdAt.localeCompare(left.turn.createdAt));
+  return candidates[0]?.entry;
+});
+
+async function undoTurnFileChanges(turnId: string): Promise<void> {
+  runtimeError.value = '';
+  try {
+    await app.undoTurn(turnId);
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : t.value('undoTurnFailed');
+  }
+}
 </script>
 
 <template>
@@ -156,12 +177,17 @@ async function respondApproval(approvalId: string, approved: boolean): Promise<v
       :model-profiles="app.state.value.snapshot.modelProfiles"
       :active-model-profile-id="app.activeModelProfileId.value"
       :active-model-profile="app.activeModelProfile.value"
+      :workspaces="app.state.value.snapshot.workspaces"
+      :selected-workspace-id="app.selectedWorkspaceId.value"
+      :latest-undoable-turn="latestUndoableTurn"
       :runtime-error="runtimeError"
       :t="t"
       @submit="startTurn"
       @cancel="app.cancelTurn"
       @open-settings="view = 'settings'"
       @select-model="app.selectModelProfile"
+      @select-workspace="app.selectWorkspace"
+      @undo-turn="undoTurnFileChanges"
       @update-model-runtime="updateModelRuntime"
     />
 
@@ -185,11 +211,14 @@ async function respondApproval(approvalId: string, approved: boolean): Promise<v
       :active-model-profile-id="app.activeModelProfileId.value"
       :language="app.state.value.snapshot.settings.language"
       :settings="app.state.value.snapshot.settings"
+      :workspaces="app.state.value.snapshot.workspaces"
       :t="t"
       :save-model-profile="app.saveModelProfile"
       :test-model-profile="testModelProfile"
+      :register-workspace="app.registerWorkspace"
       @back="view = 'chat'"
       @delete-model-profile="app.deleteModelProfile"
+      @delete-workspace="app.deleteWorkspace"
       @select-model-profile="app.selectModelProfile"
       @set-language="app.setLanguage"
       @update-settings="app.updateSettings"

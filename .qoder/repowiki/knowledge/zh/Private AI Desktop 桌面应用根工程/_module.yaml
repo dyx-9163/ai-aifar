@@ -1,0 +1,21 @@
+schema_version: 1
+module_path: ""
+title: Private AI Desktop 桌面应用根工程
+scope:
+    - README.md
+    - .gitignore
+    - package.json
+    - pnpm-workspace.yaml
+    - pnpm-lock.yaml
+    - tsconfig.json
+    - tsconfig.node.json
+    - tsconfig.type-tests.json
+    - forge.config.ts
+    - index.html
+    - vite.agent.config.ts
+    - vite.main.config.ts
+    - vite.preload.config.ts
+    - vite.renderer.config.ts
+source_files: []
+depends_on: []
+related_to: []

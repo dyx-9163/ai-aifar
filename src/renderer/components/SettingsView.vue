@@ -11,6 +11,8 @@ import type {
   ReasoningMode,
   ReasoningProtocol,
   RuntimeSettingsInput,
+  WorkspaceRecord,
+  WorkspaceTrustLevel,
 } from '../../shared/domain';
 import { isLocalQwenServiceProfile } from '../../shared/localQwenIdentity';
 import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../../shared/modelProfileLimits';
@@ -39,21 +41,24 @@ const props = defineProps<{
   activeModelProfileId?: string;
   language: LanguagePreference;
   settings: AppSettings;
+  workspaces: WorkspaceRecord[];
   t: Translator;
   saveModelProfile: (profile: ModelProfileInput) => Promise<ModelProfile>;
   testModelProfile: (profile: ModelProfileInput) => Promise<ModelConnectionResult>;
+  registerWorkspace: (path: string, trustLevel: WorkspaceTrustLevel) => Promise<WorkspaceRecord>;
 }>();
 
 const emit = defineEmits<{
   back: [];
   deleteModelProfile: [id: string];
+  deleteWorkspace: [workspaceId: string];
   selectModelProfile: [id?: string];
   setLanguage: [language: LanguagePreference];
   updateSettings: [settings: RuntimeSettingsInput];
 }>();
 
 const modelStatus = ref(props.t('apiKeyNotice'));
-const activeSection = ref<'general' | 'models' | 'runtime'>('models');
+const activeSection = ref<'general' | 'workspaces' | 'models' | 'runtime'>('models');
 const connectionTestState = ref<ConnectionTestState>('untested');
 const connectionResult = ref<ModelConnectionResult>();
 const connectionGuidanceForLocalQwen = ref(false);
@@ -61,6 +66,10 @@ const testedFingerprint = ref<string>();
 const saving = ref(false);
 const testingConnection = ref(false);
 const formRevision = ref(0);
+const workspacePath = ref('');
+const workspaceTrust = ref<WorkspaceTrustLevel>('read-only');
+const workspaceStatus = ref('');
+const addingWorkspace = ref(false);
 const activeSaveOperationToken = ref(0);
 const activeConnectionOperationToken = ref(0);
 let nextSaveOperationToken = 0;
@@ -363,6 +372,27 @@ function deleteProfile(): void {
   resetForm();
 }
 
+async function addWorkspace(): Promise<void> {
+  const path = workspacePath.value.trim();
+  if (!path || addingWorkspace.value) {
+    return;
+  }
+  addingWorkspace.value = true;
+  workspaceStatus.value = '';
+  try {
+    await props.registerWorkspace(path, workspaceTrust.value);
+    workspacePath.value = '';
+    workspaceStatus.value = props.t('workspaceRegistered');
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : '';
+    workspaceStatus.value = detail
+      ? `${props.t('workspaceRegisterFailed')} ${detail}`
+      : props.t('workspaceRegisterFailed');
+  } finally {
+    addingWorkspace.value = false;
+  }
+}
+
 function handleLanguageChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value;
   if (value === 'zh-CN' || value === 'en-US') {
@@ -429,6 +459,10 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
           <span>{{ t('general') }}</span>
           <small>{{ t('generalHint') }}</small>
         </button>
+        <button type="button" :class="{ active: activeSection === 'workspaces' }" @click="activeSection = 'workspaces'">
+          <span>{{ t('workspacesSection') }}</span>
+          <small>{{ t('workspacesSectionHint') }}</small>
+        </button>
         <button type="button" :class="{ active: activeSection === 'models' }" @click="activeSection = 'models'">
           <span>{{ t('modelProviders') }}</span>
           <small>{{ t('modelProvidersHint') }}</small>
@@ -449,6 +483,54 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
             <option value="en-US">{{ t('english') }}</option>
           </select>
         </label>
+      </section>
+
+      <section v-else-if="activeSection === 'workspaces'" class="settings-card">
+        <p class="pane-label">{{ t('settings') }}</p>
+        <h2>{{ t('workspacesSection') }}</h2>
+        <p v-if="workspaces.length === 0" class="settings-note" data-testid="workspace-empty">{{ t('noWorkspaces') }}</p>
+        <ul v-else class="workspace-list" data-testid="workspace-list">
+          <li v-for="workspace in workspaces" :key="workspace.id" class="workspace-row">
+            <div class="workspace-row-text">
+              <strong>{{ workspace.displayName }}</strong>
+              <small>{{ workspace.canonicalRootPath }}</small>
+            </div>
+            <span class="workspace-trust-badge" :data-trust="workspace.trustLevel">
+              {{ workspace.trustLevel === 'read-write' ? t('workspaceReadWrite') : t('workspaceReadOnly') }}
+            </span>
+            <button type="button" class="secondary-button compact" @click="emit('deleteWorkspace', workspace.id)">{{ t('delete') }}</button>
+          </li>
+        </ul>
+        <label class="field-stack">
+          <span>{{ t('workspacePathLabel') }}</span>
+          <input
+            v-model="workspacePath"
+            class="text-input"
+            data-testid="workspace-path-input"
+            placeholder="D:\projects\demo"
+            spellcheck="false"
+          />
+        </label>
+        <label class="field-stack">
+          <span>{{ t('workspaceTrustLabel') }}</span>
+          <select v-model="workspaceTrust" class="model-select wide" data-testid="workspace-trust-select">
+            <option value="read-only">{{ t('workspaceReadOnly') }}</option>
+            <option value="read-write">{{ t('workspaceReadWrite') }}</option>
+          </select>
+        </label>
+        <p v-if="workspaceStatus" class="settings-note" data-testid="workspace-status" role="status">{{ workspaceStatus }}</p>
+        <div class="approval-actions">
+          <button
+            type="button"
+            class="primary-action compact"
+            data-testid="workspace-add-button"
+            :disabled="addingWorkspace || workspacePath.trim().length === 0"
+            :aria-busy="addingWorkspace"
+            @click="addWorkspace"
+          >
+            {{ t('addWorkspace') }}
+          </button>
+        </div>
       </section>
 
       <section v-else-if="activeSection === 'models'" class="settings-card model-provider-card">
