@@ -97,8 +97,9 @@ export interface ParsedToolCall {
 
 /** Extracts every tool call from assistant text: fenced JSON blocks first, then provider-native XML. */
 export function parseToolCalls(text: string): ParsedToolCall[] {
+  const source = normalizeDsmlTags(text);
   const fenced: ParsedToolCall[] = [];
-  for (const match of text.matchAll(FENCE_WITH_LANG_PATTERN)) {
+  for (const match of source.matchAll(FENCE_WITH_LANG_PATTERN)) {
     const language = (match[1] ?? '').trim().toLowerCase();
     const body = match[2] ?? '';
     const parsed = parseFencedToolCall(body);
@@ -110,7 +111,7 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
   }
   if (fenced.length > 0) return fenced;
   const xml: ParsedToolCall[] = [];
-  for (const match of text.matchAll(TOOL_INVOKE_GLOBAL_PATTERN)) {
+  for (const match of source.matchAll(TOOL_INVOKE_GLOBAL_PATTERN)) {
     const input: Record<string, unknown> = {};
     for (const parameter of match[2].matchAll(TOOL_PARAMETER_PATTERN)) {
       input[parameter[1]] = decodeToolParameter(parameter[2]);
@@ -179,6 +180,15 @@ function parseFencedToolCall(body: string): ParsedToolCall | undefined {
   return { tool, input };
 }
 
+/**
+ * DeepSeek-family models emit native tool calls with DSML special-token tags
+ * (<｜DSML｜invoke ...>, <｜DSML｜parameter ...>); rewrite them to plain XML so
+ * the shared invoke/parameter parsers understand both dialects.
+ */
+function normalizeDsmlTags(text: string): string {
+  return text.replace(/<\/?｜DSML｜/g, (tag) => (tag.startsWith('</') ? '</' : '<'));
+}
+
 /** Parameter values may be plain text or embedded JSON (numbers, arrays, objects). */
 function decodeToolParameter(raw: string): unknown {
   const trimmed = raw.trim();
@@ -208,7 +218,7 @@ export function looksLikeManualCodeDump(text: string): boolean {
  * XML block mid-way), which would otherwise be mistaken for a tool-free answer.
  */
 export function looksLikeTruncatedToolCall(text: string): boolean {
-  const withoutCompleteCalls = text
+  const withoutCompleteCalls = normalizeDsmlTags(text)
     .replace(/```tool\s*\n[\s\S]*?```/g, '')
     .replace(/<invoke\b[\s\S]*?<\/invoke>/g, '');
   return /```tool\b/.test(withoutCompleteCalls) || /<invoke\b/.test(withoutCompleteCalls);
@@ -268,7 +278,7 @@ const EMPTY_ANSWER_STEERING_MESSAGE = [
 
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
-  return text
+  return normalizeDsmlTags(text)
     .replace(FENCE_WITH_LANG_PATTERN, (whole, language: string, body: string) => {
       if (language.trim().toLowerCase() === 'tool') return '';
       const parsed = parseFencedToolCall(body);

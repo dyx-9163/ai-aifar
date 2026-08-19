@@ -147,6 +147,27 @@ describe('tool call parsing', () => {
     expect(parseToolCall(call)).toEqual({ tool: 'read_file', input: { path: 'src/main.ts', startLine: 2 } });
   });
 
+  it('parses DeepSeek DSML native tool calls including JSON parameters', () => {
+    const dsml =
+      '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="apply_patch">\n' +
+      '<｜DSML｜parameter name="path" string="true">src/style.css</｜DSML｜parameter>\n' +
+      '<｜DSML｜parameter name="edits" string="false">[{"startLine": 1, "endLine": 0, "replacement": ".a { color: red; }"}]</｜DSML｜parameter>\n' +
+      '</｜DSML｜invoke>\n</｜DSML｜tool_calls>';
+    expect(parseToolCall(dsml)).toEqual({
+      tool: 'apply_patch',
+      input: { path: 'src/style.css', edits: [{ startLine: 1, endLine: 0, replacement: '.a { color: red; }' }] },
+    });
+    expect(stripToolFences(dsml)).toBe('');
+  });
+
+  it('detects DSML tool calls cut off mid-parameter', () => {
+    const truncated =
+      '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="apply_patch">\n' +
+      '<｜DSML｜parameter name="files" string="false">[{"path": "src/App.vue", "edits": [{"startLine": 1,';
+    expect(parseToolCall(truncated)).toBeUndefined();
+    expect(looksLikeTruncatedToolCall(truncated)).toBe(true);
+  });
+
   it('strips XML tool call blocks from final text', () => {
     expect(stripToolFences(`Done. ${xmlInvoke('read_file', [['path', 'src/App.vue']])}`)).toBe('Done.');
     const stray = `${xmlInvoke('read_file', [['path', 'src/App.vue']])} ${xmlClose('invoke')}`;
@@ -583,6 +604,16 @@ describe('runAgentLoop', () => {
     expect(outcome.toolCallsExecuted).toBe(4);
     expect(modelCalls[3].map((message) => message.content).join('\n')).not.toContain('[harness]');
     expect(modelCalls[4].map((message) => message.content).join('\n')).toContain('[harness] You have read "src/main.ts" 4 times');
+  });
+
+  it('executes DeepSeek DSML native tool calls', async () => {
+    const dsml =
+      '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="read_file">\n' +
+      '<｜DSML｜parameter name="path" string="true">src/main.ts</｜DSML｜parameter>\n' +
+      '</｜DSML｜invoke>\n</｜DSML｜tool_calls>';
+    const { emitted, outcome } = await runLoop([dsml, 'It exports answer = 42.'], context);
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 1 });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
   });
 
   it('executes tool calls fenced as ordinary code blocks', async () => {
