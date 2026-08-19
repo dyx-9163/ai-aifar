@@ -35,8 +35,17 @@ export interface MessageItem extends BaseItem {
   kind: 'message';
   role: 'user' | 'assistant' | 'system';
   text: string;
+  attachments?: TurnAttachment[];
   // Existing rows without this field are complete unless their TurnRecord is unfinished.
   incomplete?: boolean;
+}
+
+export interface TurnAttachment {
+  kind: 'image';
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  size: number;
 }
 
 export type ReasoningOutputMode = 'raw' | 'summary';
@@ -92,7 +101,7 @@ export type ReasoningProtocol = 'none' | 'qwen' | 'openai' | 'custom';
 /** @deprecated Provider profiles declare their own effort strings. */
 export type ReasoningEffort = string;
 export type ModelResponseSpeed = 'standard' | 'fast' | 'quality';
-export type ModelRunPhase = 'connecting' | 'reasoning' | 'answering';
+export type ModelRunPhase = 'connecting' | 'compressing' | 'reasoning' | 'answering';
 export type ReasoningInputMode = 'unsupported' | 'toggle' | 'effort' | 'custom';
 export type ReasoningDisplayMode = 'auto' | 'raw' | 'summary';
 export type TurnStatus =
@@ -127,6 +136,7 @@ export interface ModelCapabilities {
     effortOptions: string[];
     outputModes: ReasoningOutputMode[];
     defaultEffort?: string;
+    customRequestBody?: Record<string, unknown>;
   };
   concurrency: {
     defaultLimit: number;

@@ -7,12 +7,15 @@ import type {
   ReasoningItem,
   ThreadRuntimeState,
   ThreadSummary,
+  TurnAttachment,
   TurnRecord,
 } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
+import { isLocalQwenServiceProfile } from '../../shared/localQwenIdentity';
 import { renderMarkdown } from '../markdown';
 import {
+  copyTextWithFeedback,
   groupReasoningItems,
   reasoningControls,
   reasoningMenuCommand,
@@ -42,7 +45,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  submit: [text: string];
+  submit: [text: string, attachments?: TurnAttachment[]];
   cancel: [];
   openSettings: [];
   selectModel: [modelProfileId?: string];
@@ -81,14 +84,20 @@ const standaloneReasoningGroup = computed<ReasoningItemGroup | undefined>(() => 
   );
   return hasAssistantAnchor ? undefined : { turnId: runtime.turnId, anchorId: `reasoning-${runtime.turnId}` };
 });
+const supportsVision = computed(() => Boolean(
+  props.activeModelProfile?.capabilities.vision ||
+  (props.activeModelProfile && isLocalQwenServiceProfile(props.activeModelProfile)),
+));
 const timelineRef = ref<HTMLElement>();
 const isPinnedToBottom = ref(true);
 const hasUnreadBelow = ref(false);
 const isAutoScrolling = ref(false);
+const messageCopyState = ref<Record<string, 'idle' | 'copied' | 'failed'>>({});
 const reasoningMenuOpen = ref(false);
 const reasoningMenuRef = ref<HTMLElement>();
 const reasoningTriggerRef = ref<HTMLButtonElement>();
 const reasoningMenuId = 'reasoning-effort-menu';
+const copyResetTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const scrollSignature = computed(() =>
   timelineEntries.value
@@ -134,7 +143,10 @@ const runtimeStatus = computed(() => {
   }
   return props.t(runtime.status);
 });
-const progressLabel = (phase: 'connecting' | 'reasoning' | 'answering') => {
+const progressLabel = (phase: 'connecting' | 'compressing' | 'reasoning' | 'answering') => {
+  if (phase === 'compressing') {
+    return props.t('modelCompressingContext');
+  }
   if (phase === 'reasoning') {
     return props.t('modelReasoning');
   }
@@ -143,6 +155,14 @@ const progressLabel = (phase: 'connecting' | 'reasoning' | 'answering') => {
   }
   return props.t('modelConnecting');
 };
+
+function userMessageText(text: string): string {
+  return text.replace(/\n\n\[已上传图片: .+\]$/, '');
+}
+
+function imageAttachments(entry: { attachments?: TurnAttachment[] }): TurnAttachment[] {
+  return entry.attachments?.filter((attachment) => attachment.kind === 'image') ?? [];
+}
 
 function setReasoningEffort(effort: string): void {
   reasoningMenuOpen.value = false;
@@ -190,7 +210,11 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 }
 
 onMounted(() => document.addEventListener('pointerdown', handleDocumentPointerDown));
-onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPointerDown));
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown);
+  for (const timer of copyResetTimers.values()) clearTimeout(timer);
+  copyResetTimers.clear();
+});
 
 function isReasoningRunning(group: ReasoningItemGroup): boolean {
   return props.activeRuntime?.turnId === group.turnId
@@ -239,6 +263,39 @@ function jumpToBottom(): void {
   isPinnedToBottom.value = true;
   hasUnreadBelow.value = false;
   void scrollToBottom();
+}
+
+function scheduleCopyStateReset(key: string): void {
+  const previous = copyResetTimers.get(key);
+  if (previous) clearTimeout(previous);
+  copyResetTimers.set(key, setTimeout(() => {
+    const next = { ...messageCopyState.value };
+    delete next[key];
+    messageCopyState.value = next;
+    copyResetTimers.delete(key);
+  }, 1_500));
+}
+
+async function copyAssistantMessage(entryId: string, text: string): Promise<void> {
+  const state = await copyTextWithFeedback((value) => navigator.clipboard.writeText(value), text);
+  messageCopyState.value = { ...messageCopyState.value, [entryId]: state };
+  scheduleCopyStateReset(entryId);
+}
+
+async function handleAssistantContentClick(event: MouseEvent): Promise<void> {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const button = target.closest<HTMLButtonElement>('button[data-copy-code-button="true"]');
+  if (!button) return;
+  const code = button.closest('.code-block')?.querySelector('pre code')?.textContent;
+  if (code === undefined) return;
+  const state = await copyTextWithFeedback((value) => navigator.clipboard.writeText(value), code);
+  button.dataset.copyState = state;
+  button.textContent = state === 'copied' ? props.t('copied') : props.t('copyCodeFailed');
+  setTimeout(() => {
+    button.dataset.copyState = 'idle';
+    button.textContent = props.t('copyCode');
+  }, 1_500);
 }
 
 watch(
@@ -400,14 +457,39 @@ function nextAnimationFrame(): Promise<void> {
             "
           >
             <template v-if="entry.kind === 'message'">
-              <span class="message-role">{{ entry.role === 'assistant' ? t('assistant') : entry.role === 'user' ? t('user') : entry.role }}</span>
+              <div class="message-header">
+                <span class="message-role">{{ entry.role === 'assistant' ? t('assistant') : entry.role === 'user' ? t('user') : entry.role }}</span>
+                <button
+                  v-if="entry.role === 'assistant'"
+                  type="button"
+                  class="message-copy-button"
+                  data-testid="copy-answer-button"
+                  :data-copy-state="messageCopyState[entry.id] ?? 'idle'"
+                  @click="copyAssistantMessage(entry.id, entry.text)"
+                >
+                  {{ messageCopyState[entry.id] === 'copied' ? t('copied') : messageCopyState[entry.id] === 'failed' ? t('copyAnswerFailed') : t('copyAnswer') }}
+                </button>
+              </div>
               <div
                 v-if="entry.role === 'assistant'"
                 class="message-content markdown-body"
                 data-testid="assistant-message-content"
-                v-html="renderMarkdown(entry.text)"
+                @click="handleAssistantContentClick"
+                v-html="renderMarkdown(entry.text, { copyCodeLabel: t('copyCode') })"
               ></div>
-              <p v-else class="message-content" :data-testid="`${entry.role}-message-content`">{{ entry.text }}</p>
+              <div v-else class="message-content user-message-content" :data-testid="`${entry.role}-message-content`">
+                <p>{{ userMessageText(entry.text) }}</p>
+                <div v-if="imageAttachments(entry).length > 0" class="message-attachments" :aria-label="t('attachedImages')">
+                  <figure
+                    v-for="(attachment, index) in imageAttachments(entry)"
+                    :key="`${entry.id}-${attachment.name}-${index}`"
+                    class="message-attachment"
+                  >
+                    <img :src="attachment.dataUrl" :alt="attachment.name" loading="lazy" />
+                    <figcaption :title="attachment.name">{{ attachment.name }}</figcaption>
+                  </figure>
+                </div>
+              </div>
             </template>
             <span v-else-if="entry.kind === 'progress'" class="progress-label">
               <span class="progress-dot" aria-hidden="true"></span>
@@ -423,8 +505,9 @@ function nextAnimationFrame(): Promise<void> {
     <Composer
       :active-busy="activeBusy"
       :active-runtime="activeRuntime"
+      :supports-vision="supportsVision"
       :t="t"
-      @submit="emit('submit', $event)"
+      @submit="(text, attachments) => emit('submit', text, attachments)"
       @cancel="emit('cancel')"
     />
   </section>

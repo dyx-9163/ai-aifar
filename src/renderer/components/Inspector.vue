@@ -32,7 +32,17 @@ function activityText(event: AgentEvent): string {
   if (event.type === 'turn.failed') {
     return `${event.type}: ${event.error}`;
   }
+  if (event.type === 'model.progress') {
+    return `${event.type}: ${progressText(event.phase)}`;
+  }
   return event.type;
+}
+
+function progressText(phase: 'connecting' | 'compressing' | 'reasoning' | 'answering'): string {
+  if (phase === 'compressing') return props.t('modelCompressingContext');
+  if (phase === 'reasoning') return props.t('modelReasoning');
+  if (phase === 'answering') return props.t('modelAnswering');
+  return props.t('modelConnecting');
 }
 
 function metricValue(value: number | undefined, suffix = ''): string {

@@ -11,15 +11,6 @@ export function reasoningConfigurationIssue(input: {
   protocol: ReasoningProtocol;
   mode: ReasoningMode;
 }): ReasoningConfigurationIssue | undefined {
-  if (input.inputMode === 'custom' || input.protocol === 'custom') {
-    return 'customUnsupported';
-  }
-  if (input.inputMode === 'toggle' && input.protocol !== 'qwen') {
-    return 'toggleRequiresQwen';
-  }
-  if (input.inputMode === 'effort' && input.protocol !== 'openai') {
-    return 'effortRequiresOpenAi';
-  }
   if (input.inputMode === 'unsupported' && input.mode !== 'disabled') {
     return 'unsupportedInputEnabled';
   }

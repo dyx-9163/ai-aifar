@@ -29,6 +29,7 @@ export interface ModelProfileFormValues {
   reasoningInputMode: ReasoningInputMode;
   effortOptions: string[];
   defaultEffort: string;
+  customRequestBodyText?: string;
   rawOutput: boolean;
   summaryOutput: boolean;
   maxConcurrency: number;
@@ -43,8 +44,16 @@ export interface EffortSelectionInput {
   defaultEffort: string;
 }
 
+export interface ReasoningControlSelection {
+  inputMode: ReasoningInputMode;
+  effortOptions: string[];
+  currentEffort: string;
+  defaultEffort: string;
+}
+
 export type EffortValidationIssue = 'effortOptionsRequired' | 'defaultEffortInvalid' | 'currentEffortInvalid';
 export type ConnectionTestState = 'untested' | 'testing' | 'failed' | ModelConnectionStatus;
+export const OPENAI_REASONING_EFFORT_OPTIONS = ['high', 'max'];
 
 /** Maximum Unicode code points shown for a configured model identifier in Settings diagnostics. */
 export const MAX_MODEL_IDENTIFIER_DISPLAY_LENGTH = 96;
@@ -141,6 +150,7 @@ export function buildModelProfileInput(
       ...(form.summaryOutput ? ['summary' as const] : []),
     ],
     defaultEffort: form.defaultEffort || undefined,
+    customRequestBody: parseCustomRequestBody(form.customRequestBodyText),
   };
 
   return {
@@ -163,6 +173,44 @@ export function buildModelProfileInput(
     maxOutputTokens: form.maxOutputTokens,
     responseSpeed: existing?.responseSpeed,
   };
+}
+
+export function isNewModelProfileDraft(formId: string | undefined, profiles: readonly ModelProfile[]): boolean {
+  return !formId || !profiles.some((profile) => profile.id === formId);
+}
+
+export function recommendedReasoningControlForProtocol(
+  protocol: ReasoningProtocol,
+  current: ReasoningControlSelection,
+): ReasoningControlSelection | undefined {
+  if (current.inputMode === 'custom') {
+    return undefined;
+  }
+  if (protocol === 'openai' && current.inputMode !== 'effort') {
+    return {
+      inputMode: 'effort',
+      effortOptions: [...OPENAI_REASONING_EFFORT_OPTIONS],
+      currentEffort: OPENAI_REASONING_EFFORT_OPTIONS[0] ?? '',
+      defaultEffort: OPENAI_REASONING_EFFORT_OPTIONS[0] ?? '',
+    };
+  }
+  if (protocol === 'qwen' && current.inputMode !== 'toggle') {
+    return {
+      inputMode: 'toggle',
+      effortOptions: [],
+      currentEffort: '',
+      defaultEffort: '',
+    };
+  }
+  if (protocol === 'none' && current.inputMode !== 'unsupported') {
+    return {
+      inputMode: 'unsupported',
+      effortOptions: [],
+      currentEffort: '',
+      defaultEffort: '',
+    };
+  }
+  return undefined;
 }
 
 export function reconcileEffortSelection(input: EffortSelectionInput): {
@@ -232,6 +280,21 @@ function reasoningEffortIsActive(input: EffortSelectionInput): boolean {
   return input.inputMode === 'effort' && (input.reasoningMode === 'enabled' || input.reasoningMode === 'auto');
 }
 
+export function customRequestBodyValidationIssue(inputMode: ReasoningInputMode, text: string | undefined): 'customRequestBodyInvalid' | undefined {
+  if (inputMode !== 'custom' || !text?.trim()) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return 'customRequestBodyInvalid';
+    }
+    return undefined;
+  } catch {
+    return 'customRequestBodyInvalid';
+  }
+}
+
 function replaceDiagnosticValues(template: string, result: ModelConnectionResult): string {
   const serviceSlots = result.status === 'connected' || result.status === 'concurrency-warning'
     ? result.serviceSlots
@@ -258,7 +321,7 @@ function canonicalCapabilities(): ModelCapabilities {
     text: true,
     vision: false,
     longContext: false,
-    reasoning: { inputMode: 'unsupported', effortOptions: [], outputModes: [] },
+    reasoning: { inputMode: 'unsupported', effortOptions: [], outputModes: [], customRequestBody: undefined },
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
     usage: { tokens: true, reasoningTokens: true },
@@ -272,10 +335,33 @@ function cloneCapabilities(capabilities: ModelCapabilities): ModelCapabilities {
       ...capabilities.reasoning,
       effortOptions: [...capabilities.reasoning.effortOptions],
       outputModes: [...capabilities.reasoning.outputModes],
+      customRequestBody: cloneCustomRequestBody(capabilities.reasoning.customRequestBody),
     },
     concurrency: { ...capabilities.concurrency },
     usage: { ...capabilities.usage },
   };
+}
+
+function parseCustomRequestBody(text: string | undefined): Record<string, unknown> | undefined {
+  if (!text?.trim()) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return undefined;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function cloneCustomRequestBody(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 function stableValue(value: unknown): unknown {

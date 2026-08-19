@@ -14,6 +14,7 @@ import type {
   ReasoningProtocol,
   RuntimeSettingsInput,
   ThemePreference,
+  TurnAttachment,
 } from './domain.js';
 import { reasoningConfigurationIssue } from './reasoningConfiguration.js';
 
@@ -24,7 +25,7 @@ export type DesktopRequest =
   | { type: 'thread.create'; title: string; groupId?: string }
   | { type: 'thread.delete'; threadId: string }
   | { type: 'thread.setModel'; threadId: string; modelProfileId?: string }
-  | { type: 'turn.start'; threadId: string; text: string; modelProfileId?: string }
+  | { type: 'turn.start'; threadId: string; text: string; modelProfileId?: string; attachments?: TurnAttachment[] }
   | { type: 'turn.cancel'; threadId: string; turnId: string }
   | { type: 'approval.respond'; approvalId: string; approved: boolean }
   | { type: 'modelProfile.save'; profile: ModelProfileInput }
@@ -78,6 +79,27 @@ function hasOptionalString(record: UnknownRecord, key: string): boolean {
   return record[key] === undefined || typeof record[key] === 'string';
 }
 
+function isTurnAttachment(value: unknown): value is TurnAttachment {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    value.kind === 'image' &&
+    hasString(value, 'name') &&
+    typeof value.mimeType === 'string' &&
+    value.mimeType.startsWith('image/') &&
+    typeof value.dataUrl === 'string' &&
+    value.dataUrl.startsWith(`data:${value.mimeType};base64,`) &&
+    Number.isInteger(value.size) &&
+    Number(value.size) > 0
+  );
+}
+
+function hasOptionalTurnAttachments(record: UnknownRecord): boolean {
+  const value = record.attachments;
+  return value === undefined || (Array.isArray(value) && value.every(isTurnAttachment));
+}
+
 function hasSequence(record: UnknownRecord): boolean {
   return Number.isInteger(record.sequence) && Number(record.sequence) >= 0;
 }
@@ -119,7 +141,7 @@ function isModelResponseSpeed(value: unknown): value is ModelResponseSpeed {
 }
 
 function isModelRunPhase(value: unknown): value is ModelRunPhase {
-  return value === 'connecting' || value === 'reasoning' || value === 'answering';
+  return value === 'connecting' || value === 'compressing' || value === 'reasoning' || value === 'answering';
 }
 
 function isReasoningInput(value: unknown): boolean {
@@ -265,7 +287,7 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
     case 'thread.setModel':
       return hasString(value, 'threadId') && hasOptionalString(value, 'modelProfileId');
     case 'turn.start':
-      return hasString(value, 'threadId') && hasString(value, 'text') && hasOptionalString(value, 'modelProfileId');
+      return hasString(value, 'threadId') && hasString(value, 'text') && hasOptionalString(value, 'modelProfileId') && hasOptionalTurnAttachments(value);
     case 'turn.cancel':
       return hasString(value, 'threadId') && hasString(value, 'turnId');
     case 'approval.respond':

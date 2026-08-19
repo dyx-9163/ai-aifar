@@ -774,6 +774,24 @@ describe('sqlite app database', () => {
     second.close();
   });
 
+  it('normalizes DashScope compatible-mode model profile base URLs to the OpenAI-compatible v1 endpoint', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const saved = db.saveModelProfile({
+        name: 'DashScope DeepSeek',
+        provider: 'openai-compatible',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode',
+        model: 'deepseek-v4-pro',
+        apiKey: 'secret',
+      });
+
+      expect(saved.baseUrl).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+      expect(db.getModelProfileForRuntime(saved.id)?.baseUrl).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    } finally {
+      db.close();
+    }
+  });
+
   it('persists runtime settings across reopen', () => {
     const dbPath = createDbPath();
     const first = openDatabase(dbPath);

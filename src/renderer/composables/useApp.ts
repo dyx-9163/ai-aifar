@@ -19,6 +19,7 @@ import type {
   ReasoningMode,
   ReasoningProtocol,
   RuntimeSettingsInput,
+  TurnAttachment,
   ThreadRuntimeState,
   ThreadSummary,
 } from '../../shared/domain';
@@ -185,7 +186,11 @@ export function useApp() {
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
   }
 
-  async function startTurn(text: string): Promise<void> {
+  async function startTurn(text: string, attachments: TurnAttachment[] = []): Promise<void> {
+    const safeAttachments = cloneTurnAttachments(attachments);
+    if (safeAttachments.length > 0 && !window.desktop.supportsTurnAttachments) {
+      throw new Error('客户端尚未加载图片发送能力，请重启应用后再上传图片。');
+    }
     const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
     const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
     const previousRuntime = state.value.runtimeByThread[threadId];
@@ -199,12 +204,18 @@ export function useApp() {
     };
     try {
       const response = await withTimeout(
-        window.desktop.startTurn(threadId, text, modelProfileId),
+        window.desktop.startTurn(threadId, text, modelProfileId, safeAttachments),
         TURN_START_ACK_TIMEOUT_MS,
         'Agent runtime did not acknowledge the turn within 10s.',
       );
       state.value = acknowledgeThreadTurn(state.value, threadId, response.turnId, modelProfileId);
-      state.value = appendOptimisticUserMessage(state.value, threadId, response.turnId, text);
+      state.value = appendOptimisticUserMessage(
+        state.value,
+        threadId,
+        response.turnId,
+        userDisplayText(text, safeAttachments),
+        safeAttachments,
+      );
     } catch (error) {
       if (state.value.optimisticThreads[threadId]) {
         const optimisticThreads = { ...state.value.optimisticThreads };
@@ -456,6 +467,23 @@ function replaceModelProfile(state: RendererState, profile: ModelProfile): Rende
       modelProfiles: state.snapshot.modelProfiles.map((candidate) => (candidate.id === profile.id ? profile : candidate)),
     },
   };
+}
+
+function userDisplayText(text: string, attachments: TurnAttachment[]): string {
+  if (attachments.length === 0) {
+    return text;
+  }
+  return `${text}\n\n[已上传图片: ${attachments.map((attachment) => attachment.name).join(', ')}]`;
+}
+
+function cloneTurnAttachments(attachments: TurnAttachment[]): TurnAttachment[] {
+  return attachments.map((attachment) => ({
+    kind: attachment.kind,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    dataUrl: attachment.dataUrl,
+    size: attachment.size,
+  }));
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

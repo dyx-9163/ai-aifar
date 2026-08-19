@@ -94,31 +94,22 @@ describe('model capabilities', () => {
 
   it.each([
     {
-      name: 'toggle with the OpenAI protocol',
+      name: 'toggle with the OpenAI provider label',
       inputMode: 'toggle' as const,
       protocol: 'openai' as const,
-      error: 'toggle reasoning requires the qwen protocol',
     },
     {
-      name: 'effort with the Qwen protocol',
+      name: 'effort with the Qwen provider label',
       inputMode: 'effort' as const,
       protocol: 'qwen' as const,
-      error: 'effort reasoning requires the openai protocol',
     },
     {
-      name: 'an enabled input with no protocol',
-      inputMode: 'toggle' as const,
-      protocol: 'none' as const,
-      error: 'toggle reasoning requires the qwen protocol',
-    },
-    {
-      name: 'an unimplemented custom input',
+      name: 'a custom request body',
       inputMode: 'custom' as const,
       protocol: 'custom' as const,
-      error: 'custom reasoning is not implemented',
     },
-  ])('rejects $name', ({ inputMode, protocol, error }) => {
-    const invalid: RuntimeModelProfile = {
+  ])('allows $name because request format is configured independently', ({ inputMode, protocol }) => {
+    const valid: RuntimeModelProfile = {
       ...profileFixture({ effortOptions: ['low'], effort: 'low' }),
       capabilities: {
         ...openAiCapabilities(['low']),
@@ -126,12 +117,30 @@ describe('model capabilities', () => {
           inputMode,
           effortOptions: inputMode === 'effort' ? ['low'] : [],
           outputModes: [],
-        },
+          customRequestBody: inputMode === 'custom' ? { extra_body: { thinking: true } } : undefined,
+        } as never,
       },
       reasoning: { mode: 'enabled', protocol, effort: 'low', display: 'auto' },
     };
 
-    expect(() => validateReasoningSelection(invalid)).toThrow(error);
+    expect(() => validateReasoningSelection(valid)).not.toThrow();
+  });
+
+  it('rejects an enabled control profile with no request parameter format', () => {
+    const invalid: RuntimeModelProfile = {
+      ...profileFixture({ effortOptions: ['low'], effort: 'low' }),
+      capabilities: {
+        ...openAiCapabilities(['low']),
+        reasoning: {
+          inputMode: 'unsupported',
+          effortOptions: [],
+          outputModes: [],
+        },
+      },
+      reasoning: { mode: 'enabled', protocol: 'none', effort: 'low', display: 'auto' },
+    };
+
+    expect(() => validateReasoningSelection(invalid)).toThrow('does not support enabled reasoning input');
   });
 
   it('bounds profile concurrency by the declared capability limit', () => {

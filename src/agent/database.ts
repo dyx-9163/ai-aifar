@@ -18,6 +18,7 @@ import type {
   ThreadSummary,
   TurnRecord,
 } from '../shared/domain.js';
+import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import {
   normalizeMaxConcurrency,
   normalizeMaxOutputTokens,
@@ -914,8 +915,8 @@ class SqliteAppDatabase implements AppDatabase {
   private repairOrSeedLocalQwenProfile(): void {
     const preset = localQwenProfileInput();
     const rows = this.db
-      .prepare('SELECT id, provider, base_url, model FROM model_profiles')
-      .all() as Array<{ id: string; provider: ModelProfile['provider']; base_url: string; model: string }>;
+      .prepare('SELECT id, provider, base_url, model, capabilities FROM model_profiles')
+      .all() as Array<{ id: string; provider: ModelProfile['provider']; base_url: string; model: string; capabilities: string }>;
     const placeholders = rows.filter((row) => isLegacyLocalQwenPlaceholder({
       provider: row.provider,
       baseUrl: row.base_url,
@@ -948,11 +949,28 @@ class SqliteAppDatabase implements AppDatabase {
       return;
     }
 
-    const equivalent = rows.some((row) =>
+    const equivalentRows = rows.filter((row) =>
       row.provider === 'openai-compatible' &&
       row.base_url === LOCAL_QWEN_BASE_URL &&
       row.model === LOCAL_QWEN_MODEL);
-    if (equivalent) {
+    if (equivalentRows.length > 0) {
+      const updateCapabilities = this.db.prepare(`
+        UPDATE model_profiles
+        SET capabilities = :capabilities,
+            updated_at = :updatedAt
+        WHERE id = :id
+      `);
+      const updatedAt = new Date().toISOString();
+      for (const row of equivalentRows) {
+        const capabilities = parseCapabilities(row.capabilities, 'qwen');
+        if (!capabilities.vision) {
+          updateCapabilities.run({
+            id: row.id,
+            capabilities: JSON.stringify({ ...capabilities, vision: true }),
+            updatedAt,
+          });
+        }
+      }
       return;
     }
 
@@ -1244,7 +1262,7 @@ function normalizeResponseSpeed(value: unknown): ModelResponseSpeed {
 
 function normalizeBaseUrl(value: string): string {
   const trimmed = requireTrimmed(value, 'Base URL');
-  return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+  return normalizeModelBaseUrl(trimmed);
 }
 
 function requireTrimmed(value: string, label: string): string {

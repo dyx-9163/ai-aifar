@@ -6,6 +6,7 @@ import type {
   ReasoningItem,
   ReasoningOutputMode,
   ThreadRuntimeState,
+  TurnAttachment,
   TurnRecord,
 } from '../shared/domain';
 import type { AgentEvent, SequencedAgentEvent } from '../shared/protocol';
@@ -183,6 +184,7 @@ export function appendOptimisticUserMessage(
   threadId: string,
   turnId: string,
   text: string,
+  attachments: TurnAttachment[] = [],
 ): AgentClientState {
   const item: Item = {
     id: `item-${turnId}-user`,
@@ -191,6 +193,7 @@ export function appendOptimisticUserMessage(
     kind: 'message',
     role: 'user',
     text,
+    ...(attachments.length > 0 ? { attachments } : {}),
     createdAt: new Date().toISOString(),
   };
   const existingItems = state.snapshot.items[threadId] ?? [];

@@ -23,11 +23,14 @@ import {
   buildModelProfileInput,
   captureFormOperation,
   connectionTestStateForFingerprint,
+  customRequestBodyValidationIssue,
   effortValidationIssue,
   formOperationCanApply,
+  isNewModelProfileDraft,
   maxOutputTokensIsValid,
   modelConnectionDiagnostic,
   modelProfileFormFingerprint,
+  recommendedReasoningControlForProtocol,
   reasoningConfigurationValidationIssue,
   reconcileEffortSelection,
   runModelProfileSave,
@@ -373,6 +376,11 @@ describe('renderer state reducer', () => {
     });
   });
 
+  it('marks an empty form id as a new model draft even when existing profiles remain visible', () => {
+    expect(isNewModelProfileDraft('', [modelProfileFixture(openAiCapabilities([]))])).toBe(true);
+    expect(isNewModelProfileDraft('model-1', [modelProfileFixture(openAiCapabilities([]))])).toBe(false);
+  });
+
   it('selects a persisted fallback when effort options remove the current and default values', () => {
     expect(reconcileEffortSelection({
       reasoningMode: 'enabled',
@@ -406,16 +414,54 @@ describe('renderer state reducer', () => {
   });
 
   it.each([
-    ['toggle', 'openai', 'toggleRequiresQwen'],
-    ['effort', 'qwen', 'effortRequiresOpenAi'],
-    ['toggle', 'none', 'toggleRequiresQwen'],
-    ['custom', 'custom', 'customUnsupported'],
-  ] as const)('reports invalid settings input %s with protocol %s', (inputMode, protocol, issue) => {
+    ['toggle', 'openai'],
+    ['effort', 'qwen'],
+    ['toggle', 'none'],
+    ['custom', 'custom'],
+  ] as const)('allows settings request format %s with provider label %s', (inputMode, protocol) => {
     expect(reasoningConfigurationValidationIssue({
       reasoningMode: 'enabled',
       inputMode,
       protocol,
-    })).toBe(issue);
+    })).toBeUndefined();
+  });
+
+  it('reports invalid custom request body JSON before save or connection test', () => {
+    expect(customRequestBodyValidationIssue('custom', '{"extra_body":{"thinking":true}}')).toBeUndefined();
+    expect(customRequestBodyValidationIssue('custom', '[1]')).toBe('customRequestBodyInvalid');
+    expect(customRequestBodyValidationIssue('custom', '{')).toBe('customRequestBodyInvalid');
+    expect(customRequestBodyValidationIssue('effort', '{')).toBeUndefined();
+  });
+
+  it('recommends a matching reasoning control when the compatibility label changes', () => {
+    expect(recommendedReasoningControlForProtocol('openai', {
+      inputMode: 'toggle',
+      effortOptions: [],
+      currentEffort: '',
+      defaultEffort: '',
+    })).toEqual({
+      inputMode: 'effort',
+      effortOptions: ['high', 'max'],
+      currentEffort: 'high',
+      defaultEffort: 'high',
+    });
+    expect(recommendedReasoningControlForProtocol('qwen', {
+      inputMode: 'effort',
+      effortOptions: ['high', 'max'],
+      currentEffort: 'high',
+      defaultEffort: 'high',
+    })).toEqual({
+      inputMode: 'toggle',
+      effortOptions: [],
+      currentEffort: '',
+      defaultEffort: '',
+    });
+    expect(recommendedReasoningControlForProtocol('openai', {
+      inputMode: 'custom',
+      effortOptions: [],
+      currentEffort: '',
+      defaultEffort: '',
+    })).toBeUndefined();
   });
 
   it('awaits model profile persistence and converts rejection into an explicit result', async () => {
@@ -1831,6 +1877,73 @@ describe('renderer state reducer', () => {
     }], [], createTranslator('zh-CN'))[0]?.text).toBe(
       '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
     );
+  });
+
+  it('places persisted metrics after the message from the same turn instead of stacking all metrics at the end', () => {
+    const firstMetrics = {
+      modelProfileId: 'model-1',
+      modelName: 'Model 1',
+      reasoningRequested: 'disabled' as const,
+      reasoningProtocol: 'qwen' as const,
+      reasoningObserved: false,
+      durationMs: 1_000,
+      completionTokens: 10,
+      finishReason: 'stop',
+    };
+    const secondMetrics = {
+      ...firstMetrics,
+      durationMs: 2_000,
+      completionTokens: 20,
+    };
+    const items: Item[] = [
+      {
+        id: 'item-turn-1-assistant',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: 'first answer',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      },
+      {
+        id: 'item-turn-2-assistant',
+        threadId: 'thread-1',
+        turnId: 'turn-2',
+        kind: 'message',
+        role: 'assistant',
+        text: 'second answer',
+        createdAt: '2026-08-17T00:00:03.000Z',
+      },
+    ];
+    const entries = createTimelineEntries(items, [], [
+      {
+        id: 'turn-1',
+        threadId: 'thread-1',
+        modelProfileId: 'model-1',
+        status: 'completed',
+        createdAt: '2026-08-17T00:00:00.000Z',
+        completedAt: '2026-08-17T00:00:02.000Z',
+        incomplete: false,
+        metrics: firstMetrics,
+      },
+      {
+        id: 'turn-2',
+        threadId: 'thread-1',
+        modelProfileId: 'model-1',
+        status: 'completed',
+        createdAt: '2026-08-17T00:00:02.000Z',
+        completedAt: '2026-08-17T00:00:04.000Z',
+        incomplete: false,
+        metrics: secondMetrics,
+      },
+    ], createTranslator('en-US'));
+
+    expect(entries.map((entry) => entry.id)).toEqual([
+      'item-turn-1-assistant',
+      'model.metrics-turn-1-persisted',
+      'item-turn-2-assistant',
+      'model.metrics-turn-2-persisted',
+    ]);
   });
 
   it('rebuilds active Inspector and timeline metrics from a reloaded snapshot', () => {

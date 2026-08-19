@@ -183,7 +183,28 @@ describe('desktop protocol guards', () => {
     ['effort', 'qwen'],
     ['toggle', 'none'],
     ['custom', 'custom'],
-  ] as const)('rejects reasoning input %s with protocol %s', (inputMode, protocol) => {
+  ] as const)('accepts reasoning request format %s with provider label %s', (inputMode, protocol) => {
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: {
+        name: 'Generic reasoning mapping',
+        provider: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'fixture',
+        capabilities: {
+          reasoning: {
+            inputMode,
+            effortOptions: inputMode === 'effort' ? ['low'] : [],
+            outputModes: [],
+            customRequestBody: inputMode === 'custom' ? { extra_body: { thinking: true } } : undefined,
+          },
+        },
+        reasoning: { mode: 'enabled', protocol, effort: 'low', display: 'auto' },
+      },
+    })).toBe(true);
+  });
+
+  it('rejects enabled reasoning when no request control format is declared', () => {
     expect(isDesktopRequest({
       type: 'modelProfile.save',
       profile: {
@@ -193,12 +214,12 @@ describe('desktop protocol guards', () => {
         model: 'fixture',
         capabilities: {
           reasoning: {
-            inputMode,
-            effortOptions: inputMode === 'effort' ? ['low'] : [],
+            inputMode: 'unsupported',
+            effortOptions: [],
             outputModes: [],
           },
         },
-        reasoning: { mode: 'enabled', protocol, effort: 'low', display: 'auto' },
+        reasoning: { mode: 'enabled', protocol: 'none', effort: 'low', display: 'auto' },
       },
     })).toBe(false);
   });

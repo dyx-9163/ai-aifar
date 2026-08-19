@@ -14,9 +14,9 @@ export { DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../shared/modelPro
 export function qwenCapabilities(): ModelCapabilities {
   return {
     text: true,
-    vision: false,
+    vision: true,
     longContext: false,
-    reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+    reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'], customRequestBody: undefined },
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
     usage: { tokens: true, reasoningTokens: true },
@@ -34,6 +34,7 @@ export function openAiCapabilities(effortOptions: string[] = []): ModelCapabilit
       effortOptions: declaredEffortOptions,
       outputModes: declaredEffortOptions.length ? ['summary'] : [],
       defaultEffort: declaredEffortOptions.includes('medium') ? 'medium' : declaredEffortOptions[0],
+      customRequestBody: undefined,
     },
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
@@ -157,11 +158,12 @@ function normalizeReasoningCapabilities(reasoning: Record<string, unknown>): Mod
     effortOptions,
     outputModes,
     defaultEffort: defaultEffort && effortOptions.includes(defaultEffort) ? defaultEffort : undefined,
+    customRequestBody: asRecord(reasoning.customRequestBody),
   };
 }
 
 function unsupportedReasoningCapabilities(): ModelCapabilities['reasoning'] {
-  return { inputMode: 'unsupported', effortOptions: [], outputModes: [] };
+  return { inputMode: 'unsupported', effortOptions: [], outputModes: [], customRequestBody: undefined };
 }
 
 function reasoningConfigurationMessage(issue: ReasoningConfigurationIssue): string {

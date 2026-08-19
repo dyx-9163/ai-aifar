@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import type { ModelConnectionResult, ModelProfileInput } from '../shared/domain';
+import type { ModelConnectionResult, ModelProfileInput, TurnAttachment } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -102,6 +102,15 @@ async function updateModelRuntime(patch: {
   }
 }
 
+async function startTurn(text: string, attachments?: TurnAttachment[]): Promise<void> {
+  runtimeError.value = '';
+  try {
+    await app.startTurn(text, attachments);
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : '发送失败，请重试。';
+  }
+}
+
 async function respondApproval(approvalId: string, approved: boolean): Promise<void> {
   approvalError.value = '';
   try {
@@ -149,7 +158,7 @@ async function respondApproval(approvalId: string, approved: boolean): Promise<v
       :active-model-profile="app.activeModelProfile.value"
       :runtime-error="runtimeError"
       :t="t"
-      @submit="app.startTurn"
+      @submit="startTurn"
       @cancel="app.cancelTurn"
       @open-settings="view = 'settings'"
       @select-model="app.selectModelProfile"

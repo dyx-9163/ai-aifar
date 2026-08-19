@@ -1,8 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { LanguagePreference, ModelConnectionResult, ModelProfileInput, RuntimeSettingsInput } from './shared/domain.js';
+import type { LanguagePreference, ModelConnectionResult, ModelProfileInput, RuntimeSettingsInput, TurnAttachment } from './shared/domain.js';
 import type { AgentEvent } from './shared/protocol.js';
 
 contextBridge.exposeInMainWorld('desktop', {
+  supportsTurnAttachments: true,
   health: () => ipcRenderer.invoke('app:health'),
   getSnapshot: () => ipcRenderer.invoke('desktop:request', { type: 'snapshot.get' }),
   createGroup: (name: string) => ipcRenderer.invoke('desktop:request', { type: 'group.create', name }),
@@ -11,8 +12,8 @@ contextBridge.exposeInMainWorld('desktop', {
   deleteThread: (threadId: string) => ipcRenderer.invoke('desktop:request', { type: 'thread.delete', threadId }),
   setThreadModel: (threadId: string, modelProfileId?: string) =>
     ipcRenderer.invoke('desktop:request', { type: 'thread.setModel', threadId, modelProfileId }),
-  startTurn: (threadId: string, text: string, modelProfileId?: string) =>
-    ipcRenderer.invoke('desktop:request', { type: 'turn.start', threadId, text, modelProfileId }),
+  startTurn: (threadId: string, text: string, modelProfileId?: string, attachments?: TurnAttachment[]) =>
+    ipcRenderer.invoke('desktop:request', { type: 'turn.start', threadId, text, modelProfileId, attachments }),
   cancelTurn: (threadId: string, turnId: string) => ipcRenderer.invoke('desktop:request', { type: 'turn.cancel', threadId, turnId }),
   respondApproval: (approvalId: string, approved: boolean) =>
     ipcRenderer.invoke('desktop:request', { type: 'approval.respond', approvalId, approved }),

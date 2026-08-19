@@ -65,6 +65,30 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('normalizes DashScope compatible-mode transient profile URLs before testing connections', async () => {
+    const harness = createHarness(async () => metrics());
+    let received: RuntimeModelProfile | undefined;
+
+    await testRuntimeModelProfileConnection({
+      name: 'DashScope DeepSeek',
+      provider: 'openai-compatible',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode',
+      model: 'deepseek-v4-pro',
+    }, harness.database, async (profile) => {
+      received = profile;
+      return {
+        ok: true,
+        status: 'slots-unverified',
+        message: 'connected',
+        model: profile.model,
+        clientConcurrency: profile.maxConcurrency,
+      };
+    });
+
+    expect(received?.baseUrl).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    harness.database.close();
+  });
+
   it('routes a typed model mismatch without converting it to an exception', async () => {
     const harness = createHarness(async () => metrics());
     const expected: ModelConnectionResult = {
@@ -251,7 +275,7 @@ describe('worker turn runtime', () => {
       type: 'turn.start',
       threadId: thread.id,
       text: '修改配置文件',
-      modelProfileId: harness.profile.id,
+      modelProfileId: 'missing-model',
     });
     await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
 
@@ -277,16 +301,48 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('routes write-like text to the selected runtime model instead of the demo approval path', async () => {
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      await handlers.onAnswerDelta('model handled write/delete wording');
+      return metrics();
+    });
+    const thread = harness.database.createThread('Runtime model write wording');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: '长文本里提到写入/删除类提示词需要审批，但这是需求内容。',
+      modelProfileId: harness.profile.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    expect(typesFor(harness.events, turnId)).toContain('answer.delta');
+    expect(typesFor(harness.events, turnId)).not.toContain('approval.required');
+    expect(harness.database.getSnapshot().turns).toContainEqual(expect.objectContaining({
+      id: turnId,
+      modelProfileId: harness.profile.id,
+      status: 'completed',
+    }));
+    expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+      id: `item-${turnId}-assistant`,
+      text: 'model handled write/delete wording',
+    }));
+    expect(harness.database.getSnapshot().items[thread.id]).not.toContainEqual(expect.objectContaining({
+      text: expect.stringContaining('No filesystem changes were made'),
+    }));
+    harness.database.close();
+  });
+
   it('expires approval state for running and queued cancellation before rejecting stale responses', async () => {
     const harness = createHarness(async () => metrics());
     const runningThread = harness.database.createThread('Running approval');
     const queuedThread = harness.database.createThread('Queued approval');
     const running = harness.runtime.startTurn({
-      type: 'turn.start', threadId: runningThread.id, text: '修改运行配置', modelProfileId: harness.profile.id,
+      type: 'turn.start', threadId: runningThread.id, text: '修改运行配置', modelProfileId: 'missing-model',
     });
     await eventually(() => expect(typesFor(harness.events, running.turnId)).toContain('approval.required'));
     const queued = harness.runtime.startTurn({
-      type: 'turn.start', threadId: queuedThread.id, text: '删除排队配置', modelProfileId: harness.profile.id,
+      type: 'turn.start', threadId: queuedThread.id, text: '删除排队配置', modelProfileId: 'missing-model',
     });
     await eventually(() => expect(typesFor(harness.events, queued.turnId)).toEqual(['turn.queued']));
 
@@ -309,7 +365,7 @@ describe('worker turn runtime', () => {
     const harness = createHarness(async () => metrics());
     const thread = harness.database.createThread('Interrupted approval');
     const { turnId } = harness.runtime.startTurn({
-      type: 'turn.start', threadId: thread.id, text: '修改后重启', modelProfileId: harness.profile.id,
+      type: 'turn.start', threadId: thread.id, text: '修改后重启', modelProfileId: 'missing-model',
     });
     await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
     harness.database.close();
@@ -330,7 +386,7 @@ describe('worker turn runtime', () => {
     const harness = createHarness(async () => metrics(), undefined, true, 'approval.required');
     const thread = harness.database.createThread('Approval delivery failure');
     const { turnId } = harness.runtime.startTurn({
-      type: 'turn.start', threadId: thread.id, text: '修改投递失败配置', modelProfileId: harness.profile.id,
+      type: 'turn.start', threadId: thread.id, text: '修改投递失败配置', modelProfileId: 'missing-model',
     });
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
 
@@ -357,7 +413,7 @@ describe('worker turn runtime', () => {
     const harness = createHarness(async () => metrics(), undefined, true, 'approval.required', true);
     const thread = harness.database.createThread('Approval settlement failure');
     const { turnId } = harness.runtime.startTurn({
-      type: 'turn.start', threadId: thread.id, text: '修改清理失败配置', modelProfileId: harness.profile.id,
+      type: 'turn.start', threadId: thread.id, text: '修改清理失败配置', modelProfileId: 'missing-model',
     });
     await eventually(() => expect(harness.approvalSettlementAttempts()).toBe(1));
 

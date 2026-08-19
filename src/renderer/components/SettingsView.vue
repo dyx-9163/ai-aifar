@@ -19,11 +19,14 @@ import {
   buildModelProfileInput,
   captureFormOperation,
   connectionTestStateForFingerprint,
+  customRequestBodyValidationIssue,
   effortValidationIssue,
   formOperationCanApply,
+  isNewModelProfileDraft,
   maxOutputTokensIsValid,
   modelConnectionDiagnostic,
   modelProfileFormFingerprint,
+  recommendedReasoningControlForProtocol,
   reconcileEffortSelection,
   reasoningConfigurationValidationIssue,
   runModelProfileSave,
@@ -75,6 +78,7 @@ const form = reactive({
   profileReasoningDisplay: 'auto' as ReasoningDisplayMode,
   reasoningInputMode: 'unsupported' as ReasoningInputMode,
   effortOptionsText: '',
+  customRequestBodyText: '',
   defaultEffort: '',
   rawOutput: false,
   summaryOutput: false,
@@ -89,6 +93,7 @@ const effortOptions = computed(() => [...new Set(
     .filter(Boolean),
 )]);
 const editingProfile = computed(() => props.modelProfiles.find((profile) => profile.id === form.id));
+const newProfileDraft = computed(() => isNewModelProfileDraft(form.id, props.modelProfiles));
 const maxConcurrencyLimit = computed(() => editingProfile.value?.capabilities.concurrency.maxLimit ?? 32);
 const connectionDiagnostic = computed(() => {
   const result = connectionResult.value;
@@ -109,6 +114,10 @@ const capabilityError = computed(() => {
   });
   if (configurationIssue) {
     return props.t(configurationIssue);
+  }
+  const customIssue = customRequestBodyValidationIssue(form.reasoningInputMode, form.customRequestBodyText);
+  if (customIssue) {
+    return props.t(customIssue);
   }
   const issue = effortValidationIssue({
     reasoningMode: form.reasoningMode,
@@ -140,8 +149,28 @@ watch(
 );
 
 watch(
-  () => [form.reasoningMode, form.reasoningInputMode, form.effortOptionsText] as const,
+  () => [form.reasoningMode, form.reasoningInputMode, form.effortOptionsText, form.customRequestBodyText] as const,
   synchronizeEffortSelection,
+  { flush: 'sync' },
+);
+
+watch(
+  () => form.reasoningProtocol,
+  () => {
+    const recommendation = recommendedReasoningControlForProtocol(form.reasoningProtocol, {
+      inputMode: form.reasoningInputMode,
+      effortOptions: effortOptions.value,
+      currentEffort: form.reasoningEffort,
+      defaultEffort: form.defaultEffort,
+    });
+    if (!recommendation) {
+      return;
+    }
+    form.reasoningInputMode = recommendation.inputMode;
+    form.effortOptionsText = recommendation.effortOptions.join(', ');
+    form.reasoningEffort = recommendation.currentEffort;
+    form.defaultEffort = recommendation.defaultEffort;
+  },
   { flush: 'sync' },
 );
 
@@ -175,6 +204,9 @@ function loadProfile(profile: ModelProfile): void {
   form.profileReasoningDisplay = profile.reasoning.display;
   form.reasoningInputMode = profile.capabilities.reasoning.inputMode;
   form.effortOptionsText = profile.capabilities.reasoning.effortOptions.join(', ');
+  form.customRequestBodyText = profile.capabilities.reasoning.customRequestBody
+    ? JSON.stringify(profile.capabilities.reasoning.customRequestBody, null, 2)
+    : '';
   form.defaultEffort = profile.capabilities.reasoning.defaultEffort ?? '';
   form.rawOutput = profile.capabilities.reasoning.outputModes.includes('raw');
   form.summaryOutput = profile.capabilities.reasoning.outputModes.includes('summary');
@@ -201,6 +233,7 @@ function resetForm(): void {
   form.profileReasoningDisplay = 'auto';
   form.reasoningInputMode = 'unsupported';
   form.effortOptionsText = '';
+  form.customRequestBodyText = '';
   form.defaultEffort = '';
   form.rawOutput = false;
   form.summaryOutput = false;
@@ -229,6 +262,7 @@ function inputFromForm(): ModelProfileInput {
     reasoningInputMode: form.reasoningInputMode,
     effortOptions: effortOptions.value,
     defaultEffort: form.defaultEffort,
+    customRequestBodyText: form.customRequestBodyText,
     rawOutput: form.rawOutput,
     summaryOutput: form.summaryOutput,
     maxConcurrency: form.maxConcurrency,
@@ -440,6 +474,16 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
           <aside class="profile-list-panel">
             <p v-if="modelProfiles.length === 0" class="settings-note">{{ t('noModelProfiles') }}</p>
             <button
+              v-if="newProfileDraft"
+              type="button"
+              class="profile-row active"
+              :disabled="saving"
+              aria-current="true"
+            >
+              <span>{{ t('addProvider') }}</span>
+              <small>{{ t('readyToAddModel') }}</small>
+            </button>
+            <button
               v-for="profile in modelProfiles"
               :key="profile.id"
               type="button"
@@ -527,6 +571,16 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                 <select v-model="form.defaultEffort" data-testid="default-effort-select" class="model-select wide">
                   <option v-for="effort in effortOptions" :key="effort" :value="effort">{{ effort }}</option>
                 </select>
+              </label>
+              <label v-if="form.reasoningInputMode === 'custom'" class="field-stack capability-wide">
+                <span>{{ t('customRequestBody') }}</span>
+                <textarea
+                  v-model="form.customRequestBodyText"
+                  class="text-input code-textarea"
+                  data-testid="custom-request-body-input"
+                  :placeholder="t('customRequestBodyPlaceholder')"
+                  spellcheck="false"
+                ></textarea>
               </label>
               <label class="check-row capability-check">
                 <input v-model="form.rawOutput" data-testid="raw-output-toggle" type="checkbox" />

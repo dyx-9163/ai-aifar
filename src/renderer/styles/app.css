@@ -525,11 +525,50 @@ button {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
+.message-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .message-role {
   color: var(--subtle);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.message-copy-button,
+.code-copy-button {
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: color-mix(in srgb, var(--panel-raised) 88%, transparent);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.message-copy-button:hover,
+.code-copy-button:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel-raised));
+}
+
+.message-copy-button[data-copy-state="copied"],
+.code-copy-button[data-copy-state="copied"] {
+  border-color: color-mix(in srgb, #4ade80 60%, var(--border));
+  color: #86efac;
+}
+
+.message-copy-button[data-copy-state="failed"],
+.code-copy-button[data-copy-state="failed"] {
+  border-color: color-mix(in srgb, #f87171 60%, var(--border));
+  color: #fca5a5;
 }
 
 .message-content,
@@ -544,6 +583,46 @@ button {
 .message-content {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.user-message-content {
+  display: grid;
+  gap: 10px;
+}
+
+.user-message-content p {
+  margin: 0;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.message-attachment {
+  display: grid;
+  width: 128px;
+  gap: 6px;
+  margin: 0;
+}
+
+.message-attachment img {
+  display: block;
+  width: 128px;
+  height: 96px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 70%, #000000);
+  object-fit: cover;
+}
+
+.message-attachment figcaption {
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .markdown-body {
@@ -604,11 +683,23 @@ button {
   font-size: 0.92em;
 }
 
+.markdown-body .code-block {
+  position: relative;
+  min-width: 0;
+}
+
+.markdown-body .code-copy-button {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  right: 8px;
+}
+
 .markdown-body pre {
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 12px;
+  padding: 38px 12px 12px;
   background: color-mix(in srgb, #000000 24%, var(--panel));
 }
 
@@ -621,7 +712,9 @@ button {
 }
 
 .tool-row {
+  align-self: flex-start;
   width: min(880px, 100%);
+  margin-top: 2px;
   padding: 9px 12px;
   border-left: 2px solid var(--accent);
   color: var(--muted);
@@ -789,11 +882,54 @@ button {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   padding: 16px 26px 22px;
   border-top: 1px solid var(--border-soft);
   background: var(--bg);
+}
+
+.composer-input-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 5px 8px 5px 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--subtle);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.attachment-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 12px;
 }
 
 .composer-input {
@@ -820,6 +956,30 @@ button {
   min-height: 38px;
   padding: 0 14px;
   background: var(--panel-raised);
+}
+
+.attach-button {
+  display: flex;
+  align-items: center;
+  align-self: end;
+  gap: 6px;
+  min-height: 38px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 0 12px;
+  background: var(--panel-raised);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.attach-button input {
+  display: none;
+}
+
+.attach-button.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 button:disabled,

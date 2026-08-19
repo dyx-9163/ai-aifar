@@ -1,5 +1,5 @@
 import { ReadableStream } from 'node:stream/web';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildChatMessages } from '../src/agent/chatContext';
 import { streamChatCompletion, testModelProfile, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import type { RuntimeModelProfile } from '../src/agent/database';
@@ -38,6 +38,10 @@ const ignoreHandlers: ModelStreamHandlers = {
 };
 
 describe('OpenAI-compatible model provider', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('never surfaces provider body text or API-key representations in an HTTP error', async () => {
     const specialKey = ['unit-key-', '"', '\\', '?/'].join('');
     const echoedPrompt = 'private prompt that must not escape';
@@ -248,6 +252,37 @@ describe('OpenAI-compatible model provider', () => {
     expect(requestSignal?.aborted).toBe(true);
   });
 
+  it('uses a longer default timeout for local Qwen reasoning runs', async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (response: Response) => void;
+    let requestSignal: AbortSignal | undefined;
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    };
+    const completion = streamChatCompletion(
+      {
+        ...profile,
+        capabilities: {
+          ...profile.capabilities,
+          reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+          usage: { tokens: true, reasoningTokens: true },
+        },
+        reasoning: { mode: 'enabled', protocol: 'qwen', display: 'raw' },
+      },
+      [{ role: 'user', content: 'generate a full HTML, CSS, and JS page' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1_000 + 1);
+    expect(requestSignal?.aborted).toBe(false);
+
+    resolveFetch(new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', { status: 200 }));
+    await expect(completion).resolves.toMatchObject({ reasoningRequested: 'enabled' });
+  });
+
   it('stops at the DONE sentinel and releases a provider stream that remains open', async () => {
     let sourceController!: ReadableStreamDefaultController<Uint8Array>;
     let cancelCalls = 0;
@@ -446,6 +481,34 @@ describe('OpenAI-compatible model provider', () => {
     });
   });
 
+  it('sends toggle reasoning controls by request format without requiring the Qwen provider label', async () => {
+    const requests: RequestInit[] = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(init ?? {});
+      return new Response(
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'openai', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(JSON.parse(String(requests[0]?.body)).chat_template_kwargs).toEqual({ enable_thinking: true });
+  });
+
   it('sends any declared openai reasoning effort including max', async () => {
     const requests: RequestInit[] = [];
     const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -474,6 +537,79 @@ describe('OpenAI-compatible model provider', () => {
     expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('max');
   });
 
+  it('sends effort reasoning controls by request format without requiring the OpenAI provider label', async () => {
+    const requests: RequestInit[] = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(init ?? {});
+      return new Response(
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'effort', effortOptions: ['high', 'max'], outputModes: ['summary'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'high', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(JSON.parse(String(requests[0]?.body)).reasoning_effort).toBe('high');
+  });
+
+  it('merges custom reasoning request fields without letting them replace core chat fields', async () => {
+    const requests: RequestInit[] = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(init ?? {});
+      return new Response(
+        ReadableStream.from([
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+
+    await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: {
+          ...profile.capabilities,
+          reasoning: {
+            inputMode: 'custom',
+            effortOptions: [],
+            outputModes: ['raw'],
+            customRequestBody: {
+              model: 'must-not-replace',
+              messages: [],
+              chat_template_kwargs: { enable_thinking: true },
+              extra_body: { provider_flag: 'on' },
+            },
+          } as never,
+        },
+        reasoning: { mode: 'enabled', protocol: 'custom', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      ignoreHandlers,
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    const body = JSON.parse(String(requests[0]?.body));
+    expect(body.model).toBe('Qwen3.5-9B');
+    expect(body.messages).toEqual([{ role: 'user', content: 'hello' }]);
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: true });
+    expect(body.extra_body).toEqual({ provider_flag: 'on' });
+  });
+
   it('rejects an undeclared reasoning effort before fetch', async () => {
     let fetchCalls = 0;
     const fetchImpl = async (): Promise<Response> => {
@@ -496,10 +632,7 @@ describe('OpenAI-compatible model provider', () => {
   });
 
   it.each([
-    ['toggle/openai', 'toggle', 'openai'],
-    ['effort/qwen', 'effort', 'qwen'],
-    ['toggle/none', 'toggle', 'none'],
-    ['custom/custom', 'custom', 'custom'],
+    ['unsupported/enabled', 'unsupported', 'none'],
   ] as const)('rejects invalid %s reasoning configuration before fetch', async (_name, inputMode, protocol) => {
     let fetchCalls = 0;
     const fetchImpl = async (): Promise<Response> => {
@@ -612,6 +745,97 @@ describe('OpenAI-compatible model provider', () => {
       expect(message).not.toContain(privateReasoning);
       return true;
     });
+  });
+
+  it('continues a length-bounded answer until the provider naturally stops', async () => {
+    const responses = [
+      [
+        'data: {"choices":[{"delta":{"content":"第一段"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":2048}}\n\n',
+        'data: [DONE]\n\n',
+      ],
+      [
+        'data: {"choices":[{"delta":{"content":"第二段"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":2048}}\n\n',
+        'data: [DONE]\n\n',
+      ],
+      [
+        'data: {"choices":[{"delta":{"content":"完成"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":16}}\n\n',
+        'data: [DONE]\n\n',
+      ],
+    ];
+    const requests: Array<{ messages: ChatMessage[] }> = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(JSON.parse(String(init?.body)) as { messages: ChatMessage[] });
+      const chunks = responses.shift();
+      if (!chunks) throw new Error('unexpected extra continuation request');
+      return new Response(
+        ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+    const answer: string[] = [];
+
+    const metrics = await streamChatCompletion(
+      profile,
+      [{ role: 'user', content: '写完整页面代码' }],
+      { ...ignoreHandlers, onAnswerDelta: (delta) => answer.push(delta) },
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(answer.join('')).toBe('第一段第二段完成');
+    expect(requests).toHaveLength(3);
+    expect(requests[1]?.messages).toEqual([
+      { role: 'user', content: '写完整页面代码' },
+      { role: 'assistant', content: '第一段' },
+      {
+        role: 'user',
+        content: 'Continue from exactly where the previous answer stopped. Do not repeat any previous text. Continue until the task is complete.',
+      },
+    ]);
+    expect(requests[2]?.messages.at(-2)).toEqual({ role: 'assistant', content: '第一段第二段' });
+    expect(metrics.finishReason).toBe('stop');
+    expect(metrics.completionTokens).toBe(4112);
+  });
+
+  it('stops automatic continuation when a length-bounded segment makes no answer progress', async () => {
+    const responses = [
+      [
+        'data: {"choices":[{"delta":{"content":"已有内容"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n',
+      ],
+      [
+        'data: {"choices":[{"delta":{"reasoning_content":"仍在思考"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n',
+      ],
+    ];
+    const fetchImpl = async (): Promise<Response> => {
+      const chunks = responses.shift();
+      if (!chunks) throw new Error('unexpected extra continuation request');
+      return new Response(
+        ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+    const answer: string[] = [];
+
+    await expect(streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
+      },
+      [{ role: 'user', content: '写完整页面代码' }],
+      { ...ignoreHandlers, onAnswerDelta: (delta) => answer.push(delta) },
+      new AbortController().signal,
+      fetchImpl,
+    )).rejects.toThrow('Model reached the output-token limit without making final-answer progress while continuing.');
+
+    expect(answer.join('')).toBe('已有内容');
   });
 
   it('streams raw reasoning, native summary, and answer through independent handlers', async () => {

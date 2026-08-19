@@ -1,4 +1,4 @@
-export function renderMarkdown(markdown: string): string {
+export function renderMarkdown(markdown: string, options: { copyCodeLabel?: string } = {}): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
   const blocks: string[] = [];
   let paragraph: string[] = [];
@@ -27,7 +27,14 @@ export function renderMarkdown(markdown: string): string {
   };
 
   const flushCode = () => {
-    blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+    const code = escapeHtml(codeLines.join('\n'));
+    const copyLabel = escapeHtml(options.copyCodeLabel ?? 'Copy');
+    blocks.push(
+      `<div class="code-block">`
+      + `<button type="button" class="code-copy-button" data-copy-code-button="true" data-testid="copy-code-button">${copyLabel}</button>`
+      + `<pre><code>${code}</code></pre>`
+      + `</div>`,
+    );
     codeLines = [];
   };
 

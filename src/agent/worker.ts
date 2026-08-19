@@ -8,6 +8,7 @@ import type {
   ModelRunMetrics,
   ReasoningItem,
   TurnRecord,
+  TurnAttachment,
 } from '../shared/domain.js';
 import {
   isDesktopRequest,
@@ -18,6 +19,8 @@ import {
   ACTIVE_GROUP_DELETE_ERROR,
   ACTIVE_THREAD_DELETE_ERROR,
 } from '../shared/operationErrors.js';
+import { isLocalQwenServiceProfile } from '../shared/localQwenIdentity.js';
+import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import { safeErrorText } from '../shared/redaction.js';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './database.js';
 import { buildChatMessages } from './chatContext.js';
@@ -32,6 +35,7 @@ import {
 import {
   streamChatCompletion,
   testModelProfile,
+  type ChatContentPart,
   type ChatMessage,
   type ModelStreamHandlers,
 } from './modelProvider.js';
@@ -221,6 +225,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     text: string,
     profile: RuntimeModelProfile | undefined,
     history: ChatMessage[],
+    attachments: TurnAttachment[],
     approvalResponse: Promise<boolean> | undefined,
     signal: AbortSignal,
   ): Promise<void> => {
@@ -249,7 +254,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
               role: 'system',
               content: 'You are a helpful private AI assistant. Keep answers clear, practical, and concise.',
             },
-            ...history,
+            ...withVisionAttachments(history, attachments),
           ],
           handlers,
           signal,
@@ -306,7 +311,15 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
 
       const selectedProfile = database.getModelProfileForRuntime(message.modelProfileId);
-      const profile = selectedProfile && !requiresApproval(message.text) ? selectedProfile : undefined;
+      const attachments = message.attachments ?? [];
+      const selectedSupportsVision = Boolean(
+        selectedProfile?.capabilities.vision ||
+        (selectedProfile && isLocalQwenServiceProfile(selectedProfile)),
+      );
+      if (attachments.length > 0 && !selectedSupportsVision) {
+        throw new Error('The selected model does not support image inputs.');
+      }
+      const profile = selectedProfile;
       const modelProfileId = profile?.id ?? DEMO_PROFILE_ID;
       const turnId = createTurnId();
       const createdAt = now();
@@ -328,7 +341,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         incomplete: true,
       };
       database.createTurn(record);
-      database.appendItem(userMessage(message.threadId, turnId, message.text, createdAt));
+      database.appendItem(userMessage(message.threadId, turnId, userDisplayText(message.text, attachments), createdAt, attachments));
       const settings = database.getSnapshot().settings;
       const history = buildChatMessages(
         database.getThreadMessages(message.threadId, settings.contextMessageLimit),
@@ -339,7 +352,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         threadId: message.threadId,
         modelProfileId,
         title: profile ? `Chat with ${profile.name}` : demoTurnTitle(message.text),
-        run: (signal) => execute(scheduled, message.text, profile, history, approvalResponse, signal),
+        run: (signal) => execute(scheduled, message.text, profile, history, attachments, approvalResponse, signal),
       };
       scheduler.enqueue(scheduled);
       return { turnId };
@@ -471,7 +484,7 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
     id: input.id ?? 'unsaved-test-profile',
     name: input.name.trim(),
     provider: input.provider,
-    baseUrl: input.baseUrl.trim().replace(/\/$/, ''),
+    baseUrl: normalizeModelBaseUrl(input.baseUrl),
     model: input.model.trim(),
     apiKey: input.apiKey?.trim() || existing?.apiKey,
     apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
@@ -495,7 +508,13 @@ function postReply(requestId: string, ok: boolean, data?: unknown, error?: strin
     : { type: 'agent.reply', requestId, ok, error });
 }
 
-function userMessage(threadId: string, turnId: string, text: string, createdAt: string): Item {
+function userMessage(
+  threadId: string,
+  turnId: string,
+  text: string,
+  createdAt: string,
+  attachments: TurnAttachment[] = [],
+): Item {
   return {
     id: `item-${turnId}-user`,
     threadId,
@@ -503,8 +522,55 @@ function userMessage(threadId: string, turnId: string, text: string, createdAt: 
     kind: 'message',
     role: 'user',
     text,
+    ...(attachments.length > 0 ? { attachments } : {}),
     createdAt,
   };
+}
+
+function userDisplayText(text: string, attachments: TurnAttachment[]): string {
+  if (attachments.length === 0) {
+    return text;
+  }
+  const names = attachments.map((attachment) => attachment.name).join(', ');
+  return `${text}\n\n[已上传图片: ${names}]`;
+}
+
+function withVisionAttachments(history: ChatMessage[], attachments: TurnAttachment[]): ChatMessage[] {
+  if (attachments.length === 0) {
+    return history;
+  }
+  const next = [...history];
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    const message = next[index];
+    if (message?.role !== 'user') {
+      continue;
+    }
+    const text = typeof message.content === 'string'
+      ? message.content.replace(/\n\n\[已上传图片: .+\]$/, '')
+      : '';
+    const content: ChatContentPart[] = [
+      { type: 'text', text },
+      ...attachments.map((attachment) => ({
+        type: 'image_url' as const,
+        image_url: { url: attachment.dataUrl },
+      })),
+    ];
+    next[index] = { ...message, content };
+    return next;
+  }
+  return [
+    ...next,
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '请识别并描述上传的图片。' },
+        ...attachments.map((attachment) => ({
+          type: 'image_url' as const,
+          image_url: { url: attachment.dataUrl },
+        })),
+      ],
+    },
+  ];
 }
 
 function assistantMessage(threadId: string, turnId: string, text: string, createdAt: string): MessageItem {

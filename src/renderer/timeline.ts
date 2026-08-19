@@ -1,4 +1,4 @@
-import type { Item, ModelRunMetrics, ModelRunPhase, ReasoningOutputMode, TurnRecord } from '../shared/domain';
+import type { Item, ModelRunMetrics, ModelRunPhase, ReasoningOutputMode, TurnAttachment, TurnRecord } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
 import { createTranslator, type Translator } from './i18n';
 
@@ -8,6 +8,7 @@ export type TimelineEntry =
       kind: 'message';
       role: string;
       text: string;
+      attachments?: TurnAttachment[];
       turnId?: string;
       live: boolean;
     }
@@ -44,13 +45,42 @@ export function createTimelineEntries(
   t: Translator = createTranslator('en-US'),
 ): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
-  const terminalTurns = new Set(
-    events
+  const terminalTurns = new Set<string>([
+    ...turns
+      .filter((turn) => turn.status === 'completed' || turn.status === 'failed' || turn.status === 'cancelled')
+      .map((turn) => turn.id),
+    ...events
       .filter((event) => event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.cancelled')
       .map((event) => event.turnId),
-  );
+  ]);
   const progressByTurn = new Map<string, Extract<AgentEvent, { type: 'model.progress' }>>();
   const liveMetricsTurns = new Set<string>();
+  const metricsByTurn = new Map<string, Extract<TimelineEntry, { kind: 'metrics' }>>();
+
+  for (const event of events) {
+    if (event.type === 'model.progress') {
+      progressByTurn.set(event.turnId, event);
+    }
+    if (event.type === 'model.metrics') {
+      liveMetricsTurns.add(event.turnId);
+      metricsByTurn.set(event.turnId, {
+        id: `${event.type}-${event.turnId}-${event.sequence}`,
+        kind: 'metrics',
+        metrics: event.metrics,
+        text: formatMetrics(event.metrics, t),
+      });
+    }
+  }
+
+  for (const turn of turns) {
+    if (!turn.metrics || liveMetricsTurns.has(turn.id)) continue;
+    metricsByTurn.set(turn.id, {
+      id: `model.metrics-${turn.id}-persisted`,
+      kind: 'metrics',
+      metrics: turn.metrics,
+      text: formatMetrics(turn.metrics, t),
+    });
+  }
 
   for (const item of items) {
     if (item.kind === 'message') {
@@ -58,9 +88,11 @@ export function createTimelineEntries(
         id: item.id,
         role: item.role,
         text: item.text,
+        attachments: item.attachments,
         turnId: item.turnId,
         live: item.id.endsWith('-assistant-live'),
       });
+      appendMetricsIfTurnEnds(entries, metricsByTurn, item, items);
       continue;
     }
 
@@ -73,6 +105,7 @@ export function createTimelineEntries(
         turnId: item.turnId,
         incomplete: item.incomplete,
       });
+      appendMetricsIfTurnEnds(entries, metricsByTurn, item, items);
       continue;
     }
 
@@ -84,18 +117,33 @@ export function createTimelineEntries(
       turnId: item.turnId,
       live: false,
     });
+    appendMetricsIfTurnEnds(entries, metricsByTurn, item, items);
   }
 
+  const visibleToolStarts = new Set<string>();
   for (const event of events) {
-    if (event.type === 'model.progress') {
-      progressByTurn.set(event.turnId, event);
+    if (event.type === 'tool.started') {
+      if (terminalTurns.has(event.turnId)) {
+        continue;
+      }
+      const toolKey = `${event.turnId}:${event.toolId}:${event.title}`;
+      if (visibleToolStarts.has(toolKey)) {
+        continue;
+      }
+      visibleToolStarts.add(toolKey);
+      entries.push({
+        id: `${event.type}-${event.turnId}-${event.toolId}`,
+        kind: 'tool',
+        text: event.title,
+        status: 'running',
+      });
     }
-    if (event.type === 'tool.started' || event.type === 'tool.output') {
+    if (event.type === 'tool.output') {
       entries.push({
         id: `${event.type}-${event.turnId}-${event.sequence}`,
         kind: 'tool',
-        text: event.type === 'tool.started' ? event.title : event.output,
-        status: event.type === 'tool.started' ? 'running' : 'completed',
+        text: event.output,
+        status: 'completed',
       });
     }
     if (event.type === 'turn.failed') {
@@ -106,25 +154,10 @@ export function createTimelineEntries(
         text: event.error,
       });
     }
-    if (event.type === 'model.metrics') {
-      liveMetricsTurns.add(event.turnId);
-      entries.push({
-        id: `${event.type}-${event.turnId}-${event.sequence}`,
-        kind: 'metrics',
-        metrics: event.metrics,
-        text: formatMetrics(event.metrics, t),
-      });
-    }
   }
 
-  for (const turn of turns) {
-    if (!turn.metrics || liveMetricsTurns.has(turn.id)) continue;
-    entries.push({
-      id: `model.metrics-${turn.id}-persisted`,
-      kind: 'metrics',
-      metrics: turn.metrics,
-      text: formatMetrics(turn.metrics, t),
-    });
+  for (const metric of metricsByTurn.values()) {
+    entries.push(metric);
   }
 
   for (const [turnId, event] of progressByTurn) {
@@ -134,6 +167,22 @@ export function createTimelineEntries(
   }
 
   return entries;
+}
+
+function appendMetricsIfTurnEnds(
+  entries: TimelineEntry[],
+  metricsByTurn: Map<string, Extract<TimelineEntry, { kind: 'metrics' }>>,
+  item: Item,
+  items: Item[],
+): void {
+  if (!item.turnId) return;
+  const currentIndex = items.indexOf(item);
+  const hasLaterSameTurnItem = items.slice(currentIndex + 1).some((candidate) => candidate.turnId === item.turnId);
+  if (hasLaterSameTurnItem) return;
+  const metrics = metricsByTurn.get(item.turnId);
+  if (!metrics) return;
+  entries.push(metrics);
+  metricsByTurn.delete(item.turnId);
 }
 
 function formatMetrics(metrics: ModelRunMetrics, t: Translator): string {

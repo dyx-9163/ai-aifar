@@ -18,16 +18,28 @@ function Wait-ModelHealth {
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    $lastFailure = $null
+    $lastReportAt = [DateTime]::UtcNow.AddSeconds(-31)
     do {
         try {
             $ownership = Assert-ModelRuntimeOwnership -ExpectedProfile $ExpectedProfile
             return Get-ModelRuntimeSnapshot -Ownership $ownership
         } catch {
+            $lastFailure = $_
+            $now = [DateTime]::UtcNow
+            if ($now -ge $lastReportAt.AddSeconds(30)) {
+                Write-Host "Waiting for model runtime health: $($_.Exception.Message)"
+                $lastReportAt = $now
+            }
             Start-Sleep -Seconds 5
         }
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "Model runtime did not become healthy within $TimeoutSec seconds."
+    $message = "Model runtime did not become healthy within $TimeoutSec seconds."
+    if ($null -ne $lastFailure) {
+        $message = "$message Last health check failure: $($lastFailure.Exception.Message)"
+    }
+    throw $message
 }
 
 function Start-ModelProfile {
