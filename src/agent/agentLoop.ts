@@ -21,7 +21,7 @@ import {
   type WorkspaceToolContext,
 } from './tools/toolRouter.js';
 
-export const AGENT_LOOP_MAX_ITERATIONS = 6;
+export const AGENT_LOOP_MAX_ITERATIONS = 8;
 
 const TOOL_FENCE_GLOBAL_PATTERN = /```tool\s*\n([\s\S]*?)```/g;
 const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
@@ -29,6 +29,8 @@ const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
 const CODE_DUMP_MIN_LINES = 12;
 /** How many times the loop re-prompts the model instead of accepting a pasted-code answer. */
 const MAX_CODE_DUMP_STEERS = 2;
+/** How many times the loop re-prompts after a tool call was cut off by the output limit. */
+const MAX_TRUNCATED_TOOL_STEERS = 2;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
@@ -140,11 +142,28 @@ export function looksLikeManualCodeDump(text: string): boolean {
   return false;
 }
 
+/**
+ * Detects replies whose tool call never closed (the output limit cut the fence or
+ * XML block mid-way), which would otherwise be mistaken for a tool-free answer.
+ */
+export function looksLikeTruncatedToolCall(text: string): boolean {
+  const withoutCompleteCalls = text
+    .replace(/```tool\s*\n[\s\S]*?```/g, '')
+    .replace(/<invoke\b[\s\S]*?<\/invoke>/g, '');
+  return /```tool\b/.test(withoutCompleteCalls) || /<invoke\b/.test(withoutCompleteCalls);
+}
+
 const CODE_DUMP_STEERING_MESSAGE = [
   'You pasted code blocks into the answer instead of applying them to the workspace.',
   'This workspace is read-write, so you must apply the changes yourself with apply_patch.',
   'If you have not read the target file yet, call read_file first; for a brand-new file use "baseContentHash": "" with a single insertion edit.',
   'Reply with ```tool calls now (a single apply_patch with a "files" array when several files change) and never paste replacement code into the answer.',
+].join(' ');
+
+const TRUNCATED_TOOL_STEERING_MESSAGE = [
+  'Your previous reply was cut off by the output limit while a ```tool call was still open, so no tool ran.',
+  'Resend the tool call now, but keep each reply small enough to finish: split big file rewrites into several apply_patch edits whose "replacement" is at most ~120 lines each, spreading the work over multiple replies if needed.',
+  'Never paste replacement code into the answer.',
 ].join(' ');
 
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
@@ -194,6 +213,7 @@ export function buildAgentSystemPrompt(
       '- run_command runs only inside the workspace directory; commands outside the verification allowlist pause for user approval.',
       '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
       '- When several files change together, prefer one apply_patch with a "files" array so the user reviews a single changeset.',
+      '- Keep every reply within the output limit: for large rewrites, split the work into several apply_patch edits with replacements of at most ~120 lines instead of one huge edit.',
       'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',
       'This holds even for very large rewrites: send the complete replacement text inside apply_patch edits; the answer must only describe what changed.',
     );
@@ -220,6 +240,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let iterations = 0;
   let toolCallsExecuted = 0;
   let codeDumpSteersUsed = 0;
+  let truncatedToolSteersUsed = 0;
   let lastMetrics: ModelRunMetrics | undefined;
 
   const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
@@ -244,6 +265,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const parsedCalls = parseToolCalls(text);
     if (parsedCalls.length === 0) {
       const answer = stripToolFences(text);
+      if (truncatedToolSteersUsed < MAX_TRUNCATED_TOOL_STEERS && looksLikeTruncatedToolCall(text)) {
+        // The output limit cut the tool call mid-fence; ask for a smaller resend.
+        truncatedToolSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: TRUNCATED_TOOL_STEERING_MESSAGE });
+        continue;
+      }
       if (
         options.toolContext.trustLevel !== 'read-only' &&
         codeDumpSteersUsed < MAX_CODE_DUMP_STEERS &&
@@ -280,10 +308,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
   }
 
-  // Budget exhausted: force a direct answer without further tool calls.
+  // Budget exhausted: force a closing answer that never falls back to pasted code.
   messages.push({
     role: 'user',
-    content: 'Iteration budget exhausted. Answer the original request now, without any tool call.',
+    content: 'Iteration budget exhausted. Write the final answer now: summarize what was changed and what remains; never paste code blocks or ask the user to copy code manually.',
   });
   const { text } = await runOnce();
   iterations += 1;

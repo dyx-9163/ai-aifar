@@ -7,6 +7,7 @@ import type { ModelRunMetrics } from '../src/shared/domain';
 import {
   buildAgentSystemPrompt,
   looksLikeManualCodeDump,
+  looksLikeTruncatedToolCall,
   parseToolCall,
   runAgentLoop,
   stripToolFences,
@@ -167,6 +168,7 @@ describe('tool call parsing', () => {
     expect(readWrite).toContain('read-write');
     expect(readWrite).toContain('Never paste full file contents or complete replacement code into the answer');
     expect(readWrite).toContain('This holds even for very large rewrites');
+    expect(readWrite).toContain('split the work into several apply_patch edits');
   });
 
   it('detects manual code dumps by fenced block size', () => {
@@ -174,6 +176,13 @@ describe('tool call parsing', () => {
     expect(looksLikeManualCodeDump('No fences at all, just prose.')).toBe(false);
     const longFence = 'Replace manually:\n```vue\n' + Array.from({ length: 15 }, (_, i) => `const v${i} = ${i};`).join('\n') + '\n```\n';
     expect(looksLikeManualCodeDump(longFence)).toBe(true);
+  });
+
+  it('detects tool calls cut off mid-fence by the output limit', () => {
+    expect(looksLikeTruncatedToolCall(fencedToolCall('{"tool": "read_file", "input": {}}'))).toBe(false);
+    expect(looksLikeTruncatedToolCall('plain answer without tools')).toBe(false);
+    const truncated = 'Let me apply the rewrite.\n```tool\n{"tool": "apply_patch", "input": {"path": "src/App.vue", "edits": [';
+    expect(looksLikeTruncatedToolCall(truncated)).toBe(true);
   });
 });
 
@@ -246,7 +255,23 @@ describe('runAgentLoop', () => {
     expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 2 });
     const lastCall = modelCalls.at(-1);
     expect(String(lastCall?.at(-1)?.content)).toContain('Iteration budget exhausted');
+    expect(String(lastCall?.at(-1)?.content)).toContain('never paste code blocks');
     expect(emitted.at(-1)).toEqual({ type: 'answer.delta', text: 'Budget exhausted answer.' });
+  });
+
+  it('re-prompts when the output limit cuts a tool call mid-fence', async () => {
+    const truncated = 'Let me apply the rewrite.\n```tool\n{"tool": "read_file", "input": {"path": "src/main.ts"';
+    const { emitted, outcome, modelCalls } = await runLoop(
+      [
+        truncated,
+        fencedToolCall('{"tool": "read_file", "input": {"path": "src/main.ts"}}'),
+        'It exports answer = 42.',
+      ],
+      context,
+    );
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('cut off by the output limit');
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
   });
 
   it('reports the last model run metrics', async () => {
