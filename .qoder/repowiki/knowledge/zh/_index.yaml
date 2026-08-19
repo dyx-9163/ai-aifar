@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-08-19T12:28:27Z"
+exported_at: "2026-08-19T14:30:07Z"
 modules:
     "":
-        dir_name: Private AI Desktop 应用根工程
-        title: Private AI Desktop 应用根工程
+        dir_name: Private AI Desktop 根工程（Electron + Vite + Forge）
+        title: Private AI Desktop 根工程（Electron + Vite + Forge）
         scope:
             - README.md
             - .gitignore
@@ -30,15 +30,16 @@ modules:
         depends_on: []
         related_to: []
     model_runtime:
-        dir_name: Qwen3.5-9B 独立模型运行时（llama.cpp Docker Compose）
-        title: Qwen3.5-9B 独立模型运行时（llama.cpp Docker Compose）
+        dir_name: Qwen3.5-9B 模型运行时编排（llama.cpp Docker Compose + PowerShell 运维）
+        title: Qwen3.5-9B 模型运行时编排（llama.cpp Docker Compose + PowerShell 运维）
         scope:
             - model-runtime/
             - models/
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: scripts_and_docs
     scripts_and_docs:
         dir_name: 打包验证脚本与项目文档
         title: 打包验证脚本与项目文档
@@ -48,4 +49,5 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: model_runtime

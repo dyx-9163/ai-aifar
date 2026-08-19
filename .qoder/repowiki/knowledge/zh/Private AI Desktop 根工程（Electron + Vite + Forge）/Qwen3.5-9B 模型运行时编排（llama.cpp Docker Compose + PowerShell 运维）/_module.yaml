@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: model_runtime
+title: Qwen3.5-9B 模型运行时编排（llama.cpp Docker Compose + PowerShell 运维）
+scope:
+    - model-runtime/
+    - models/
+source_files: []
+depends_on: []
+related_to:
+    - path: scripts_and_docs

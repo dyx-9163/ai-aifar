@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: ""
-title: Private AI Desktop 应用根工程
+title: Private AI Desktop 根工程（Electron + Vite + Forge）
 scope:
     - README.md
     - .gitignore
