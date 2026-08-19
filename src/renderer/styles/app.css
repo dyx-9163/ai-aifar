@@ -102,9 +102,10 @@ button {
 .secondary-button,
 .icon-button,
 .thread-button,
-.group-button,
+.workspace-toggle,
 .mini-button,
-.delete-chat-button,
+.thread-hover-action,
+.add-workspace-action,
 .send-button,
 .settings-link {
   border: 1px solid var(--border);
@@ -152,15 +153,25 @@ button {
   overflow-y: auto;
 }
 
-.sidebar-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.sidebar-search {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sidebar-search:focus {
+  border-color: var(--accent);
+  outline: none;
 }
 
 .mini-button,
-.delete-chat-button {
+.thread-hover-action {
   display: grid;
   place-items: center;
   background: transparent;
@@ -172,15 +183,28 @@ button {
   height: 26px;
 }
 
-.group-section {
+.workspace-section {
   display: grid;
   gap: 6px;
 }
 
-.group-button {
+.workspace-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.workspace-heading.active .workspace-name {
+  color: var(--text);
+}
+
+.workspace-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   min-height: 26px;
   padding: 2px 2px 2px 0;
   border-color: transparent;
@@ -191,30 +215,102 @@ button {
   text-align: left;
 }
 
-.group-button.active,
-.group-button:hover,
+.workspace-toggle:hover,
 .mini-button:hover,
-.delete-chat-button:hover {
+.thread-hover-action:hover {
   border-color: transparent;
   background: transparent;
   color: var(--text);
 }
 
-.group-name {
+.workspace-caret {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.workspace-folder-icon {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.workspace-name {
   overflow: hidden;
   text-overflow: ellipsis;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
-.group-count {
+.workspace-count {
+  flex: 0 0 auto;
   color: var(--subtle);
   font-size: 11px;
 }
 
+.add-workspace-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+.add-workspace-action:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  z-index: 40;
+}
+
+.dialog-card {
+  display: grid;
+  gap: 12px;
+  width: min(440px, calc(100vw - 48px));
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-raised);
+  box-shadow: 0 18px 40px color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.dialog-close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dialog-close:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
 .thread-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: stretch;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -247,25 +343,49 @@ button {
   background: var(--panel-raised);
 }
 
-.delete-chat-button {
-  width: 30px;
+.thread-hover-action {
+  width: 28px;
   border: 0;
   border-left: 1px solid var(--border-soft);
-  border-radius: 0 8px 8px 0;
+  border-radius: 0;
+  font-size: 12px;
   opacity: 0;
 }
 
-.thread-row:hover .delete-chat-button,
-.thread-row.active .delete-chat-button {
+.thread-hover-action:last-of-type {
+  border-radius: 0 8px 8px 0;
+}
+
+.thread-row:hover .thread-hover-action,
+.thread-row.active .thread-hover-action {
   opacity: 1;
 }
 
 .thread-title {
+  display: flex;
+  align-items: center;
   overflow: hidden;
   font-size: 13px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.thread-pin-mark {
+  flex: 0 0 auto;
+  margin-right: 4px;
+  font-size: 11px;
+}
+
+.thread-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.thread-time {
+  color: var(--subtle);
+  font-size: 11px;
 }
 
 .thread-status {
@@ -918,14 +1038,17 @@ button {
   color: var(--text-soft);
 }
 
-.composer-workspace select {
+.composer-workspace-name {
   max-width: 260px;
+  overflow: hidden;
   padding: 4px 8px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
   background: var(--bg);
   color: inherit;
   font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attachment-list {

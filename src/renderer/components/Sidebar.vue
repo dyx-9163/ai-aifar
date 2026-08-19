@@ -1,39 +1,79 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import type { ChatGroup, ThreadRuntimeState, ThreadSummary } from '../../shared/domain';
+import { computed, ref } from 'vue';
+import type { LanguagePreference, ThreadRuntimeState, ThreadSummary, WorkspaceRecord } from '../../shared/domain';
 import type { DeleteFeedback } from '../deleteFeedback';
 import type { Translator } from '../i18n';
 import { threadRuntimePresentation } from '../modelControls';
+import { formatRelativeTime } from '../relativeTime';
 
 const props = defineProps<{
-  groups: ChatGroup[];
+  workspaces: WorkspaceRecord[];
   threads: ThreadSummary[];
   activeThreadId?: string;
-  activeGroupId?: string;
+  activeWorkspaceId?: string;
   runtimeByThread: Record<string, ThreadRuntimeState>;
   deleteFeedback?: DeleteFeedback;
   loading: boolean;
   theme: 'light' | 'dark';
+  language: LanguagePreference;
   t: Translator;
 }>();
 
 defineEmits<{
   newThread: [];
-  newGroup: [];
+  addWorkspace: [];
   selectThread: [threadId: string];
-  selectGroup: [groupId: string];
+  selectWorkspace: [workspaceId: string];
+  togglePin: [threadId: string, pinned: boolean];
   deleteThread: [threadId: string];
-  deleteGroup: [groupId: string];
   toggleTheme: [];
   openSettings: [];
 }>();
 
-const groupsWithThreads = computed(() =>
-  props.groups.map((group) => ({
-    group,
-    threads: props.threads.filter((thread) => thread.groupId === group.id),
+const searchQuery = ref('');
+const collapsedWorkspaceIds = ref<Set<string>>(new Set());
+
+function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
+  return [...threads].sort((left, right) => {
+    if (left.pinned !== right.pinned) {
+      return left.pinned ? -1 : 1;
+    }
+    return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  });
+}
+
+function matchesQuery(thread: ThreadSummary): boolean {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return true;
+  return thread.title.toLowerCase().includes(query);
+}
+
+const workspaceSections = computed(() =>
+  props.workspaces.map((workspace) => ({
+    workspace,
+    threads: sortThreads(
+      props.threads.filter((thread) => thread.workspaceId === workspace.id && matchesQuery(thread)),
+    ),
   })),
 );
+
+const unlinkedThreads = computed(() =>
+  sortThreads(props.threads.filter((thread) => !thread.workspaceId && matchesQuery(thread))),
+);
+
+function toggleWorkspaceCollapsed(workspaceId: string): void {
+  const next = new Set(collapsedWorkspaceIds.value);
+  if (next.has(workspaceId)) {
+    next.delete(workspaceId);
+  } else {
+    next.add(workspaceId);
+  }
+  collapsedWorkspaceIds.value = next;
+}
+
+function relativeTime(thread: ThreadSummary): string {
+  return formatRelativeTime(thread.updatedAt, props.language);
+}
 
 function runtimeText(thread: ThreadSummary): string {
   const presentation = threadRuntimePresentation(props.runtimeByThread[thread.id], thread.status);
@@ -63,49 +103,143 @@ function runtimeActive(thread: ThreadSummary): boolean {
       <span>{{ t('newTask') }}</span>
     </button>
 
-    <nav class="thread-list" aria-label="Tasks">
-      <div class="sidebar-section-heading">
-        <p class="pane-label">{{ t('workspace') }}</p>
-        <button class="mini-button" type="button" :title="t('newGroup')" @click="$emit('newGroup')">+</button>
-      </div>
+    <input
+      v-model="searchQuery"
+      class="sidebar-search"
+      type="search"
+      data-testid="sidebar-search"
+      :placeholder="t('searchChatsPlaceholder')"
+    />
 
-      <section v-for="entry in groupsWithThreads" :key="entry.group.id" class="group-section">
-        <button
-          class="group-button"
-          :class="{ active: entry.group.id === activeGroupId }"
-          type="button"
-          @click="$emit('selectGroup', entry.group.id)"
+    <nav class="thread-list" aria-label="Tasks">
+      <section
+        v-for="section in workspaceSections"
+        :key="section.workspace.id"
+        class="workspace-section"
+      >
+        <div
+          class="workspace-heading"
+          :class="{ active: section.workspace.id === activeWorkspaceId }"
+          :data-testid="`workspace-section-${section.workspace.id}`"
         >
-          <span class="group-name">{{ entry.group.name }}</span>
-          <span class="group-count">{{ entry.threads.length }}</span>
-        </button>
-        <p
-          v-if="deleteFeedback?.kind === 'group' && deleteFeedback.targetId === entry.group.id"
-          class="sidebar-operation-error"
-          data-testid="group-delete-error"
-          :data-target-id="entry.group.id"
-          role="status"
-        >{{ deleteFeedback.message }}</p>
+          <button
+            class="workspace-toggle"
+            type="button"
+            :aria-expanded="!collapsedWorkspaceIds.has(section.workspace.id)"
+            @click="toggleWorkspaceCollapsed(section.workspace.id)"
+          >
+            <span class="workspace-caret" aria-hidden="true">{{ collapsedWorkspaceIds.has(section.workspace.id) ? '▸' : '▾' }}</span>
+            <span class="workspace-folder-icon" aria-hidden="true">📁</span>
+            <span class="workspace-name">{{ section.workspace.displayName }}</span>
+            <span class="workspace-count">{{ section.threads.length }}</span>
+          </button>
+          <button
+            class="mini-button"
+            type="button"
+            :title="t('newTask')"
+            :data-testid="`workspace-new-thread-${section.workspace.id}`"
+            @click="$emit('selectWorkspace', section.workspace.id); $emit('newThread')"
+          >+</button>
+        </div>
+
+        <template v-if="!collapsedWorkspaceIds.has(section.workspace.id)">
+          <article
+            v-for="thread in section.threads"
+            :key="thread.id"
+            class="thread-row"
+            :class="{ active: thread.id === activeThreadId, 'runtime-active': runtimeActive(thread) }"
+            :data-testid="`thread-row-${thread.id}`"
+          >
+            <button class="thread-button" type="button" @click="$emit('selectThread', thread.id)">
+              <span class="thread-title">
+                <span v-if="thread.pinned" class="thread-pin-mark" aria-hidden="true">📌</span>
+                {{ thread.title }}
+              </span>
+              <span class="thread-meta">
+                <span class="thread-time">{{ relativeTime(thread) }}</span>
+                <span
+                  class="thread-status"
+                  data-testid="thread-runtime-status"
+                  :data-runtime-status="runtimeByThread[thread.id]?.status ?? thread.status"
+                  :data-queue-position="runtimeByThread[thread.id]?.queuePosition"
+                >
+                  <span v-if="runtimeActive(thread)" class="thread-runtime-dot" aria-hidden="true"></span>
+                  {{ runtimeText(thread) }}
+                </span>
+              </span>
+            </button>
+            <button
+              class="thread-hover-action"
+              type="button"
+              :title="thread.pinned ? t('unpinChat') : t('pinChat')"
+              :data-testid="`thread-pin-${thread.id}`"
+              @click.stop="$emit('togglePin', thread.id, !thread.pinned)"
+            >{{ thread.pinned ? '📌' : '📍' }}</button>
+            <button
+              class="thread-hover-action delete-chat-button"
+              type="button"
+              :title="t('deleteChat')"
+              :data-testid="`thread-delete-${thread.id}`"
+              @click.stop="$emit('deleteThread', thread.id)"
+            >×</button>
+            <p
+              v-if="deleteFeedback?.kind === 'thread' && deleteFeedback.targetId === thread.id"
+              class="sidebar-operation-error"
+              data-testid="thread-delete-error"
+              :data-target-id="thread.id"
+              role="status"
+            >{{ deleteFeedback.message }}</p>
+          </article>
+        </template>
+      </section>
+
+      <section v-if="unlinkedThreads.length > 0" class="workspace-section unlinked-section">
+        <div class="workspace-heading">
+          <span class="workspace-toggle">
+            <span class="workspace-folder-icon" aria-hidden="true">💬</span>
+            <span class="workspace-name">{{ t('unlinkedChats') }}</span>
+            <span class="workspace-count">{{ unlinkedThreads.length }}</span>
+          </span>
+        </div>
         <article
-          v-for="thread in entry.threads"
+          v-for="thread in unlinkedThreads"
           :key="thread.id"
           class="thread-row"
           :class="{ active: thread.id === activeThreadId, 'runtime-active': runtimeActive(thread) }"
           :data-testid="`thread-row-${thread.id}`"
         >
           <button class="thread-button" type="button" @click="$emit('selectThread', thread.id)">
-            <span class="thread-title">{{ thread.title }}</span>
-            <span
-              class="thread-status"
-              data-testid="thread-runtime-status"
-              :data-runtime-status="runtimeByThread[thread.id]?.status ?? thread.status"
-              :data-queue-position="runtimeByThread[thread.id]?.queuePosition"
-            >
-              <span v-if="runtimeActive(thread)" class="thread-runtime-dot" aria-hidden="true"></span>
-              {{ runtimeText(thread) }}
+            <span class="thread-title">
+              <span v-if="thread.pinned" class="thread-pin-mark" aria-hidden="true">📌</span>
+              {{ thread.title }}
+            </span>
+            <span class="thread-meta">
+              <span class="thread-time">{{ relativeTime(thread) }}</span>
+              <span
+                class="thread-status"
+                data-testid="thread-runtime-status"
+                :data-runtime-status="runtimeByThread[thread.id]?.status ?? thread.status"
+                :data-queue-position="runtimeByThread[thread.id]?.queuePosition"
+              >
+                <span v-if="runtimeActive(thread)" class="thread-runtime-dot" aria-hidden="true"></span>
+                {{ runtimeText(thread) }}
+              </span>
             </span>
           </button>
-          <button class="delete-chat-button" type="button" :title="t('deleteChat')" @click.stop="$emit('deleteThread', thread.id)">×</button>
+          <button
+            class="thread-hover-action"
+            type="button"
+            :title="thread.pinned ? t('unpinChat') : t('pinChat')"
+            :data-testid="`thread-pin-${thread.id}`"
+            @click.stop="$emit('togglePin', thread.id, !thread.pinned)"
+          >{{ thread.pinned ? '📌' : '📍' }}</button>
+          <button
+            class="thread-hover-action delete-chat-button"
+            type="button"
+            :title="t('deleteChat')"
+            :data-testid="`thread-delete-${thread.id}`"
+            @click.stop="$emit('deleteThread', thread.id)"
+          >×</button>
           <p
             v-if="deleteFeedback?.kind === 'thread' && deleteFeedback.targetId === thread.id"
             class="sidebar-operation-error"
@@ -118,6 +252,11 @@ function runtimeActive(thread: ThreadSummary): boolean {
 
       <p v-if="!loading && threads.length === 0" class="empty-copy">{{ t('noTasksYet') }}</p>
     </nav>
+
+    <button class="add-workspace-action" type="button" data-testid="add-workspace" @click="$emit('addWorkspace')">
+      <span aria-hidden="true">+</span>
+      <span>{{ t('addWorkspace') }}</span>
+    </button>
 
     <div class="sidebar-footer">
       <button class="icon-button" type="button" :title="`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`" @click="$emit('toggleTheme')">

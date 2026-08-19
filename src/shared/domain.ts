@@ -4,16 +4,11 @@ export type LanguagePreference = 'zh-CN' | 'en-US';
 
 export type ThreadStatus = 'ready' | 'running' | 'failed';
 
-export interface ChatGroup {
-  id: string;
-  name: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface ThreadSummary {
   id: string;
-  groupId: string;
+  /** Workspace the thread belongs to; undefined until first bound. */
+  workspaceId?: string;
+  pinned: boolean;
   title: string;
   status: ThreadStatus;
   modelProfileId?: string;
@@ -310,7 +305,6 @@ export interface TurnRollbackReport {
 }
 
 export interface AppSnapshot {
-  groups: ChatGroup[];
   threads: ThreadSummary[];
   turns: TurnRecord[];
   items: Record<string, Item[]>;

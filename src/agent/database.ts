@@ -3,7 +3,6 @@ import { DatabaseSync } from 'node:sqlite';
 import type {
   AppSnapshot,
   Approval,
-  ChatGroup,
   AppSettings,
   FileChangePreview,
   Item,
@@ -39,10 +38,10 @@ import {
 
 export interface AppDatabase {
   getSnapshot(): AppSnapshot;
-  createGroup(name: string): ChatGroup;
-  deleteGroup(groupId: string): void;
-  createThread(title: string, groupId?: string): ThreadSummary;
+  createThread(title: string, workspaceId?: string): ThreadSummary;
   deleteThread(threadId: string): void;
+  setThreadPinned(threadId: string, pinned: boolean): void;
+  bindThreadWorkspace(threadId: string, workspaceId: string): void;
   setThreadModel(threadId: string, modelProfileId?: string): void;
   setLanguage(language: LanguagePreference): void;
   updateSettings(settings: RuntimeSettingsInput): AppSettings;
@@ -92,17 +91,11 @@ export type RuntimeModelProfile = ModelProfile & { apiKey?: string };
 
 type ThreadRow = {
   id: string;
-  group_id: string;
+  workspace_id: string | null;
+  pinned: number;
   title: string;
   status: ThreadSummary['status'];
   model_profile_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type ChatGroupRow = {
-  id: string;
-  name: string;
   created_at: string;
   updated_at: string;
 };
@@ -196,14 +189,9 @@ class SqliteAppDatabase implements AppDatabase {
   }
 
   getSnapshot(): AppSnapshot {
-    const groups = this.db
-      .prepare('SELECT id, name, created_at, updated_at FROM chat_groups WHERE deleted_at IS NULL ORDER BY updated_at DESC, name ASC')
-      .all()
-      .map((row) => mapChatGroup(row as ChatGroupRow));
-
     const threads = this.db
       .prepare(
-        'SELECT id, group_id, title, status, model_profile_id, created_at, updated_at FROM threads WHERE deleted_at IS NULL ORDER BY updated_at DESC',
+        'SELECT id, workspace_id, pinned, title, status, model_profile_id, created_at, updated_at FROM threads WHERE deleted_at IS NULL ORDER BY updated_at DESC',
       )
       .all()
       .map((row) => mapThread(row as ThreadRow));
@@ -246,7 +234,6 @@ class SqliteAppDatabase implements AppDatabase {
       .map((row) => mapApproval(row as ApprovalRow));
 
     return {
-      groups,
       threads,
       turns,
       items,
@@ -265,62 +252,16 @@ class SqliteAppDatabase implements AppDatabase {
     };
   }
 
-  createGroup(name: string): ChatGroup {
+  createThread(title: string, workspaceId?: string): ThreadSummary {
     const now = new Date().toISOString();
-    const group: ChatGroup = {
-      id: randomUUID(),
-      name: requireTrimmed(name, 'Chat group name'),
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    this.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO chat_groups (id, name, created_at, updated_at, deleted_at)
-           VALUES (:id, :name, :createdAt, :updatedAt, NULL)`,
-        )
-        .run({
-          id: group.id,
-          name: group.name,
-          createdAt: group.createdAt,
-          updatedAt: group.updatedAt,
-        });
-    });
-
-    return group;
-  }
-
-  deleteGroup(groupId: string): void {
-    const deletedAt = new Date().toISOString();
-    this.transaction(() => {
-      this.db.prepare('UPDATE chat_groups SET deleted_at = :deletedAt, updated_at = :deletedAt WHERE id = :groupId').run({
-        groupId,
-        deletedAt,
-      });
-      this.db.prepare('UPDATE threads SET deleted_at = :deletedAt, updated_at = :deletedAt WHERE group_id = :groupId').run({
-        groupId,
-        deletedAt,
-      });
-      this.db
-        .prepare(
-          `DELETE FROM file_checkpoints WHERE turn_id IN (
-             SELECT tr.id FROM turns tr
-             INNER JOIN threads t ON t.id = tr.thread_id
-             WHERE t.group_id = :groupId
-           )`,
-        )
-        .run({ groupId });
-    });
-  }
-
-  createThread(title: string, groupId?: string): ThreadSummary {
-    const now = new Date().toISOString();
-    const selectedGroupId = groupId ?? this.defaultGroupId();
-    assertKnownGroup(this.db, selectedGroupId);
+    const boundWorkspaceId = workspaceId === undefined || workspaceId === '' ? undefined : workspaceId;
+    if (boundWorkspaceId !== undefined && !this.getWorkspace(boundWorkspaceId)) {
+      throw new Error(`Workspace ${boundWorkspaceId} does not exist.`);
+    }
     const thread: ThreadSummary = {
       id: randomUUID(),
-      groupId: selectedGroupId,
+      workspaceId: boundWorkspaceId,
+      pinned: false,
       title,
       status: 'ready',
       modelProfileId: this.readSettings().activeModelProfileId,
@@ -331,12 +272,13 @@ class SqliteAppDatabase implements AppDatabase {
     this.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO threads (id, group_id, title, status, model_profile_id, created_at, updated_at, deleted_at)
-           VALUES (:id, :groupId, :title, :status, :modelProfileId, :createdAt, :updatedAt, NULL)`,
+          `INSERT INTO threads (id, workspace_id, pinned, title, status, model_profile_id, created_at, updated_at, deleted_at)
+           VALUES (:id, :workspaceId, :pinned, :title, :status, :modelProfileId, :createdAt, :updatedAt, NULL)`,
         )
         .run({
           id: thread.id,
-          groupId: thread.groupId,
+          workspaceId: thread.workspaceId ?? null,
+          pinned: 0,
           title: thread.title,
           status: thread.status,
           modelProfileId: thread.modelProfileId ?? null,
@@ -346,6 +288,27 @@ class SqliteAppDatabase implements AppDatabase {
     });
 
     return thread;
+  }
+
+  setThreadPinned(threadId: string, pinned: boolean): void {
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.db
+        .prepare('UPDATE threads SET pinned = :pinned, updated_at = :updatedAt WHERE id = :threadId')
+        .run({ threadId, pinned: pinned ? 1 : 0, updatedAt: now });
+    });
+  }
+
+  bindThreadWorkspace(threadId: string, workspaceId: string): void {
+    if (!this.getWorkspace(workspaceId)) {
+      throw new Error(`Workspace ${workspaceId} does not exist.`);
+    }
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.db
+        .prepare('UPDATE threads SET workspace_id = :workspaceId, updated_at = :updatedAt WHERE id = :threadId')
+        .run({ threadId, workspaceId, updatedAt: now });
+    });
   }
 
   deleteThread(threadId: string): void {
@@ -766,6 +729,7 @@ class SqliteAppDatabase implements AppDatabase {
     this.transaction(() => {
       this.db.prepare('DELETE FROM workspaces WHERE id = :workspaceId').run({ workspaceId });
       this.db.prepare('DELETE FROM file_checkpoints WHERE workspace_id = :workspaceId').run({ workspaceId });
+      this.db.prepare('UPDATE threads SET workspace_id = NULL WHERE workspace_id = :workspaceId').run({ workspaceId });
     });
   }
 
@@ -982,7 +946,6 @@ class SqliteAppDatabase implements AppDatabase {
       INSERT OR IGNORE INTO settings (key, value) VALUES ('reasoningDisplayMode', 'auto');
     `);
     this.ensureColumn('threads', 'model_profile_id', 'ALTER TABLE threads ADD COLUMN model_profile_id TEXT');
-    this.ensureColumn('threads', 'group_id', 'ALTER TABLE threads ADD COLUMN group_id TEXT');
     this.ensureColumn('threads', 'deleted_at', 'ALTER TABLE threads ADD COLUMN deleted_at TEXT');
     this.ensureColumn('turns', 'model_profile_id', 'ALTER TABLE turns ADD COLUMN model_profile_id TEXT');
     this.ensureColumn('turns', 'started_at', 'ALTER TABLE turns ADD COLUMN started_at TEXT');
@@ -1004,7 +967,6 @@ class SqliteAppDatabase implements AppDatabase {
       'response_speed',
       "ALTER TABLE model_profiles ADD COLUMN response_speed TEXT NOT NULL DEFAULT 'standard'",
     );
-    this.ensureDefaultGroup();
     this.applyMigration(2, () => this.compactAssistantMessageFragments());
     this.applyMigration(3, () => this.migrateLegacyTurnCompletion());
     this.applyMigration(4, () => this.ensureColumn('turns', 'metrics', 'ALTER TABLE turns ADD COLUMN metrics TEXT'));
@@ -1016,6 +978,10 @@ class SqliteAppDatabase implements AppDatabase {
     ));
     this.applyMigration(8, () => this.ensureColumn('approvals', 'file_change', 'ALTER TABLE approvals ADD COLUMN file_change TEXT'));
     this.applyMigration(7, () => this.repairOrSeedLocalQwenProfile());
+    this.applyMigration(9, () => {
+      this.ensureColumn('threads', 'workspace_id', 'ALTER TABLE threads ADD COLUMN workspace_id TEXT');
+      this.ensureColumn('threads', 'pinned', 'ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+    });
     this.interruptUnfinishedTurns();
   }
 
@@ -1062,22 +1028,6 @@ class SqliteAppDatabase implements AppDatabase {
       | { id: string }
       | undefined;
     return row?.id;
-  }
-
-  private defaultGroupId(): string {
-    this.ensureDefaultGroup();
-    return 'default-group';
-  }
-
-  private ensureDefaultGroup(): void {
-    const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO chat_groups (id, name, created_at, updated_at, deleted_at)
-         VALUES ('default-group', 'Workspace', :createdAt, :updatedAt, NULL)`,
-      )
-      .run({ createdAt: now, updatedAt: now });
-    this.db.prepare("UPDATE threads SET group_id = 'default-group' WHERE group_id IS NULL OR group_id = ''").run();
   }
 
   private upsertSetting(key: string, value: string): void {
@@ -1439,19 +1389,11 @@ function parseModelRunMetrics(value: string | null): ModelRunMetrics | undefined
 function mapThread(row: ThreadRow): ThreadSummary {
   return {
     id: row.id,
-    groupId: row.group_id,
+    workspaceId: row.workspace_id ?? undefined,
+    pinned: row.pinned === 1,
     title: row.title,
     status: row.status,
     modelProfileId: row.model_profile_id ?? undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function mapChatGroup(row: ChatGroupRow): ChatGroup {
-  return {
-    id: row.id,
-    name: row.name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1585,12 +1527,5 @@ function assertKnownModelProfile(db: DatabaseSync, id: string): void {
   const row = db.prepare('SELECT id FROM model_profiles WHERE id = :id').get({ id });
   if (!row) {
     throw new Error(`Model profile ${id} does not exist.`);
-  }
-}
-
-function assertKnownGroup(db: DatabaseSync, id: string): void {
-  const row = db.prepare('SELECT id FROM chat_groups WHERE id = :id AND deleted_at IS NULL').get({ id });
-  if (!row) {
-    throw new Error(`Chat group ${id} does not exist.`);
   }
 }

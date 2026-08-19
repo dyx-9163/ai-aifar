@@ -52,7 +52,7 @@ test('a real agent turn writes into a read-write workspace and undo restores it'
     canonicalRootPath: workspaceRoot,
     trustLevel: 'read-write',
   });
-  const thread = database.createThread('Live workspace turn');
+  const thread = database.createThread('Live workspace turn', workspace.id);
   database.close();
 
   let app: ElectronApplication | undefined;
@@ -65,7 +65,7 @@ test('a real agent turn writes into a read-write workspace and undo restores it'
     const page = await app.firstWindow();
 
     await page.getByTestId(`thread-row-${thread.id}`).getByRole('button').first().click();
-    await page.getByTestId('composer-workspace-select').selectOption(workspace.id);
+    await expect(page.getByTestId('composer-workspace-display')).toContainText('live-workspace');
     await page.getByTestId('composer-input').fill(
       '请使用 apply_patch 工具在工作区根目录创建一个新文件 hello.ts，内容只有一行：export const hello = "world"; '
       + '创建成功后用一句简短中文确认，不要再调用其他工具。',

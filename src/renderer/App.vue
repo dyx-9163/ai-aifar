@@ -5,6 +5,7 @@ import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
 import Sidebar from './components/Sidebar.vue';
+import WorkspaceDialog from './components/WorkspaceDialog.vue';
 import { useApp } from './composables/useApp';
 import { deleteFailureFeedback, type DeleteFeedback } from './deleteFeedback';
 import { createTranslator } from './i18n';
@@ -15,9 +16,16 @@ const view = ref<'chat' | 'settings'>('chat');
 const runtimeError = ref('');
 const approvalError = ref('');
 const deleteFeedback = ref<DeleteFeedback>();
+const workspaceDialogOpen = ref(false);
 
 const activeThreadId = computed(() => app.state.value.activeThreadId);
 const t = computed(() => createTranslator(app.state.value.snapshot.settings.language));
+const threadWorkspaceName = computed(() => {
+  const workspaceId = app.activeThread.value?.workspaceId;
+  return workspaceId
+    ? app.state.value.snapshot.workspaces.find((workspace) => workspace.id === workspaceId)?.displayName
+    : undefined;
+});
 
 watch(activeThreadId, () => {
   approvalError.value = '';
@@ -31,31 +39,30 @@ onMounted(() => {
 async function createThread(): Promise<void> {
   deleteFeedback.value = undefined;
   view.value = 'chat';
-  await app.createThread('New task', app.state.value.activeGroupId);
+  await app.createThread('New task');
 }
 
 function selectThread(threadId: string): void {
   deleteFeedback.value = undefined;
   view.value = 'chat';
   app.state.value.activeThreadId = threadId;
-  app.state.value.activeGroupId = app.state.value.snapshot.threads.find((thread) => thread.id === threadId)?.groupId;
-}
-
-function selectGroup(groupId: string): void {
-  deleteFeedback.value = undefined;
-  view.value = 'chat';
-  app.state.value.activeGroupId = groupId;
-  app.state.value.activeThreadId = app.state.value.snapshot.threads.find((thread) => thread.groupId === groupId)?.id;
-}
-
-async function createGroup(): Promise<void> {
-  const name = window.prompt(t.value('newGroupName'), t.value('defaultGroupName'));
-  if (!name?.trim()) {
-    return;
+  const thread = app.state.value.snapshot.threads.find((candidate) => candidate.id === threadId);
+  if (thread?.workspaceId) {
+    app.activeWorkspaceId.value = thread.workspaceId;
   }
+}
+
+function selectWorkspace(workspaceId: string): void {
+  app.activeWorkspaceId.value = workspaceId;
+}
+
+async function togglePin(threadId: string, pinned: boolean): Promise<void> {
   deleteFeedback.value = undefined;
-  view.value = 'chat';
-  await app.createGroup(name.trim());
+  try {
+    await app.togglePin(threadId, pinned);
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : '';
+  }
 }
 
 async function deleteThread(threadId: string): Promise<void> {
@@ -70,16 +77,12 @@ async function deleteThread(threadId: string): Promise<void> {
   }
 }
 
-async function deleteGroup(groupId: string): Promise<void> {
-  if (!window.confirm(t.value('deleteGroupConfirm'))) {
-    return;
-  }
-  deleteFeedback.value = undefined;
-  try {
-    await app.deleteGroup(groupId);
-  } catch (error) {
-    deleteFeedback.value = deleteFailureFeedback('group', groupId, error, t.value);
-  }
+function openWorkspaceDialog(): void {
+  workspaceDialogOpen.value = true;
+}
+
+function handleWorkspaceRegistered(workspaceId: string): void {
+  app.activeWorkspaceId.value = workspaceId;
 }
 
 function toggleTheme(): void {
@@ -145,21 +148,22 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
 <template>
   <main class="desktop-shell" :class="{ 'settings-shell': view === 'settings' }">
     <Sidebar
-      :groups="app.state.value.snapshot.groups"
+      :workspaces="app.state.value.snapshot.workspaces"
       :threads="app.state.value.snapshot.threads"
       :active-thread-id="activeThreadId"
-      :active-group-id="app.state.value.activeGroupId"
+      :active-workspace-id="app.activeWorkspaceId.value"
       :runtime-by-thread="app.state.value.runtimeByThread"
       :delete-feedback="deleteFeedback"
       :loading="app.loading.value"
       :theme="theme"
+      :language="app.state.value.snapshot.settings.language"
       :t="t"
       @new-thread="createThread"
-      @new-group="createGroup"
+      @add-workspace="openWorkspaceDialog"
       @select-thread="selectThread"
-      @select-group="selectGroup"
+      @select-workspace="selectWorkspace"
+      @toggle-pin="togglePin"
       @delete-thread="deleteThread"
-      @delete-group="deleteGroup"
       @toggle-theme="toggleTheme"
       @open-settings="view = 'settings'"
     />
@@ -177,8 +181,7 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
       :model-profiles="app.state.value.snapshot.modelProfiles"
       :active-model-profile-id="app.activeModelProfileId.value"
       :active-model-profile="app.activeModelProfile.value"
-      :workspaces="app.state.value.snapshot.workspaces"
-      :selected-workspace-id="app.selectedWorkspaceId.value"
+      :thread-workspace-name="threadWorkspaceName"
       :latest-undoable-turn="latestUndoableTurn"
       :runtime-error="runtimeError"
       :t="t"
@@ -186,7 +189,6 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
       @cancel="app.cancelTurn"
       @open-settings="view = 'settings'"
       @select-model="app.selectModelProfile"
-      @select-workspace="app.selectWorkspace"
       @undo-turn="undoTurnFileChanges"
       @update-model-runtime="updateModelRuntime"
     />
@@ -215,13 +217,21 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
       :t="t"
       :save-model-profile="app.saveModelProfile"
       :test-model-profile="testModelProfile"
-      :register-workspace="app.registerWorkspace"
       @back="view = 'chat'"
       @delete-model-profile="app.deleteModelProfile"
       @delete-workspace="app.deleteWorkspace"
+      @add-workspace="openWorkspaceDialog"
       @select-model-profile="app.selectModelProfile"
       @set-language="app.setLanguage"
       @update-settings="app.updateSettings"
+    />
+
+    <WorkspaceDialog
+      :open="workspaceDialogOpen"
+      :t="t"
+      :register-workspace="app.registerWorkspace"
+      @close="workspaceDialogOpen = false"
+      @registered="(workspace) => handleWorkspaceRegistered(workspace.id)"
     />
   </main>
 </template>

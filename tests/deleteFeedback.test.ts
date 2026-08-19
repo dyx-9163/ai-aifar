@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACTIVE_GROUP_DELETE_ERROR, ACTIVE_THREAD_DELETE_ERROR } from '../src/shared/operationErrors';
+import { ACTIVE_THREAD_DELETE_ERROR } from '../src/shared/operationErrors';
 import { deleteFailureFeedback } from '../src/renderer/deleteFeedback';
 import { createTranslator } from '../src/renderer/i18n';
 
@@ -16,14 +16,14 @@ describe('delete operation feedback', () => {
       message: '请先停止或取消正在执行的任务，再删除这个聊天。',
     });
     expect(deleteFailureFeedback(
-      'group',
-      'group-3',
-      new Error(ACTIVE_GROUP_DELETE_ERROR),
+      'thread',
+      'thread-3',
+      new Error(ACTIVE_THREAD_DELETE_ERROR),
       createTranslator('en-US'),
     )).toEqual({
-      kind: 'group',
-      targetId: 'group-3',
-      message: 'Stop or cancel active turns before deleting this group.',
+      kind: 'thread',
+      targetId: 'thread-3',
+      message: 'Stop or cancel the active turn before deleting this chat.',
     });
   });
 
@@ -35,10 +35,10 @@ describe('delete operation feedback', () => {
       createTranslator('en-US'),
     ).message).toBe('Could not delete this chat.');
     expect(deleteFailureFeedback(
-      'group',
-      'group-3',
+      'thread',
+      'thread-3',
       new Error('database internals'),
       createTranslator('zh-CN'),
-    ).message).toBe('无法删除此分组。');
+    ).message).toBe('无法删除此聊天。');
   });
 });

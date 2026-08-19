@@ -226,30 +226,25 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
-  it('rejects deleting a thread or group while either contains authoritative active work', async () => {
+  it('rejects deleting a thread while it contains authoritative active work', async () => {
     const release = deferred<void>();
     const harness = createHarness(async (_profile, _messages, _handlers, signal) => {
       await abortable(signal, release.promise);
       return metrics();
     });
-    const group = harness.database.createGroup('Active group');
-    const thread = harness.database.createThread('Active thread', group.id);
+    const thread = harness.database.createThread('Active thread');
     const { turnId } = harness.runtime.startTurn({
       type: 'turn.start', threadId: thread.id, text: 'hold', modelProfileId: harness.profile.id,
     });
     await eventually(() => expect(typesFor(harness.events, turnId)).toContain('turn.started'));
 
     expect(() => harness.runtime.deleteThread(thread.id)).toThrow('active turn');
-    expect(() => harness.runtime.deleteGroup(group.id)).toThrow('active turn');
     expect(harness.database.getSnapshot().threads.map((candidate) => candidate.id)).toContain(thread.id);
-    expect(harness.database.getSnapshot().groups.map((candidate) => candidate.id)).toContain(group.id);
 
     expect(harness.runtime.cancelTurn(turnId)).toBe(true);
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.cancelled'));
     harness.runtime.deleteThread(thread.id);
-    harness.runtime.deleteGroup(group.id);
     expect(harness.database.getSnapshot().threads.map((candidate) => candidate.id)).not.toContain(thread.id);
-    expect(harness.database.getSnapshot().groups.map((candidate) => candidate.id)).not.toContain(group.id);
     harness.database.close();
   });
 
@@ -812,6 +807,44 @@ describe('workspace agent turns', () => {
       modelProfileId: harness.profile.id,
       workspaceId: 'missing-workspace',
     })).toThrow('is not registered');
+    harness.database.close();
+  });
+
+  it('binds an unbound thread on its first turn and keeps the stored binding authoritative', async () => {
+    const firstDirectory = mkdtempSync(join(tmpdir(), 'private-ai-bindws-'));
+    const otherDirectory = mkdtempSync(join(tmpdir(), 'private-ai-bindws-other-'));
+    tempDirectories.push(firstDirectory, otherDirectory);
+
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      await handlers.onAnswerDelta('bound');
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: firstDirectory, trustLevel: 'read-only' });
+    const otherWorkspace = registerWorkspaceFromPath(harness.database, { path: otherDirectory, trustLevel: 'read-only' });
+    const thread = harness.database.createThread('First bind');
+
+    const first = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'hello',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, first.turnId).at(-1)).toBe('turn.completed'));
+    expect(harness.database.getSnapshot().threads.find((candidate) => candidate.id === thread.id)?.workspaceId)
+      .toBe(workspace.id);
+
+    // A bound thread keeps its stored workspace even if a different one is requested.
+    const second = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'again',
+      modelProfileId: harness.profile.id,
+      workspaceId: otherWorkspace.id,
+    });
+    await eventually(() => expect(typesFor(harness.events, second.turnId).at(-1)).toBe('turn.completed'));
+    expect(harness.database.getSnapshot().threads.find((candidate) => candidate.id === thread.id)?.workspaceId)
+      .toBe(workspace.id);
     harness.database.close();
   });
 

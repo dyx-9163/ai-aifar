@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   appendOptimisticUserMessage,
   applyAssistantDeltaToSnapshot,
@@ -8,7 +8,6 @@ import {
 } from '../../agentClient/core';
 import type {
   AppSnapshot,
-  ChatGroup,
   Item,
   LanguagePreference,
   ModelConnectionResult,
@@ -103,7 +102,19 @@ export function useApp() {
   const state = ref<RendererState>(emptyState());
   const loading = ref(true);
   const approvalResponseInFlightId = ref<string>();
-  const selectedWorkspaceId = ref<string | undefined>(undefined);
+  const activeWorkspaceId = ref<string | undefined>(undefined);
+
+  // Keep the active workspace valid as workspaces are added or removed.
+  watch(
+    () => state.value.snapshot.workspaces,
+    (workspaces) => {
+      if (!workspaces || workspaces.length === 0) {
+        activeWorkspaceId.value = undefined;
+      } else if (!workspaces.some((workspace) => workspace.id === activeWorkspaceId.value)) {
+        activeWorkspaceId.value = workspaces[0]?.id;
+      }
+    },
+  );
 
   const activeThread = computed(() =>
     state.value.snapshot.threads.find((thread) => thread.id === state.value.activeThreadId),
@@ -174,23 +185,13 @@ export function useApp() {
     unsubscribe?.();
   });
 
-  async function createGroup(name: string): Promise<ChatGroup> {
-    const group = await window.desktop.createGroup(name);
-    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
-    state.value.activeGroupId = group.id;
-    return group;
-  }
-
-  async function deleteGroup(groupId: string): Promise<void> {
-    await window.desktop.deleteGroup(groupId);
-    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
-  }
-
-  async function createThread(title: string, groupId = state.value.activeGroupId): Promise<ThreadSummary> {
-    const thread = await window.desktop.createThread(title, groupId);
+  async function createThread(title: string, workspaceId = activeWorkspaceId.value): Promise<ThreadSummary> {
+    const thread = await window.desktop.createThread(title, workspaceId);
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
     state.value.activeThreadId = thread.id;
-    state.value.activeGroupId = thread.groupId;
+    if (thread.workspaceId) {
+      activeWorkspaceId.value = thread.workspaceId;
+    }
     return thread;
   }
 
@@ -199,14 +200,21 @@ export function useApp() {
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
   }
 
+  async function togglePin(threadId: string, pinned: boolean): Promise<void> {
+    await window.desktop.setThreadPinned(threadId, pinned);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
   async function startTurn(text: string, attachments: TurnAttachment[] = []): Promise<void> {
     const safeAttachments = cloneTurnAttachments(attachments);
     if (safeAttachments.length > 0 && !window.desktop.supportsTurnAttachments) {
       throw new Error('客户端尚未加载图片发送能力，请重启应用后再上传图片。');
     }
-    const threadId = state.value.activeThreadId ?? (await createThread('New task', state.value.activeGroupId)).id;
+    const threadId = state.value.activeThreadId ?? (await createThread('New task')).id;
     const modelProfileId = activeThread.value?.modelProfileId ?? state.value.snapshot.settings.activeModelProfileId;
-    const workspaceId = selectedWorkspaceId.value || undefined;
+    // Bound threads keep their workspace; unbound threads bind to the active
+    // workspace on first turn.
+    const workspaceId = activeThread.value?.workspaceId ?? activeWorkspaceId.value;
     const previousRuntime = state.value.runtimeByThread[threadId];
     state.value = {
       ...replaceThreadRuntime(state.value, threadId, {
@@ -434,10 +442,10 @@ export function useApp() {
     activeModelProfile,
     activeModelProfileId,
     visibleEvents,
-    createGroup,
-    deleteGroup,
+    activeWorkspaceId,
     createThread,
     deleteThread,
+    togglePin,
     startTurn,
     cancelTurn,
     respondApproval,
@@ -448,10 +456,6 @@ export function useApp() {
     registerWorkspace,
     deleteWorkspace,
     undoTurn,
-    selectedWorkspaceId,
-    selectWorkspace(workspaceId: string | undefined): void {
-      selectedWorkspaceId.value = workspaceId || undefined;
-    },
     setLanguage,
     updateSettings,
     selectModelProfile,

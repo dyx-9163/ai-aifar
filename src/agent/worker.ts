@@ -19,10 +19,7 @@ import {
   type DesktopRequest,
   type SequencedAgentEvent,
 } from '../shared/protocol.js';
-import {
-  ACTIVE_GROUP_DELETE_ERROR,
-  ACTIVE_THREAD_DELETE_ERROR,
-} from '../shared/operationErrors.js';
+import { ACTIVE_THREAD_DELETE_ERROR } from '../shared/operationErrors.js';
 import { isLocalQwenServiceProfile } from '../shared/localQwenIdentity.js';
 import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import { safeErrorText } from '../shared/redaction.js';
@@ -100,7 +97,6 @@ export interface WorkerTurnRuntime {
   respondApproval(approvalId: string, approved: boolean): boolean;
   updateLimit(modelProfileId: string): void;
   deleteThread(threadId: string): void;
-  deleteGroup(groupId: string): void;
 }
 
 type ActiveTurnContext = {
@@ -368,9 +364,22 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
 
       const selectedProfile = database.getModelProfileForRuntime(message.modelProfileId);
-      const workspace = message.workspaceId ? database.getWorkspace(message.workspaceId) : undefined;
-      if (message.workspaceId && !workspace) {
-        throw new Error(`Workspace "${message.workspaceId}" is not registered.`);
+      const thread = database.getSnapshot().threads.find((candidate) => candidate.id === message.threadId);
+      if (!thread) {
+        throw new Error(`Thread "${message.threadId}" does not exist.`);
+      }
+      // A bound workspace is authoritative; the request payload only binds an
+      // unbound thread on its first turn.
+      let workspace = thread.workspaceId ? database.getWorkspace(thread.workspaceId) : undefined;
+      if (thread.workspaceId && !workspace) {
+        throw new Error(`Workspace "${thread.workspaceId}" is not registered.`);
+      }
+      if (!workspace && message.workspaceId) {
+        workspace = database.getWorkspace(message.workspaceId);
+        if (!workspace) {
+          throw new Error(`Workspace "${message.workspaceId}" is not registered.`);
+        }
+        database.bindThreadWorkspace(thread.id, workspace.id);
       }
       const attachments = message.attachments ?? [];
       const selectedSupportsVision = Boolean(
@@ -453,15 +462,6 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
       database.deleteThread(threadId);
     },
-    deleteGroup(groupId) {
-      const activeThread = database.getSnapshot().threads.find(
-        (thread) => thread.groupId === groupId && scheduler.hasActiveThread(thread.id),
-      );
-      if (activeThread) {
-        throw new Error(ACTIVE_GROUP_DELETE_ERROR);
-      }
-      database.deleteGroup(groupId);
-    },
   };
 }
 
@@ -479,10 +479,9 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
   if (!database || !turnRuntime) throw new Error('Database is not ready.');
 
   if (message.type === 'snapshot.get') return database.getSnapshot();
-  if (message.type === 'thread.create') return database.createThread(message.title, message.groupId);
+  if (message.type === 'thread.create') return database.createThread(message.title, message.workspaceId);
   if (message.type === 'thread.delete') return turnRuntime.deleteThread(message.threadId);
-  if (message.type === 'group.create') return database.createGroup(message.name);
-  if (message.type === 'group.delete') return turnRuntime.deleteGroup(message.groupId);
+  if (message.type === 'thread.pin') return database.setThreadPinned(message.threadId, message.pinned);
   if (message.type === 'thread.setModel') return database.setThreadModel(message.threadId, message.modelProfileId || undefined);
   if (message.type === 'modelProfile.save') {
     const profile = database.saveModelProfile(message.profile);

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import type { ThreadRuntimeState, TurnAttachment, WorkspaceRecord } from '../../shared/domain';
+import type { ThreadRuntimeState, TurnAttachment } from '../../shared/domain';
 import type { Translator } from '../i18n';
 import { composerAction } from '../modelControls';
 
@@ -8,15 +8,14 @@ const props = defineProps<{
   activeBusy: boolean;
   activeRuntime?: ThreadRuntimeState;
   supportsVision: boolean;
-  workspaces: WorkspaceRecord[];
-  selectedWorkspaceId?: string;
+  /** Display name of the workspace the active thread belongs to. */
+  threadWorkspaceName?: string;
   t: Translator;
 }>();
 
 const emit = defineEmits<{
   submit: [text: string, attachments?: TurnAttachment[]];
   cancel: [];
-  selectWorkspace: [workspaceId?: string];
 }>();
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -135,19 +134,11 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 <template>
   <form class="composer" @submit.prevent="submit">
-    <label v-if="workspaces.length > 0" class="composer-workspace">
+    <label class="composer-workspace">
       <span>{{ t('composerWorkspaceLabel') }}</span>
-      <select
-        data-testid="composer-workspace-select"
-        :value="selectedWorkspaceId ?? ''"
-        :disabled="activeBusy"
-        @change="emit('selectWorkspace', ($event.target as HTMLSelectElement).value || undefined)"
-      >
-        <option value="">{{ t('composerWorkspaceNone') }}</option>
-        <option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">
-          {{ workspace.displayName }}
-        </option>
-      </select>
+      <span class="composer-workspace-name" data-testid="composer-workspace-display">
+        {{ threadWorkspaceName ?? t('composerWorkspaceNone') }}
+      </span>
     </label>
     <div class="composer-input-shell">
       <div v-if="attachments.length > 0" class="attachment-list" :aria-label="t('attachedImages')">

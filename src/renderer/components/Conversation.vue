@@ -10,7 +10,6 @@ import type {
   TurnAttachment,
   TurnRecord,
   UndoableTurnSummary,
-  WorkspaceRecord,
 } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
@@ -42,8 +41,8 @@ const props = defineProps<{
   modelProfiles: ModelProfile[];
   activeModelProfileId?: string;
   activeModelProfile?: ModelProfile;
-  workspaces: WorkspaceRecord[];
-  selectedWorkspaceId?: string;
+  /** Display name of the workspace the active thread belongs to. */
+  threadWorkspaceName?: string;
   latestUndoableTurn?: UndoableTurnSummary;
   runtimeError?: string;
   t: Translator;
@@ -54,7 +53,6 @@ const emit = defineEmits<{
   cancel: [];
   openSettings: [];
   selectModel: [modelProfileId?: string];
-  selectWorkspace: [workspaceId?: string];
   undoTurn: [turnId: string];
   updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
@@ -523,12 +521,10 @@ function nextAnimationFrame(): Promise<void> {
       :active-busy="activeBusy"
       :active-runtime="activeRuntime"
       :supports-vision="supportsVision"
-      :workspaces="workspaces"
-      :selected-workspace-id="selectedWorkspaceId"
+      :thread-workspace-name="threadWorkspaceName"
       :t="t"
       @submit="(text, attachments) => emit('submit', text, attachments)"
       @cancel="emit('cancel')"
-      @select-workspace="(workspaceId) => emit('selectWorkspace', workspaceId)"
     />
   </section>
 </template>

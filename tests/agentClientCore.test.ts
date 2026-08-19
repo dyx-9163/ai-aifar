@@ -48,7 +48,6 @@ const answerDelta = (threadId: string, turnId: string, sequence: number, text: s
 
 function snapshotFixture(input: Partial<AppSnapshot> = {}): AppSnapshot {
   return {
-    groups: [],
     threads: [],
     turns: [],
     items: {},
@@ -98,15 +97,15 @@ function historicalTurnsSnapshot(
 }
 
 describe('Agent Client Core', () => {
-  it('keeps desktop snapshots, active chat, active group, and optimistic messages in one pure state model', () => {
+  it('keeps desktop snapshots, active chat, and optimistic messages in one pure state model', () => {
     const snapshot: AgentEvent = {
       type: 'snapshot',
       snapshot: snapshotFixture({
-        groups: [{ id: 'group-1', name: '运维问答', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z' }],
         threads: [
           {
             id: 'thread-1',
-            groupId: 'group-1',
+            workspaceId: 'ws-1',
+            pinned: false,
             title: 'Redis',
             status: 'ready',
             createdAt: '2026-08-17T00:00:00.000Z',
@@ -121,7 +120,7 @@ describe('Agent Client Core', () => {
     const withAssistant = applyAssistantDeltaToSnapshot(withUser, 'thread-1', 'turn-1', '可以，');
 
     expect(withAssistant.activeThreadId).toBe('thread-1');
-    expect(withAssistant.activeGroupId).toBe('group-1');
+    expect(withAssistant.snapshot.threads[0]).toMatchObject({ workspaceId: 'ws-1', pinned: false });
     expect(withAssistant.snapshot.items['thread-1']).toMatchObject([
       { role: 'user', text: '请部署 Redis' },
       { role: 'assistant', text: '可以，' },
@@ -147,11 +146,11 @@ describe('Agent Client Core', () => {
       snapshot: snapshotFixture({
         threads: [
           {
-            id: 'thread-1', groupId: 'group-1', title: 'Active', status: 'running',
+            id: 'thread-1', pinned: false, title: 'Active', status: 'running',
             createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
           },
           {
-            id: 'thread-2', groupId: 'group-1', title: 'Background', status: 'running',
+            id: 'thread-2', pinned: false, title: 'Background', status: 'running',
             createdAt: '2026-08-17T00:00:01.000Z', updatedAt: '2026-08-17T00:00:01.000Z',
           },
         ],

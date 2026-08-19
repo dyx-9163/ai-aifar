@@ -148,9 +148,8 @@ describe('renderer state reducer', () => {
     const base = emptyState().snapshot;
     resolveSnapshot({
       ...base,
-      groups: [{ id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z' }],
       threads: [{
-        id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'running', modelProfileId: 'model-1',
+        id: 'thread-1', pinned: false, title: 'Chat', status: 'running', modelProfileId: 'model-1',
         createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:01.000Z',
       }],
       turns: [{
@@ -221,11 +220,8 @@ describe('renderer state reducer', () => {
     listener?.(approvalEvent());
     resolveSnapshot({
       ...emptyState().snapshot,
-      groups: [{
-        id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
-      }],
       threads: [{
-        id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'running',
+        id: 'thread-1', pinned: false, title: 'Chat', status: 'running',
         createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
       }],
       turns: [{
@@ -1158,7 +1154,6 @@ describe('renderer state reducer', () => {
   it('exposes runtime settings updates that refresh the local snapshot', async () => {
     const originalWindow = globalThis.window;
     const snapshot = {
-      groups: [],
       threads: [],
       items: {},
       approvals: [],
@@ -1317,11 +1312,8 @@ describe('renderer state reducer', () => {
     let snapshotCalls = 0;
     const authoritativeSnapshot: AppSnapshot = {
       ...emptyState().snapshot,
-      groups: [{
-        id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
-      }],
       threads: [{
-        id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'running', modelProfileId: 'model-1',
+        id: 'thread-1', pinned: false, title: 'Chat', status: 'running', modelProfileId: 'model-1',
         createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:01.000Z',
       }],
       turns: [{
@@ -1429,7 +1421,7 @@ describe('renderer state reducer', () => {
           ...emptyState().snapshot,
           threads: [{
             id: 'thread-1',
-            groupId: 'default-group',
+            pinned: false,
             title: 'New task',
             status: 'ready',
             createdAt: '2026-08-17T00:00:00.000Z',
@@ -1741,11 +1733,10 @@ describe('renderer state reducer', () => {
       reasoning: { mode: 'enabled', protocol: 'openai', effort: 'minimal', display: 'auto' },
     };
     const snapshot: AppSnapshot = {
-      groups: [],
       threads: [
         {
           id: 'thread-1',
-          groupId: 'default-group',
+          pinned: false,
           title: 'New task',
           status: 'ready' as const,
           modelProfileId: 'model-1',
@@ -1789,7 +1780,6 @@ describe('renderer state reducer', () => {
       app.state.value = {
         ...reduceEvent(app.state.value, { type: 'snapshot', snapshot }),
         activeThreadId: 'thread-1',
-        activeGroupId: 'default-group',
       };
 
       const update = app.updateActiveModelRuntime({
@@ -1965,11 +1955,8 @@ describe('renderer state reducer', () => {
       type: 'snapshot',
       snapshot: {
         ...emptyState().snapshot,
-        groups: [{
-          id: 'group-1', name: 'Group', createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:00.000Z',
-        }],
         threads: [{
-          id: 'thread-1', groupId: 'group-1', title: 'Chat', status: 'ready', modelProfileId: 'model-1',
+          id: 'thread-1', pinned: false, title: 'Chat', status: 'ready', modelProfileId: 'model-1',
           createdAt: '2026-08-17T00:00:00.000Z', updatedAt: '2026-08-17T00:00:03.000Z',
         }],
         turns: [{

@@ -14,7 +14,6 @@ import type { AgentEvent, SequencedAgentEvent } from '../shared/protocol';
 export interface AgentClientState {
   snapshot: AppSnapshot;
   activeThreadId?: string;
-  activeGroupId?: string;
   events: AgentEvent[];
   lastSequenceByTurn: Record<string, number>;
   runtimeByThread: Record<string, ThreadRuntimeState>;
@@ -28,7 +27,6 @@ export interface AgentClientState {
 export function emptyAgentClientState(): AgentClientState {
   return {
     snapshot: {
-      groups: [],
       threads: [],
       turns: [],
       items: {},
@@ -59,7 +57,6 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
     const activeThreadId = event.snapshot.threads.some((thread) => thread.id === state.activeThreadId)
       ? state.activeThreadId
       : event.snapshot.threads[0]?.id;
-    const activeThread = event.snapshot.threads.find((thread) => thread.id === activeThreadId);
     const runtimeProjection = reconcileSnapshotRuntimes(state, event.snapshot.turns ?? []);
     const turns = reconcileTurns(state.snapshot.turns ?? [], event.snapshot.turns ?? []);
     const snapshotTerminalStatusByTurn = mergeTerminalStatusIndexes(
@@ -77,7 +74,6 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
       ...runtimeProjection,
       snapshotTerminalStatusByTurn,
       activeThreadId,
-      activeGroupId: activeThread?.groupId ?? state.activeGroupId ?? event.snapshot.groups[0]?.id,
       pendingApproval: snapshot.approvals.find(
         (approval) => approval.status === 'pending' && approval.threadId === activeThreadId,
       ),

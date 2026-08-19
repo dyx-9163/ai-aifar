@@ -19,11 +19,13 @@ describe('desktop protocol guards', () => {
     expect(isDesktopRequest({ type: 'thread.setModel', threadId: 't1', modelProfileId: 'model-1' })).toBe(true);
   });
 
-  it('accepts chat group and soft delete requests', () => {
-    expect(isDesktopRequest({ type: 'group.create', name: '运维问答' })).toBe(true);
-    expect(isDesktopRequest({ type: 'group.delete', groupId: 'g1' })).toBe(true);
+  it('accepts thread create, pin, and soft delete requests', () => {
     expect(isDesktopRequest({ type: 'thread.delete', threadId: 't1' })).toBe(true);
-    expect(isDesktopRequest({ type: 'thread.create', title: 'Redis', groupId: 'g1' })).toBe(true);
+    expect(isDesktopRequest({ type: 'thread.create', title: 'Redis' })).toBe(true);
+    expect(isDesktopRequest({ type: 'thread.create', title: 'Redis', workspaceId: 'ws-1' })).toBe(true);
+    expect(isDesktopRequest({ type: 'thread.create', title: 'Redis', workspaceId: 42 })).toBe(false);
+    expect(isDesktopRequest({ type: 'thread.pin', threadId: 't1', pinned: true })).toBe(true);
+    expect(isDesktopRequest({ type: 'thread.pin', threadId: 't1' })).toBe(false);
   });
 
   it('accepts an OpenAI-compatible model profile save request', () => {

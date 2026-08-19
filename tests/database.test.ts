@@ -77,6 +77,10 @@ describe('sqlite app database', () => {
         text: 'historical answer',
         incomplete: false,
       }));
+      // Legacy threads migrate into the unlinked section without backfill.
+      expect(snapshot.threads).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'legacy-success-thread', workspaceId: undefined, pinned: false }),
+      ]));
     } finally {
       db.close();
     }
@@ -108,7 +112,7 @@ describe('sqlite app database', () => {
     const migrated = new DatabaseSync(path);
     try {
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 },
       ]);
     } finally {
       migrated.close();
@@ -312,7 +316,7 @@ describe('sqlite app database', () => {
         },
       ]);
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 },
       ]);
     } finally {
       migrated.close();
@@ -713,29 +717,42 @@ describe('sqlite app database', () => {
     second.close();
   });
 
-  it('creates chat groups and hides deleted chats from snapshots and context', () => {
+  it('binds threads to workspaces, supports pinning, and hides deleted chats from snapshots and context', () => {
     const db = openDatabase(createDbPath());
     try {
-      const group = db.createGroup('运维问答');
-      const keptThread = db.createThread('Redis', group.id);
-      const deletedThread = db.createThread('MySQL', group.id);
+      const workspace = db.registerWorkspace({
+        displayName: 'Demo Project',
+        rootPath: 'D:\\Projects\\demo',
+        canonicalRootPath: 'd:\\projects\\demo',
+        trustLevel: 'read-only',
+      });
+      const keptThread = db.createThread('Redis', workspace.id);
+      const deletedThread = db.createThread('MySQL', workspace.id);
+      const unlinkedThread = db.createThread('Loose chat');
       db.appendItem(userItem(keptThread.id, 'redis question', 'item-kept', 'turn-kept'));
       db.appendItem(userItem(deletedThread.id, 'mysql question', 'item-deleted', 'turn-deleted'));
 
+      expect(keptThread).toMatchObject({ workspaceId: workspace.id, pinned: false });
+      expect(unlinkedThread.workspaceId).toBeUndefined();
+
+      db.setThreadPinned(keptThread.id, true);
+      expect(db.getSnapshot().threads.find((candidate) => candidate.id === keptThread.id)?.pinned).toBe(true);
+
+      db.bindThreadWorkspace(unlinkedThread.id, workspace.id);
+      expect(db.getSnapshot().threads.find((candidate) => candidate.id === unlinkedThread.id)?.workspaceId)
+        .toBe(workspace.id);
+
       db.deleteThread(deletedThread.id);
       const snapshotAfterThreadDelete = db.getSnapshot();
-      expect(snapshotAfterThreadDelete.groups.find((candidate) => candidate.id === group.id)).toMatchObject({
-        id: group.id,
-        name: '运维问答',
-      });
       expect(snapshotAfterThreadDelete.threads.map((thread) => thread.id)).toContain(keptThread.id);
       expect(snapshotAfterThreadDelete.threads.map((thread) => thread.id)).not.toContain(deletedThread.id);
       expect(db.getThreadMessages(deletedThread.id)).toEqual([]);
 
-      db.deleteGroup(group.id);
-      const snapshotAfterGroupDelete = db.getSnapshot();
-      expect(snapshotAfterGroupDelete.groups.map((candidate) => candidate.id)).not.toContain(group.id);
-      expect(snapshotAfterGroupDelete.threads.map((thread) => thread.id)).not.toContain(keptThread.id);
+      db.deleteWorkspace(workspace.id);
+      const snapshotAfterWorkspaceDelete = db.getSnapshot();
+      expect(snapshotAfterWorkspaceDelete.workspaces.map((candidate) => candidate.id)).not.toContain(workspace.id);
+      expect(snapshotAfterWorkspaceDelete.threads.find((thread) => thread.id === keptThread.id)?.workspaceId)
+        .toBeUndefined();
     } finally {
       db.close();
     }

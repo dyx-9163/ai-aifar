@@ -6,10 +6,9 @@ contextBridge.exposeInMainWorld('desktop', {
   supportsTurnAttachments: true,
   health: () => ipcRenderer.invoke('app:health'),
   getSnapshot: () => ipcRenderer.invoke('desktop:request', { type: 'snapshot.get' }),
-  createGroup: (name: string) => ipcRenderer.invoke('desktop:request', { type: 'group.create', name }),
-  deleteGroup: (groupId: string) => ipcRenderer.invoke('desktop:request', { type: 'group.delete', groupId }),
-  createThread: (title: string, groupId?: string) => ipcRenderer.invoke('desktop:request', { type: 'thread.create', title, groupId }),
+  createThread: (title: string, workspaceId?: string) => ipcRenderer.invoke('desktop:request', { type: 'thread.create', title, workspaceId }),
   deleteThread: (threadId: string) => ipcRenderer.invoke('desktop:request', { type: 'thread.delete', threadId }),
+  setThreadPinned: (threadId: string, pinned: boolean) => ipcRenderer.invoke('desktop:request', { type: 'thread.pin', threadId, pinned }),
   setThreadModel: (threadId: string, modelProfileId?: string) =>
     ipcRenderer.invoke('desktop:request', { type: 'thread.setModel', threadId, modelProfileId }),
   startTurn: (threadId: string, text: string, modelProfileId?: string, workspaceId?: string, attachments?: TurnAttachment[]) =>

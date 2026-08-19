@@ -3,7 +3,7 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-08-19T14:30:07Z"
+exported_at: "2026-08-19T14:58:23Z"
 modules:
     "":
         dir_name: Private AI Desktop 根工程（Electron + Vite + Forge）

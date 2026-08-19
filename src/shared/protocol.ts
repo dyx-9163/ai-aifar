@@ -22,10 +22,9 @@ import { reasoningConfigurationIssue } from './reasoningConfiguration.js';
 
 export type DesktopRequest =
   | { type: 'snapshot.get' }
-  | { type: 'group.create'; name: string }
-  | { type: 'group.delete'; groupId: string }
-  | { type: 'thread.create'; title: string; groupId?: string }
+  | { type: 'thread.create'; title: string; workspaceId?: string }
   | { type: 'thread.delete'; threadId: string }
+  | { type: 'thread.pin'; threadId: string; pinned: boolean }
   | { type: 'thread.setModel'; threadId: string; modelProfileId?: string }
   | { type: 'turn.start'; threadId: string; text: string; modelProfileId?: string; workspaceId?: string; attachments?: TurnAttachment[] }
   | { type: 'turn.cancel'; threadId: string; turnId: string }
@@ -298,14 +297,12 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
   switch (value.type) {
     case 'snapshot.get':
       return true;
-    case 'group.create':
-      return hasString(value, 'name');
-    case 'group.delete':
-      return hasString(value, 'groupId');
     case 'thread.create':
-      return hasString(value, 'title') && hasOptionalString(value, 'groupId');
+      return hasString(value, 'title') && hasOptionalString(value, 'workspaceId');
     case 'thread.delete':
       return hasString(value, 'threadId');
+    case 'thread.pin':
+      return hasString(value, 'threadId') && hasBoolean(value, 'pinned');
     case 'thread.setModel':
       return hasString(value, 'threadId') && hasOptionalString(value, 'modelProfileId');
     case 'turn.start':
