@@ -24,6 +24,8 @@ import {
 export const AGENT_LOOP_MAX_ITERATIONS = 4;
 
 const TOOL_FENCE_PATTERN = /```tool\s*\n([\s\S]*?)```/;
+const TOOL_INVOKE_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/;
+const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
 export type AgentLoopEmit = (
   payload:
@@ -67,13 +69,20 @@ export interface ParsedToolCall {
   input: Record<string, unknown>;
 }
 
-/** Extracts the first `​```tool` fenced JSON block from assistant text. */
+/** Extracts the first tool call from assistant text: fenced JSON first, then provider-native XML. */
 export function parseToolCall(text: string): ParsedToolCall | undefined {
   const match = TOOL_FENCE_PATTERN.exec(text);
-  if (!match?.[1]) return undefined;
+  if (match?.[1]) {
+    const fenced = parseFencedToolCall(match[1]);
+    if (fenced) return fenced;
+  }
+  return parseXmlToolCall(text);
+}
+
+function parseFencedToolCall(body: string): ParsedToolCall | undefined {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(match[1].trim());
+    parsed = JSON.parse(body.trim());
   } catch {
     return undefined;
   }
@@ -88,9 +97,40 @@ export function parseToolCall(text: string): ParsedToolCall | undefined {
   return { tool, input };
 }
 
-/** Removes tool fences so intermediate text never reaches the answer stream. */
+/**
+ * Tolerates provider-native XML tool calls (invoke/parameter blocks, optionally
+ * wrapped in tool_calls, with mismatched closing tags) emitted by models that
+ * ignore the fenced JSON protocol.
+ */
+function parseXmlToolCall(text: string): ParsedToolCall | undefined {
+  const match = TOOL_INVOKE_PATTERN.exec(text);
+  if (!match) return undefined;
+  const input: Record<string, unknown> = {};
+  for (const parameter of match[2].matchAll(TOOL_PARAMETER_PATTERN)) {
+    input[parameter[1]] = decodeToolParameter(parameter[2]);
+  }
+  return { tool: match[1], input };
+}
+
+/** Parameter values may be plain text or embedded JSON (numbers, arrays, objects). */
+function decodeToolParameter(raw: string): unknown {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
-  return text.replace(/```tool\s*\n[\s\S]*?```/g, '').trim();
+  return text
+    .replace(/```tool\s*\n[\s\S]*?```/g, '')
+    .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/g, '')
+    .replace(/<invoke\b[\s\S]*?<\/invoke>/g, '')
+    .replace(/<parameter\b[\s\S]*?<\/parameter>/g, '')
+    .replace(/<\/?(?:tool_calls|invoke|parameter)\b[^>]*>/g, '')
+    .trim();
 }
 
 export function buildAgentSystemPrompt(

@@ -31,6 +31,23 @@ function fencedToolCall(body: string): string {
   return `Let me check.\n\`\`\`tool\n${body}\n\`\`\``;
 }
 
+// Provider-native XML tool calls are assembled via helpers so the test source
+// never embeds raw protocol tags.
+function xmlOpen(tag: string, attrs = ''): string {
+  return `<${tag}${attrs}>`;
+}
+
+function xmlClose(tag: string): string {
+  return '<' + `/${tag}>`;
+}
+
+function xmlInvoke(tool: string, params: Array<[string, string]>): string {
+  const renderedParams = params
+    .map(([name, value]) => ` ${xmlOpen('parameter', ` name="${name}" string="true"`)}${value}${xmlClose('parameter')}`)
+    .join('');
+  return `${xmlOpen('tool_calls')} ${xmlOpen('invoke', ` name="${tool}"`)}${renderedParams} ${xmlClose('invoke')} ${xmlClose('tool_calls')}`;
+}
+
 interface LoopHarness {
   emitted: Array<{ type: string; [key: string]: unknown }>;
   modelCalls: ChatMessage[][];
@@ -110,6 +127,28 @@ describe('tool call parsing', () => {
     expect(stripToolFences(fencedToolCall('{"tool": "read_file", "input": {}}'))).toBe('Let me check.');
   });
 
+  it('parses provider-native XML tool calls', () => {
+    expect(parseToolCall(xmlInvoke('read_file', [['path', 'src/App.vue']]))).toEqual({
+      tool: 'read_file',
+      input: { path: 'src/App.vue' },
+    });
+    const stray = `${xmlInvoke('read_file', [['path', 'src/App.vue']])} ${xmlClose('invoke')}`;
+    expect(parseToolCall(stray)).toEqual({ tool: 'read_file', input: { path: 'src/App.vue' } });
+  });
+
+  it('decodes JSON-valued XML parameters', () => {
+    const call =
+      `${xmlOpen('invoke', ' name="read_file"')} ${xmlOpen('parameter', ' name="path"')}"src/main.ts"${xmlClose('parameter')}` +
+      ` ${xmlOpen('parameter', ' name="startLine"')}2${xmlClose('parameter')} ${xmlClose('invoke')}`;
+    expect(parseToolCall(call)).toEqual({ tool: 'read_file', input: { path: 'src/main.ts', startLine: 2 } });
+  });
+
+  it('strips XML tool call blocks from final text', () => {
+    expect(stripToolFences(`Done. ${xmlInvoke('read_file', [['path', 'src/App.vue']])}`)).toBe('Done.');
+    const stray = `${xmlInvoke('read_file', [['path', 'src/App.vue']])} ${xmlClose('invoke')}`;
+    expect(stripToolFences(`Note. ${stray}`)).toBe('Note.');
+  });
+
   it('describes the workspace in the system prompt', () => {
     const prompt = buildAgentSystemPrompt('my-project');
     expect(prompt).toContain('my-project');
@@ -156,6 +195,18 @@ describe('runAgentLoop', () => {
     expect(followUp.at(-2)).toEqual({ role: 'assistant', content: expect.stringContaining('read_file') });
     expect(String(followUp.at(-1)?.content)).toContain('"status": "success"');
     expect(String(followUp.at(-1)?.content)).toContain('answer = 42');
+  });
+
+  it('executes provider-native XML tool calls', async () => {
+    const { emitted, outcome, modelCalls } = await runLoop(
+      [xmlInvoke('read_file', [['path', 'src/main.ts']]), 'It exports the constant answer = 42.'],
+      context,
+    );
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 1 });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+    const started = emitted[0] as unknown as { title: string };
+    expect(started.title).toBe('read_file');
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('answer = 42');
   });
 
   it('feeds structured tool errors back to the model', async () => {
