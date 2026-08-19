@@ -46,6 +46,15 @@ export const DEFAULT_EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   '.turbo',
   '.vite',
   'coverage',
+  // IDE, agent and test-run generated artifacts: high file counts with no
+  // source value, and they push workspace_tree past its entry budget.
+  '.idea',
+  '.vscode',
+  '.qoder',
+  '.superpowers',
+  '.electron-cache',
+  'test-results',
+  'playwright-report',
 ]);
 
 export const DEFAULT_EXCLUDED_FILE_PATTERNS: readonly RegExp[] = [
