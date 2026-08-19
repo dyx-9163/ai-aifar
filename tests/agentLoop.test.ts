@@ -10,6 +10,7 @@ import {
   looksLikeManualCodeDump,
   looksLikeTruncatedToolCall,
   looksLikeUnfulfilledToolIntent,
+  looksLikeUnverifiedCompletionClaim,
   parseToolCall,
   parseToolCalls,
   runAgentLoop,
@@ -249,6 +250,17 @@ describe('tool call parsing', () => {
     expect(looksLikeUnfulfilledToolIntent('我已经修复了 CSS 截断问题。')).toBe(false);
     expect(looksLikeUnfulfilledToolIntent('Here is the plan:')).toBe(false);
     expect(looksLikeUnfulfilledToolIntent('The answer is 42.')).toBe(false);
+  });
+
+  it('detects past-tense completion claims that need executed evidence', () => {
+    expect(looksLikeUnverifiedCompletionClaim('已修复，构建通过。改动点：子弹自动追踪。')).toBe(true);
+    expect(looksLikeUnverifiedCompletionClaim('已更新 src/App.vue。')).toBe(true);
+    expect(looksLikeUnverifiedCompletionClaim('Fixed. The build passes now.')).toBe(true);
+    expect(looksLikeUnverifiedCompletionClaim('Fixed src/App.vue for the tracking bug.')).toBe(true);
+    expect(looksLikeUnverifiedCompletionClaim('Updated the file.')).toBe(false);
+    expect(looksLikeUnverifiedCompletionClaim('The game already includes auto-fire; see the update loop.')).toBe(false);
+    expect(looksLikeUnverifiedCompletionClaim('The answer is 42.')).toBe(false);
+    expect(looksLikeUnverifiedCompletionClaim(`已修复。${'x'.repeat(1600)}`)).toBe(false);
   });
 
   it('parses tool calls emitted in ordinary code fences with the arguments alias', () => {
@@ -679,5 +691,33 @@ describe('runAgentLoop', () => {
     expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 0 });
     expect(modelCalls).toHaveLength(2);
     expect(String(modelCalls[1].at(-1)?.content)).toContain('You announced reading or editing files');
+  });
+
+  it('steers completion claims made without any executed write or command', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
+    const patchCall = JSON.stringify({
+      tool: 'apply_patch',
+      input: {
+        path: 'src/main.ts',
+        baseContentHash: baseHash,
+        edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
+      },
+    });
+    const { modelCalls, outcome } = await runLoop(
+      ['已修复，构建通过。改动点：子弹自动追踪。', fencedToolCall(patchCall), 'Updated the constant.'],
+      readWrite,
+    );
+    expect(outcome).toMatchObject({ toolCallsExecuted: 1, falseCompletion: false });
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('claims completed work');
+  });
+
+  it('flags persistent completion claims after steering retries are exhausted', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const claim = '已修复，构建通过。';
+    const { modelCalls, outcome } = await runLoop([claim, claim, claim], readWrite);
+    expect(outcome.falseCompletion).toBe(true);
+    expect(modelCalls).toHaveLength(3);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('Never report unexecuted work as done');
   });
 });

@@ -662,6 +662,34 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('fails the turn when the model claims changes without executing anything', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-falsews-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    const harness = createHarness(async (_modelProfile, _messages, handlers) => {
+      handlers.onAnswerDelta('已修复，构建通过。改动点：子弹自动追踪。');
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('False completion');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Fix the CSS',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.completed');
+    const failed = harness.database.getSnapshot().turns.find((turn) => turn.id === turnId);
+    expect(failed).toMatchObject({ status: 'failed', incomplete: true });
+    expect(failed?.error).toContain('claiming changes, but no file writes or commands were executed');
+    harness.database.close();
+  });
+
   it('completes a rewrite by recovering from the observed cloud-model failure sequence', async () => {
     const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-recoverws-'));
     tempDirectories.push(workspaceDirectory);

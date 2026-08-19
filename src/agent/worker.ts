@@ -242,6 +242,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     let finalMetrics: ModelRunMetrics | undefined;
     let budgetExhausted = false;
     let emptyAnswer = false;
+    let falseCompletion = false;
     let fileChangesRecorded = 0;
     try {
       let outcome: 'completed' | 'awaiting-approval' = 'completed';
@@ -301,6 +302,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
           finalMetrics = loopOutcome.metrics;
           budgetExhausted = loopOutcome.budgetExhausted;
           emptyAnswer = loopOutcome.emptyAnswer;
+          falseCompletion = loopOutcome.falseCompletion;
         } else {
           const handlers: ModelStreamHandlers = {
             onAnswerDelta: (delta) => context.next({ type: 'answer.delta', text: delta }),
@@ -364,6 +366,19 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         const message = fileChangesRecorded > 0
           ? `The model ended the turn without a visible answer; ${fileChangesRecorded} file change(s) were applied. Review the changes above and send a follow-up to continue.`
           : 'The model ended the turn without a visible answer and no files were changed. Send a follow-up to continue.';
+        database.failTurn(turn.turnId, now(), message);
+        try {
+          await context.next({ type: 'turn.failed', error: message });
+        } finally {
+          approvalResolvers.delete(`approval-${turn.turnId}`);
+          active.delete(turn.turnId);
+        }
+        return;
+      }
+      if (falseCompletion) {
+        // The model claimed finished work while no write or command ran;
+        // reporting completion would endorse changes that never happened.
+        const message = 'The model ended the turn claiming changes, but no file writes or commands were executed in this turn. Send a follow-up to have the work actually applied.';
         database.failTurn(turn.turnId, now(), message);
         try {
           await context.next({ type: 'turn.failed', error: message });

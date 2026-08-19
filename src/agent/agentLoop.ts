@@ -40,6 +40,8 @@ const MAX_INTENT_STEERS = 2;
 const MAX_MALFORMED_TOOL_STEERS = 2;
 /** How many times the loop re-prompts when the visible answer is empty. */
 const MAX_EMPTY_ANSWER_STEERS = 2;
+/** How many times the loop re-prompts when the answer claims work no tool call executed. */
+const MAX_FALSE_COMPLETION_STEERS = 2;
 /** How many times per turn the loop runs deterministic post-write verification. */
 const MAX_AUTO_VERIFICATIONS = 3;
 /** Reads of the same path without an intervening write that trigger a steering note. */
@@ -88,6 +90,8 @@ export interface AgentLoopOutcome {
   budgetExhausted: boolean;
   /** True when the loop ended on a visible-empty answer after steering retries. */
   emptyAnswer: boolean;
+  /** True when the final answer claims work this turn never executed. */
+  falseCompletion: boolean;
 }
 
 export interface ParsedToolCall {
@@ -270,6 +274,19 @@ export function looksLikeUnfulfilledToolIntent(text: string): boolean {
   return FILE_PATH_PATTERN.test(trimmed) || PROMISE_VERB_PATTERN.test(trimmed);
 }
 
+const COMPLETION_CLAIM_PATTERN =
+  /(已修复|已修改|已添加|已移除|已删除|已更新|已创建|已加回|修改完成|修复完成|构建通过|构建成功|build (passed|succeeded|passes))/i;
+/** English completion verbs are generic words too, so only count them when paired with a file path. */
+const ENGLISH_CLAIM_VERB_PATTERN = /\b(fixed|repaired|added|removed|updated|created|modified)\b/i;
+
+/** Detects past-tense "the work is done" claims that need at least one executed write or command. */
+export function looksLikeUnverifiedCompletionClaim(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 1500) return false;
+  if (COMPLETION_CLAIM_PATTERN.test(trimmed)) return true;
+  return ENGLISH_CLAIM_VERB_PATTERN.test(trimmed) && FILE_PATH_PATTERN.test(trimmed);
+}
+
 const UNFULFILLED_INTENT_STEERING_MESSAGE = [
   'You announced reading or editing files but your reply contained no ```tool call, so nothing happened.',
   'Do not narrate—act: reply now with ```tool calls (read_file to inspect, apply_patch with a "files" array to change several files at once); call read_file first when you lack a fresh contentHash.',
@@ -286,6 +303,12 @@ const EMPTY_ANSWER_STEERING_MESSAGE = [
   'Your reply was empty: it contained neither a visible answer nor a tool call, so nothing happened.',
   'Either act now with ```tool calls (apply_patch to finish the edits you planned, read_file when you need fresh content), or write the final answer for the user.',
   'Never end a turn silently.',
+].join(' ');
+
+const FALSE_COMPLETION_STEERING_MESSAGE = [
+  'Your reply claims completed work ("fixed", "added", "build passed") but this turn executed no apply_patch and no run_command, so nothing changed and nothing was verified.',
+  'Either apply the edits now with ```tool apply_patch calls (the harness verifies automatically after each write), or, if the change already exists from an earlier turn, confirm it with read_file/search_code evidence and say so explicitly.',
+  'Never report unexecuted work as done.',
 ].join(' ');
 
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
@@ -341,6 +364,7 @@ export function buildAgentSystemPrompt(
       '- When several files change together, prefer one apply_patch with a "files" array so related files change together in a single changeset.',
       '- Keep every reply within the output limit: for large rewrites, split the work into several apply_patch edits with replacements of at most ~120 lines instead of one huge edit.',
       '- Promising changes is not acting: a reply that says it will read, replace, or update files but contains no ```tool call changes nothing; either issue the ```tool calls or answer directly.',
+      '- Only report changes that apply_patch actually applied in this turn; completion claims without an executed write or command are rejected.',
       'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',
       'This holds even for very large rewrites: send the complete replacement text inside apply_patch edits; the answer must only describe what changed.',
     );
@@ -371,6 +395,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let intentSteersUsed = 0;
   let malformedToolSteersUsed = 0;
   let emptyAnswerSteersUsed = 0;
+  let falseCompletionSteersUsed = 0;
+  let actingToolsExecuted = 0;
   let autoVerificationsUsed = 0;
   const readCounts = new Map<string, number>();
   let lastMetrics: ModelRunMetrics | undefined;
@@ -454,8 +480,27 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         messages.push({ role: 'user', content: UNFULFILLED_INTENT_STEERING_MESSAGE });
         continue;
       }
+      if (
+        options.toolContext.trustLevel !== 'read-only' &&
+        actingToolsExecuted === 0 &&
+        falseCompletionSteersUsed < MAX_FALSE_COMPLETION_STEERS &&
+        looksLikeUnverifiedCompletionClaim(answer)
+      ) {
+        // The model reported success without executing anything; force real action.
+        falseCompletionSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: FALSE_COMPLETION_STEERING_MESSAGE });
+        continue;
+      }
       if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
-      return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: false, emptyAnswer: answer.length === 0 };
+      return {
+        metrics: lastMetrics,
+        iterations,
+        toolCallsExecuted,
+        budgetExhausted: false,
+        emptyAnswer: answer.length === 0,
+        falseCompletion: actingToolsExecuted === 0 && looksLikeUnverifiedCompletionClaim(answer),
+      };
     }
 
     messages.push({ role: 'assistant', content: text });
@@ -493,6 +538,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       if (parsed.tool === 'apply_patch' && result.status === 'success') {
         readCounts.clear();
       }
+      if ((parsed.tool === 'apply_patch' || parsed.tool === 'run_command') && result.status === 'success') {
+        actingToolsExecuted += 1;
+      }
       if (
         parsed.tool === 'apply_patch' &&
         result.status === 'success' &&
@@ -522,7 +570,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   iterations += 1;
   const answer = stripToolFences(text);
   if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
-  return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: true, emptyAnswer: false };
+  return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: true, emptyAnswer: false, falseCompletion: false };
 }
 
 function toolResultMessage(callId: string, result: AgentToolResult): string {
