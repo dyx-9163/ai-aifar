@@ -120,31 +120,41 @@ export function createTimelineEntries(
     appendMetricsIfTurnEnds(entries, metricsByTurn, item, items);
   }
 
-  const visibleToolStarts = new Set<string>();
+  // Tool activity is transient: one merged row per invocation while the turn
+  // is live, removed once the turn reaches a terminal state. The synthetic
+  // model-call row duplicates the progress indicator, so it is never shown.
+  const toolEntryByCall = new Map<string, Extract<TimelineEntry, { kind: 'tool' }>>();
   for (const event of events) {
-    if (event.type === 'tool.started') {
-      if (terminalTurns.has(event.turnId)) {
+    if (event.type === 'tool.started' || event.type === 'tool.output') {
+      if (terminalTurns.has(event.turnId) || event.toolId === `tool-${event.turnId}-model`) {
         continue;
       }
-      const toolKey = `${event.turnId}:${event.toolId}:${event.title}`;
-      if (visibleToolStarts.has(toolKey)) {
-        continue;
+      const toolKey = `${event.turnId}:${event.toolId}`;
+      const existing = toolEntryByCall.get(toolKey);
+      if (event.type === 'tool.started') {
+        if (existing) continue;
+        const entry: Extract<TimelineEntry, { kind: 'tool' }> = {
+          id: `tool.started-${event.turnId}-${event.toolId}`,
+          kind: 'tool',
+          text: event.title,
+          status: 'running',
+        };
+        toolEntryByCall.set(toolKey, entry);
+        entries.push(entry);
+      } else if (existing) {
+        existing.text = event.output;
+        existing.status = 'completed';
+      } else {
+        const entry: Extract<TimelineEntry, { kind: 'tool' }> = {
+          id: `tool.output-${event.turnId}-${event.toolId}`,
+          kind: 'tool',
+          text: event.output,
+          status: 'completed',
+        };
+        toolEntryByCall.set(toolKey, entry);
+        entries.push(entry);
       }
-      visibleToolStarts.add(toolKey);
-      entries.push({
-        id: `${event.type}-${event.turnId}-${event.toolId}`,
-        kind: 'tool',
-        text: event.title,
-        status: 'running',
-      });
-    }
-    if (event.type === 'tool.output') {
-      entries.push({
-        id: `${event.type}-${event.turnId}-${event.sequence}`,
-        kind: 'tool',
-        text: event.output,
-        status: 'completed',
-      });
+      continue;
     }
     if (event.type === 'turn.failed') {
       entries.push({

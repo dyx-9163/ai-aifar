@@ -11,10 +11,19 @@
 - [src/renderer/components/Conversation.vue](file://src/renderer/components/Conversation.vue)
 - [src/renderer/components/Sidebar.vue](file://src/renderer/components/Sidebar.vue)
 - [src/renderer/components/Composer.vue](file://src/renderer/components/Composer.vue)
+- [src/renderer/components/WorkspaceDialog.vue](file://src/renderer/components/WorkspaceDialog.vue)
 - [src/renderer/i18n/index.ts](file://src/renderer/i18n/index.ts)
 - [package.json](file://package.json)
 - [vite.renderer.config.ts](file://vite.renderer.config.ts)
 </cite>
+
+## 更新摘要
+**所做更改**
+- 更新了主应用组件以支持工作区优先架构
+- 将activeGroupId替换为activeWorkspaceId
+- 添加了线程置顶操作处理
+- 集成了新的工作区对话框组件
+- 更新了状态管理模式以支持工作区管理
 
 ## 目录
 1. [简介](#简介)
@@ -29,21 +38,22 @@
 10. [附录：扩展与最佳实践](#附录：扩展与最佳实践)
 
 ## 简介
-本仓库是一个基于 Vue 3 + Vite + Electron 的桌面端 AI 客户端。渲染进程使用 Vue 构建 UI，通过 composable 集中管理状态、事件流与副作用；主进程能力通过 window.desktop 暴露给渲染进程。应用以“快照 + 增量事件”的方式维护会话、消息、模型配置与运行时状态，支持多工作区、分组、线程（对话）、模型配置、推理模式与审批流程。
+本仓库是一个基于 Vue 3 + Vite + Electron 的桌面端 AI 客户端。渲染进程使用 Vue 构建 UI，通过 composable 集中管理状态、事件流与副作用；主进程能力通过 window.desktop 暴露给渲染进程。应用采用**工作区优先架构**，支持多工作区、分组、线程（对话）、模型配置、推理模式与审批流程。每个线程可以绑定到特定工作区，支持线程置顶、工作区权限管理和文件操作安全控制。
 
 ## 项目结构
 - 入口与初始化
   - 渲染进程入口创建并挂载根组件
   - 主题样式在入口引入
 - 视图层
-  - App.vue 作为根容器，组合 Sidebar、Conversation、Inspector、SettingsView
+  - App.vue 作为根容器，组合 Sidebar、Conversation、Inspector、SettingsView 和 WorkspaceDialog
   - Conversation 负责聊天时间线、推理面板、滚动行为与用户输入
-  - Sidebar 展示分组与线程列表、运行状态与操作
+  - Sidebar 展示工作区与线程列表、运行状态与操作
   - Composer 处理文本与图片附件提交
+  - WorkspaceDialog 提供工作区注册和管理界面
 - 状态与事件
   - useApp 封装响应式状态、计算属性、副作用与业务方法
   - agentClient/core 提供不可变状态归约器 reduceAgentEvent、增量合并与乐观更新
-  - shared/domain 定义领域模型（线程、消息、模型配置、设置等）
+  - shared/domain 定义领域模型（线程、消息、模型配置、设置、工作区等）
   - shared/protocol 定义跨进程协议与校验器
 - 国际化
   - i18n 提供翻译函数 createTranslator，按语言切换
@@ -55,24 +65,25 @@ B --> C["Sidebar.vue<br/>导航与操作"]
 B --> D["Conversation.vue<br/>聊天时间线与交互"]
 B --> E["Inspector.vue<br/>审批与事件详情"]
 B --> F["SettingsView.vue<br/>模型与设置"]
-D --> G["Composer.vue<br/>输入与附件"]
-B --> H["useApp.ts<br/>状态与副作用"]
-H --> I["agentClient/core.ts<br/>状态归约与增量更新"]
-H --> J["shared/protocol.ts<br/>请求/事件协议"]
-H --> K["shared/domain.ts<br/>领域类型"]
-B --> L["i18n/index.ts<br/>翻译函数"]
+B --> G["WorkspaceDialog.vue<br/>工作区管理"]
+D --> H["Composer.vue<br/>输入与附件"]
+B --> I["useApp.ts<br/>状态与副作用"]
+I --> J["agentClient/core.ts<br/>状态归约与增量更新"]
+I --> K["shared/protocol.ts<br/>请求/事件协议"]
+I --> L["shared/domain.ts<br/>领域类型"]
+B --> M["i18n/index.ts<br/>翻译函数"]
 ```
 
-图表来源
+**图表来源**
 - [src/renderer/main.ts:1-7](file://src/renderer/main.ts#L1-L7)
-- [src/renderer/App.vue:1-199](file://src/renderer/App.vue#L1-L199)
-- [src/renderer/composables/useApp.ts:1-519](file://src/renderer/composables/useApp.ts#L1-L519)
+- [src/renderer/App.vue:1-238](file://src/renderer/App.vue#L1-L238)
+- [src/renderer/composables/useApp.ts:1-546](file://src/renderer/composables/useApp.ts#L1-L546)
 - [src/agentClient/core.ts:1-868](file://src/agentClient/core.ts#L1-L868)
-- [src/shared/domain.ts:1-319](file://src/shared/domain.ts#L1-L319)
+- [src/shared/domain.ts:1-343](file://src/shared/domain.ts#L1-L343)
 - [src/shared/protocol.ts:1-371](file://src/shared/protocol.ts#L1-L371)
 - [src/renderer/i18n/index.ts:1-15](file://src/renderer/i18n/index.ts#L1-L15)
 
-章节来源
+**章节来源**
 - [src/renderer/main.ts:1-7](file://src/renderer/main.ts#L1-L7)
 - [package.json:1-35](file://package.json#L1-L35)
 - [vite.renderer.config.ts:1-7](file://vite.renderer.config.ts#L1-L7)
@@ -85,27 +96,34 @@ B --> L["i18n/index.ts<br/>翻译函数"]
   - 管理本地视图路由 view = 'chat' | 'settings'
   - 组合子组件并通过 props/emits 传递数据与事件
   - 处理主题切换、错误提示、模型运行时更新、发送回合、审批响应
+  - **新增**：工作区对话框集成，支持工作区注册和管理
+  - **更新**：使用 activeWorkspaceId 替代 activeGroupId，支持工作区优先架构
 - 聊天 Conversation.vue
   - 接收线程、消息项、回合、事件、运行时状态等 props
   - 计算时间线条目、推理分组、推理面板映射
   - 实现自动滚动、复制、推理菜单、模型选择与运行时控制
   - 通过 emits 向父级提交消息、取消、打开设置、选择模型、更新运行时
 - 侧边栏 Sidebar.vue
-  - 展示分组与线程列表，显示线程运行状态
-  - 触发新建线程/分组、选择线程/分组、删除、切换主题、打开设置
+  - **更新**：展示工作区与线程列表，支持工作区分组显示
+  - 触发新建线程/工作区、选择线程/工作区、删除、切换主题、打开设置
+  - **新增**：线程置顶功能，支持 pinned 状态管理
 - 输入框 Composer.vue
   - 支持文本与图片附件上传，限制数量与大小
   - 根据当前运行时决定按钮文案与禁用状态
   - 提交时发出 submit(cancel/send) 事件
+- 工作区对话框 WorkspaceDialog.vue
+  - **新增**：提供工作区注册界面，支持路径选择和信任级别设置
+  - 处理工作区注册状态反馈和用户交互
 
-章节来源
-- [src/renderer/App.vue:1-199](file://src/renderer/App.vue#L1-L199)
+**章节来源**
+- [src/renderer/App.vue:1-238](file://src/renderer/App.vue#L1-L238)
 - [src/renderer/components/Conversation.vue:1-515](file://src/renderer/components/Conversation.vue#L1-L515)
-- [src/renderer/components/Sidebar.vue:1-130](file://src/renderer/components/Sidebar.vue#L1-L130)
+- [src/renderer/components/Sidebar.vue:1-269](file://src/renderer/components/Sidebar.vue#L1-L269)
 - [src/renderer/components/Composer.vue:1-181](file://src/renderer/components/Composer.vue#L1-L181)
+- [src/renderer/components/WorkspaceDialog.vue:1-90](file://src/renderer/components/WorkspaceDialog.vue#L1-L90)
 
 ## 架构总览
-应用采用“视图层 + Composable 状态层 + 领域/协议层”的分层设计：
+应用采用"视图层 + Composable 状态层 + 领域/协议层"的分层设计，**现已升级为工作区优先架构**：
 - 视图层：Vue 组件负责 UI 与交互，仅持有少量本地 UI 状态
 - 状态层：useApp 聚合响应式 state、computed、生命周期与副作用，调用 agentClient 的 reduce 与工具函数进行状态更新
 - 领域/协议层：domain 定义数据结构，protocol 定义跨进程请求与事件类型并提供校验
@@ -121,7 +139,7 @@ participant R as "agentClient/core.ts"
 U->>C : 输入文本/附件并提交
 C-->>A : emit('submit', text, attachments)
 A->>S : startTurn(text, attachments)
-S->>D : startTurn(threadId, text, modelProfileId, attachments)
+S->>D : startTurn(threadId, text, modelProfileId, workspaceId, attachments)
 D-->>S : {turnId, ...}
 S->>R : acknowledgeThreadTurn(...)
 S->>R : appendOptimisticUserMessage(...)
@@ -133,10 +151,10 @@ S-->>A : 响应式 state 更新
 A-->>C : props 更新，UI 刷新
 ```
 
-图表来源
+**图表来源**
 - [src/renderer/components/Conversation.vue:1-515](file://src/renderer/components/Conversation.vue#L1-L515)
-- [src/renderer/App.vue:1-199](file://src/renderer/App.vue#L1-L199)
-- [src/renderer/composables/useApp.ts:1-519](file://src/renderer/composables/useApp.ts#L1-L519)
+- [src/renderer/App.vue:1-238](file://src/renderer/App.vue#L1-L238)
+- [src/renderer/composables/useApp.ts:1-546](file://src/renderer/composables/useApp.ts#L1-L546)
 - [src/agentClient/core.ts:1-868](file://src/agentClient/core.ts#L1-L868)
 
 ## 详细组件分析
@@ -145,11 +163,13 @@ A-->>C : props 更新，UI 刷新
 - 响应式状态
   - 使用 ref<RendererState> 保存 AgentClientState，包含 snapshot、events、runtimeByThread、currentTurnByThread、supersededTurns、optimisticThreads、pendingApproval 等
   - computed 派生 activeThread、activeItems、activeTurns、activeRuntime、activeBusy、activeModelProfile 等
+  - **新增**：activeWorkspaceId 管理当前活动工作区
 - 事件订阅与同步
   - onMounted 启动初始同步：读取快照、缓冲事件、应用快照后关闭缓冲并标记 ready
   - 订阅事件流，将事件通过 reduceAgentEvent 归约为新状态
 - 副作用管理
   - 调用 window.desktop 执行持久化或远端操作（创建/删除组与线程、开始/取消回合、保存模型配置、更新设置、设置语言等）
+  - **新增**：工作区管理操作（registerWorkspace、deleteWorkspace）
   - 失败回滚：对乐观更新（如 optimisticThreads、runtimeByThread）在失败时恢复
 - 超时与健壮性
   - withTimeout 包装 startTurn 与 updateActiveModelRuntime，避免长时间阻塞
@@ -161,7 +181,7 @@ Start(["startTurn 入口"]) --> CheckAttach["检查附件支持"]
 CheckAttach --> |不支持| ThrowErr["抛出错误并终止"]
 CheckAttach --> |支持| EnsureThread["确保存在线程"]
 EnsureThread --> SetQueued["设置线程运行态为 queued<br/>并标记 optimisticThreads"]
-SetQueued --> CallDesktop["调用 desktop.startTurn"]
+SetQueued --> CallDesktop["调用 desktop.startTurn<br/>包含 workspaceId"]
 CallDesktop --> Ack{"是否成功?"}
 Ack --> |否| Rollback["回滚运行态与乐观标记"]
 Ack --> |是| AckTurn["acknowledgeThreadTurn"]
@@ -170,19 +190,20 @@ AppendMsg --> End(["完成"])
 Rollback --> End
 ```
 
-图表来源
+**图表来源**
 - [src/renderer/composables/useApp.ts:191-232](file://src/renderer/composables/useApp.ts#L191-L232)
 - [src/agentClient/core.ts:183-206](file://src/agentClient/core.ts#L183-L206)
 - [src/agentClient/core.ts:452-475](file://src/agentClient/core.ts#L452-L475)
 
-章节来源
-- [src/renderer/composables/useApp.ts:1-519](file://src/renderer/composables/useApp.ts#L1-L519)
+**章节来源**
+- [src/renderer/composables/useApp.ts:1-546](file://src/renderer/composables/useApp.ts#L1-L546)
 - [src/agentClient/core.ts:1-868](file://src/agentClient/core.ts#L1-L868)
 
 ### 组件层次结构与通信
 - 父子通信
   - App.vue 通过 props 将状态与方法传递给 Sidebar、Conversation、Inspector、SettingsView
   - 子组件通过 emits 向上抛出事件（如 new-thread、select-thread、submit、open-settings 等），由 App.vue 统一协调
+  - **新增**：工作区相关事件（add-workspace、select-workspace、toggle-pin）
 - 事件驱动的状态更新
   - 所有写操作先调用 useApp 的方法，再由其调用 window.desktop 并归约事件，保证单一真实来源
 - 视图路由
@@ -194,23 +215,27 @@ App["App.vue"] --> |props| Side["Sidebar.vue"]
 App --> |props| Conv["Conversation.vue"]
 App --> |props| Insp["Inspector.vue"]
 App --> |props| SetV["SettingsView.vue"]
+App --> |props| WD["WorkspaceDialog.vue"]
 Conv --> |emit submit/cancel/open-settings/select-model/update-model-runtime| App
-Side --> |emit new-thread/new-group/select-thread/select-group/delete-thread/delete-group/toggle-theme/open-settings| App
+Side --> |emit new-thread/new-workspace/select-thread/select-workspace/toggle-pin/delete-thread/toggle-theme/open-settings| App
+WD --> |emit registered/close| App
 ```
 
-图表来源
-- [src/renderer/App.vue:1-199](file://src/renderer/App.vue#L1-L199)
+**图表来源**
+- [src/renderer/App.vue:1-238](file://src/renderer/App.vue#L1-L238)
 - [src/renderer/components/Conversation.vue:1-515](file://src/renderer/components/Conversation.vue#L1-L515)
-- [src/renderer/components/Sidebar.vue:1-130](file://src/renderer/components/Sidebar.vue#L1-L130)
+- [src/renderer/components/Sidebar.vue:1-269](file://src/renderer/components/Sidebar.vue#L1-L269)
+- [src/renderer/components/WorkspaceDialog.vue:1-90](file://src/renderer/components/WorkspaceDialog.vue#L1-L90)
 
-章节来源
-- [src/renderer/App.vue:1-199](file://src/renderer/App.vue#L1-L199)
+**章节来源**
+- [src/renderer/App.vue:1-238](file://src/renderer/App.vue#L1-L238)
 - [src/renderer/components/Conversation.vue:1-515](file://src/renderer/components/Conversation.vue#L1-L515)
-- [src/renderer/components/Sidebar.vue:1-130](file://src/renderer/components/Sidebar.vue#L1-L130)
+- [src/renderer/components/Sidebar.vue:1-269](file://src/renderer/components/Sidebar.vue#L1-L269)
 
 ### 状态管理模式与数据流
 - 领域模型
-  - domain.ts 定义了线程、消息、工具、变更、审批、模型配置、设置、工作区等类型
+  - domain.ts 定义了线程、消息、工具、变更、审批、模型配置、设置、**工作区**等类型
+  - **新增**：WorkspaceRecord、WorkspaceTrustLevel、WorkspaceNetworkPolicy 等工作区相关类型
 - 协议与校验
   - protocol.ts 定义了 DesktopRequest 与 AgentEvent，并提供 isDesktopRequest、isAgentEvent 等校验函数，保障跨进程数据契约
 - 状态归约
@@ -222,7 +247,7 @@ classDiagram
 class AgentClientState {
 +snapshot
 +activeThreadId
-+activeGroupId
++activeWorkspaceId
 +events
 +lastSequenceByTurn
 +runtimeByThread
@@ -241,6 +266,7 @@ class AppSnapshot {
 +modelProfiles
 +settings
 +workspaces
++undoableTurns
 }
 class ModelProfile {
 +id
@@ -257,17 +283,29 @@ class ModelProfile {
 +createdAt
 +updatedAt
 }
+class WorkspaceRecord {
++id
++displayName
++rootPath
++canonicalRootPath
++trustLevel
++networkPolicy
++createdAt
++lastOpenedAt
+}
 AgentClientState --> AppSnapshot : "包含"
 AppSnapshot --> ModelProfile : "包含"
+AppSnapshot --> WorkspaceRecord : "包含"
 ```
 
-图表来源
+**图表来源**
 - [src/agentClient/core.ts:14-26](file://src/agentClient/core.ts#L14-L26)
-- [src/shared/domain.ts:283-292](file://src/shared/domain.ts#L283-L292)
+- [src/shared/domain.ts:276-287](file://src/shared/domain.ts#L276-L287)
 - [src/shared/domain.ts:160-176](file://src/shared/domain.ts#L160-L176)
+- [src/shared/domain.ts:307-316](file://src/shared/domain.ts#L307-L316)
 
-章节来源
-- [src/shared/domain.ts:1-319](file://src/shared/domain.ts#L1-L319)
+**章节来源**
+- [src/shared/domain.ts:1-343](file://src/shared/domain.ts#L1-L343)
 - [src/shared/protocol.ts:1-371](file://src/shared/protocol.ts#L1-L371)
 - [src/agentClient/core.ts:1-868](file://src/agentClient/core.ts#L1-L868)
 
@@ -279,29 +317,34 @@ AppSnapshot --> ModelProfile : "包含"
 - 副作用边界
   - 所有与 window.desktop 的交互集中在 useApp，便于测试与回滚
   - 超时保护避免长时间等待导致 UI 卡死
+  - **新增**：工作区监听器，确保 activeWorkspaceId 始终有效
 
-章节来源
+**章节来源**
 - [src/renderer/composables/useApp.ts:146-164](file://src/renderer/composables/useApp.ts#L146-L164)
 - [src/renderer/composables/useApp.ts:504-518](file://src/renderer/composables/useApp.ts#L504-L518)
+- [src/renderer/composables/useApp.ts:107-117](file://src/renderer/composables/useApp.ts#L107-L117)
 
 ### 路由切换机制与视图管理
 - 使用本地 ref view 在 'chat' 与 'settings' 之间切换
 - 通过 v-if 条件渲染 Conversation 或 SettingsView
 - 侧边栏与聊天区域共享状态，切换视图不影响全局状态
+- **新增**：工作区对话框的条件渲染
 
-章节来源
+**章节来源**
 - [src/renderer/App.vue:13-15](file://src/renderer/App.vue#L13-L15)
-- [src/renderer/App.vue:146-196](file://src/renderer/App.vue#L146-L196)
+- [src/renderer/App.vue:146-238](file://src/renderer/App.vue#L146-L238)
 
 ### 组件间通信模式
 - Props 传递
   - 从 App.vue 向下传递线程、消息、事件、运行时、模型配置、设置、翻译函数等
+  - **新增**：工作区相关 props（workspaces、activeWorkspaceId）
 - 事件发射
   - 子组件通过 emits 上报用户意图（提交、取消、选择模型、打开设置等）
+  - **新增**：工作区相关事件（add-workspace、select-workspace、toggle-pin）
 - 状态同步
   - 所有写操作经 useApp 统一处理，再通过 reduceAgentEvent 保持状态一致
 
-章节来源
+**章节来源**
 - [src/renderer/components/Conversation.vue:31-53](file://src/renderer/components/Conversation.vue#L31-L53)
 - [src/renderer/components/Sidebar.vue:8-29](file://src/renderer/components/Sidebar.vue#L8-L29)
 - [src/renderer/components/Composer.vue:7-17](file://src/renderer/components/Composer.vue#L7-L17)
@@ -325,6 +368,7 @@ AV --> CV["Conversation.vue"]
 AV --> SV["Sidebar.vue"]
 AV --> IV["Inspector.vue"]
 AV --> STV["SettingsView.vue"]
+AV --> WDV["WorkspaceDialog.vue"]
 CV --> CMP["Composer.vue"]
 end
 UA --> AC["agentClient/core.ts"]
@@ -332,15 +376,15 @@ UA --> SD["shared/domain.ts"]
 UA --> SP["shared/protocol.ts"]
 ```
 
-图表来源
+**图表来源**
 - [src/renderer/main.ts:1-7](file://src/renderer/main.ts#L1-L7)
-- [src/renderer/App.vue:1-199](file://src/renderer/App.vue#L1-L199)
-- [src/renderer/composables/useApp.ts:1-519](file://src/renderer/composables/useApp.ts#L1-L519)
+- [src/renderer/App.vue:1-238](file://src/renderer/App.vue#L1-L238)
+- [src/renderer/composables/useApp.ts:1-546](file://src/renderer/composables/useApp.ts#L1-L546)
 - [src/agentClient/core.ts:1-868](file://src/agentClient/core.ts#L1-L868)
-- [src/shared/domain.ts:1-319](file://src/shared/domain.ts#L1-L319)
+- [src/shared/domain.ts:1-343](file://src/shared/domain.ts#L1-L343)
 - [src/shared/protocol.ts:1-371](file://src/shared/protocol.ts#L1-L371)
 
-章节来源
+**章节来源**
 - [package.json:1-35](file://package.json#L1-L35)
 - [vite.renderer.config.ts:1-7](file://vite.renderer.config.ts#L1-L7)
 
@@ -355,38 +399,40 @@ UA --> SP["shared/protocol.ts"]
   - withTimeout 避免长耗时操作阻塞 UI
 - 计算属性缓存
   - 大量使用 computed 派生视图所需数据，减少重复计算
-
-[本节为通用指导，不直接分析具体文件]
+- **新增**：工作区相关优化
+  - 工作区列表的懒加载和折叠状态管理
+  - 线程置顶状态的本地缓存
 
 ## 故障排查指南
 - 常见问题
   - 发送失败：检查 startTurn 超时与错误捕获，确认 window.desktop 能力与网络
   - 审批失败：检查 respondApproval 返回值与快照回退逻辑
   - 模型配置更新失败：检查 updateActiveModelRuntime 超时与回滚
+  - **新增**：工作区注册失败：检查工作区路径验证和权限设置
 - 调试技巧
   - 观察 visibleEvents 与 runtimeByThread 变化，定位事件流问题
   - 使用浏览器 DevTools 查看组件 props/emits 与 computed 值
   - 通过 i18n 翻译键验证语言切换是否正确
+  - **新增**：检查工作区状态和工作区对话框的交互流程
 
-章节来源
+**章节来源**
 - [src/renderer/composables/useApp.ts:207-232](file://src/renderer/composables/useApp.ts#L207-L232)
 - [src/renderer/composables/useApp.ts:261-309](file://src/renderer/composables/useApp.ts#L261-L309)
 - [src/renderer/composables/useApp.ts:317-364](file://src/renderer/composables/useApp.ts#L317-L364)
 
 ## 结论
-该 Vue 应用采用清晰的职责分离与事件驱动架构：视图层专注交互，composable 层统一管理状态与副作用，领域与协议层保障数据契约。通过快照+增量事件、乐观更新与超时保护，实现了高响应性与强一致性的用户体验。组件间通过 props/emits 通信，避免了紧耦合，便于扩展与维护。
-
-[本节为总结，不直接分析具体文件]
+该 Vue 应用采用清晰的职责分离与事件驱动架构，**现已升级为工作区优先架构**：视图层专注交互，composable 层统一管理状态与副作用，领域与协议层保障数据契约。通过快照+增量事件、乐观更新与超时保护，实现了高响应性与强一致性的用户体验。组件间通过 props/emits 通信，避免了紧耦合，便于扩展与维护。**工作区优先架构**提供了更好的项目组织、权限控制和文件操作安全性。
 
 ## 附录：扩展与最佳实践
 - 扩展指南
   - 新增功能优先在 useApp 中添加方法与副作用，保持视图层轻量
   - 新增领域类型时，同步更新 domain.ts 与 protocol.ts 的校验逻辑
   - 新增组件遵循 props/emits 约定，避免直接修改全局状态
+  - **新增**：工作区相关扩展需考虑权限控制和路径安全
 - 最佳实践
   - 使用 computed 派生视图数据，避免在模板中进行复杂计算
   - 对外部副作用统一封装，便于测试与回滚
   - 对长耗时操作添加超时与错误提示，提升用户体验
   - 使用 i18n 键管理文案，便于多语言支持
-
-[本节为通用指导，不直接分析具体文件]
+  - **新增**：工作区操作应验证路径安全性和权限级别
+  - **新增**：线程置顶状态应与工作区上下文保持一致

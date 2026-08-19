@@ -707,12 +707,18 @@ button {
 }
 
 .message-content,
-.tool-row span,
 .approval-panel p {
   margin: 0;
   color: var(--text);
   font-size: 14px;
   line-height: 1.55;
+}
+
+.tool-row span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 .message-content {
@@ -850,10 +856,19 @@ button {
   align-self: flex-start;
   width: min(880px, 100%);
   margin-top: 2px;
-  padding: 9px 12px;
-  border-left: 2px solid var(--accent);
+  padding: 3px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--muted) 55%, transparent);
   color: var(--muted);
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  background: transparent;
+}
+
+.tool-row[data-testid='turn-error'] {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.tool-row[data-testid='turn-error'] span {
+  color: var(--danger);
 }
 
 .metrics-row {
