@@ -215,21 +215,25 @@ const TRUNCATED_TOOL_STEERING_MESSAGE = [
   'Never paste replacement code into the answer.',
 ].join(' ');
 
-const TOOL_INTENT_PATTERN = /(apply_patch|read_file|workspace_tree|替换|更新|修改|写入|创建|读取|查看|replac|updat|writ|creat|read|check|inspect)/i;
+const TOOL_INTENT_PATTERN = /(apply_patch|read_file|workspace_tree|替换|更新|修改|写入|创建|读取|查看|检查|修复|replac|updat|writ|creat|read|check|inspect|fix|repair)/i;
 const FILE_PATH_PATTERN = /`[^`\n]*\.[A-Za-z0-9]+`|[\w./\\-]+\.(?:vue|tsx?|jsx?|html|css|json|md|py|go|rs)/;
+/** First-person openers that promise an action about to happen ("let me ..."). */
+const INTENT_PROMISE_PATTERN = /(让我|我来|我先|等我|接下来|现在我来?|let me|i'?ll|i will|going to)/i;
+/** Action verbs that mark a read/fix promise even without a concrete file path. */
+const PROMISE_VERB_PATTERN = /(read_file|读取|查看|检查|修复|修改|替换|写入|创建|\bread\b|check|inspect|fix|apply)/i;
 
 /**
- * Detects replies that announce reading or editing files (typically ending on a
- * colon before the missing tool call) but contain no tool call, so nothing happens.
- * Write announcements must mention a file path; read announcements are caught by
- * the colon + verb shape alone.
+ * Detects replies that announce reading or editing files but contain no tool
+ * call, so nothing happens. Covers both colon-terminated announcements and
+ * first-person promises ("让我先读取…。") that end with ordinary punctuation.
  */
 export function looksLikeUnfulfilledToolIntent(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0 || trimmed.length > 800) return false;
-  if (!/[:：]\s*$/.test(trimmed)) return false;
+  const announcedWithColon = /[:：]\s*$/.test(trimmed);
+  if (!announcedWithColon && !INTENT_PROMISE_PATTERN.test(trimmed)) return false;
   if (!TOOL_INTENT_PATTERN.test(trimmed)) return false;
-  return FILE_PATH_PATTERN.test(trimmed) || /(read_file|读取|查看|\bread\b|check|inspect)/i.test(trimmed);
+  return FILE_PATH_PATTERN.test(trimmed) || PROMISE_VERB_PATTERN.test(trimmed);
 }
 
 const UNFULFILLED_INTENT_STEERING_MESSAGE = [

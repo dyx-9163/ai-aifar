@@ -191,7 +191,10 @@ describe('tool call parsing', () => {
     expect(looksLikeUnfulfilledToolIntent('好的，现在用完整代码替换 `src/App.vue`，同时更新 `index.html`：')).toBe(true);
     expect(looksLikeUnfulfilledToolIntent('Okay, now replacing src/App.vue:')).toBe(true);
     expect(looksLikeUnfulfilledToolIntent('Let me first read the current state of both files:')).toBe(true);
+    expect(looksLikeUnfulfilledToolIntent('让我先读取当前的代码文件，然后修复问题。')).toBe(true);
+    expect(looksLikeUnfulfilledToolIntent('好的，让我先检查当前文件状态，然后一次性修复。')).toBe(true);
     expect(looksLikeUnfulfilledToolIntent('已更新 src/App.vue。')).toBe(false);
+    expect(looksLikeUnfulfilledToolIntent('我已经修复了 CSS 截断问题。')).toBe(false);
     expect(looksLikeUnfulfilledToolIntent('Here is the plan:')).toBe(false);
     expect(looksLikeUnfulfilledToolIntent('The answer is 42.')).toBe(false);
   });
@@ -563,5 +566,16 @@ describe('runAgentLoop', () => {
     expect(modelCalls).toHaveLength(3);
     expect(String(modelCalls[1].at(-1)?.content)).toContain('Never end a turn silently.');
     expect(emitted.filter((event) => event.type === 'answer.delta')).toEqual([]);
+  });
+
+  it('steers period-terminated action promises back into tool calls', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const { modelCalls, outcome } = await runLoop(
+      ['好的，让我先检查当前文件状态，然后一次性修复。', 'It exports answer = 42.'],
+      readWrite,
+    );
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 0 });
+    expect(modelCalls).toHaveLength(2);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('You announced reading or editing files');
   });
 });
