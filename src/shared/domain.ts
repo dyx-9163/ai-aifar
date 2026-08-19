@@ -90,8 +90,8 @@ export interface Approval {
   turnId: string;
   title: string;
   description: string;
-  /** Present when the approval gates a file write with a computed diff. */
-  fileChange?: FileChangePreview;
+  /** Present when the approval gates file writes with computed diffs. */
+  fileChanges?: FileChangePreview[];
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
   respondedAt?: string;

@@ -883,11 +883,11 @@ describe('sqlite app database', () => {
 
   it('round-trips the approval file-change diff across reopen', () => {
     const dbPath = createDbPath();
-    const fileChange = {
+    const fileChanges = [{
       relativePath: 'src/new.ts',
       action: 'created' as const,
       lines: [{ kind: 'added' as const, text: 'export const fresh = true;' }],
-    };
+    }];
     const first = openDatabase(dbPath);
     let threadId = '';
     try {
@@ -900,7 +900,7 @@ describe('sqlite app database', () => {
         turnId: 'turn-diff',
         title: 'Edit file: src/new.ts',
         description: 'Preview must survive a restart.',
-        fileChange,
+        fileChanges,
         status: 'pending',
         createdAt: '2026-08-17T00:00:01.000Z',
       });
@@ -911,7 +911,7 @@ describe('sqlite app database', () => {
     const second = openDatabase(dbPath);
     try {
       const approval = second.getSnapshot().approvals.find((candidate) => candidate.id === 'approval-diff');
-      expect(approval?.fileChange).toEqual(fileChange);
+      expect(approval?.fileChanges).toEqual(fileChanges);
       expect(approval?.threadId).toBe(threadId);
     } finally {
       second.close();

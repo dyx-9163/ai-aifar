@@ -246,7 +246,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
           title: `Call ${profile.name}`,
         });
         if (workspace) {
-          const requestApproval = async (request: { title: string; description: string; fileChange?: FileChangePreview }): Promise<boolean> => {
+          const requestApproval = async (request: { title: string; description: string; fileChanges?: FileChangePreview[] }): Promise<boolean> => {
             const approvalId = `approval-${turn.turnId}`;
             const response = new Promise<boolean>((resolve) => {
               approvalResolvers.set(approvalId, resolve);
@@ -256,7 +256,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
               approvalId,
               title: request.title,
               description: request.description,
-              ...(request.fileChange ? { fileChange: request.fileChange } : {}),
+              ...(request.fileChanges ? { fileChanges: request.fileChanges } : {}),
             });
             return raceWithAbort(response, signal);
           };
@@ -706,7 +706,7 @@ function approvalFromEvent(
     turnId: event.turnId,
     title: event.title,
     description: event.description,
-    ...(event.fileChange ? { fileChange: event.fileChange } : {}),
+    ...(event.fileChanges ? { fileChanges: event.fileChanges } : {}),
     status: 'pending',
     createdAt,
   };

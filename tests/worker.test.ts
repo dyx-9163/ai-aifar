@@ -599,7 +599,7 @@ describe('worker turn runtime', () => {
     expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
       kind: 'reasoning',
       mode: 'raw',
-      text: 'bounded reasoning',
+      text: expect.stringContaining('bounded reasoning'),
       incomplete: true,
     }));
     expect(harness.database.getSnapshot().items[thread.id]).not.toContainEqual(expect.objectContaining({
@@ -1022,7 +1022,7 @@ describe('workspace agent turns', () => {
     const approvalEvent = harness.events.find(
       (event) => event.turnId === turnId && event.type === 'approval.required',
     ) as Extract<AgentEvent, { type: 'approval.required' }>;
-    expect(approvalEvent.fileChange).toMatchObject({ relativePath: 'hello.ts', action: 'created' });
+    expect(approvalEvent.fileChanges?.[0]).toMatchObject({ relativePath: 'hello.ts', action: 'created' });
     expect(harness.runtime.respondApproval(approvalEvent.approvalId, true)).toBe(true);
 
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));

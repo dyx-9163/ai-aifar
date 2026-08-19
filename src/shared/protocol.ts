@@ -58,7 +58,7 @@ export type SequencedAgentEvent =
   | ({ type: 'tool.started'; toolId: string; title: string } & SequencedTurnEnvelope)
   | ({ type: 'tool.output'; toolId: string; output: string } & SequencedTurnEnvelope)
   | ({ type: 'model.metrics'; metrics: ModelRunMetrics } & SequencedTurnEnvelope)
-  | ({ type: 'approval.required'; approvalId: string; title: string; description: string; fileChange?: FileChangePreview } & SequencedTurnEnvelope)
+  | ({ type: 'approval.required'; approvalId: string; title: string; description: string; fileChanges?: FileChangePreview[] } & SequencedTurnEnvelope)
   | ({ type: 'turn.cancelling' } & SequencedTurnEnvelope)
   | ({ type: 'turn.completed' } & SequencedTurnEnvelope)
   | ({ type: 'turn.failed'; error: string } & SequencedTurnEnvelope)
@@ -84,9 +84,7 @@ function hasOptionalString(record: UnknownRecord, key: string): boolean {
   return record[key] === undefined || typeof record[key] === 'string';
 }
 
-function hasOptionalFileChange(record: UnknownRecord): boolean {
-  const value = record.fileChange;
-  if (value === undefined) return true;
+function isFileChangePreview(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const preview = value as UnknownRecord;
   if (typeof preview.relativePath !== 'string' || preview.relativePath.length === 0) return false;
@@ -99,6 +97,12 @@ function hasOptionalFileChange(record: UnknownRecord): boolean {
     return (entry.kind === 'context' || entry.kind === 'added' || entry.kind === 'removed')
       && typeof entry.text === 'string';
   });
+}
+
+function hasOptionalFileChanges(record: UnknownRecord): boolean {
+  const value = record.fileChanges;
+  if (value === undefined) return true;
+  return Array.isArray(value) && value.length > 0 && value.every((preview) => isFileChangePreview(preview));
 }
 
 function isTurnAttachment(value: unknown): value is TurnAttachment {
@@ -377,7 +381,7 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
         isMetricSource(value.metrics.usageSource)
       );
     case 'approval.required':
-      return hasString(value, 'approvalId') && hasString(value, 'title') && hasString(value, 'description') && hasOptionalFileChange(value);
+      return hasString(value, 'approvalId') && hasString(value, 'title') && hasString(value, 'description') && hasOptionalFileChanges(value);
     case 'turn.cancelling':
     case 'turn.completed':
       return true;

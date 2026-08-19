@@ -566,7 +566,7 @@ class SqliteAppDatabase implements AppDatabase {
           status: approval.status,
           createdAt: approval.createdAt,
           respondedAt: approval.respondedAt ?? null,
-          fileChange: approval.fileChange ? JSON.stringify(approval.fileChange) : null,
+          fileChange: approval.fileChanges ? JSON.stringify(approval.fileChanges) : null,
         });
     });
   }
@@ -1460,7 +1460,7 @@ function mapApproval(row: ApprovalRow): Approval {
     turnId: row.turn_id,
     title: row.title,
     description: row.description,
-    ...(row.file_change ? { fileChange: JSON.parse(row.file_change) as FileChangePreview } : {}),
+    ...(row.file_change ? { fileChanges: JSON.parse(row.file_change) as FileChangePreview[] } : {}),
     status: row.status,
     createdAt: row.created_at,
     respondedAt: row.responded_at ?? undefined,

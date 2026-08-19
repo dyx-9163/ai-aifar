@@ -23,13 +23,13 @@ import {
 
 export const AGENT_LOOP_MAX_ITERATIONS = 6;
 
-const TOOL_FENCE_PATTERN = /```tool\s*\n([\s\S]*?)```/;
+const TOOL_FENCE_GLOBAL_PATTERN = /```tool\s*\n([\s\S]*?)```/g;
 const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
 /** A fenced code block with at least this many non-empty lines counts as a manual code dump. */
 const CODE_DUMP_MIN_LINES = 12;
 /** How many times the loop re-prompts the model instead of accepting a pasted-code answer. */
 const MAX_CODE_DUMP_STEERS = 2;
-const TOOL_INVOKE_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/;
+const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
 export type AgentLoopEmit = (
@@ -74,14 +74,28 @@ export interface ParsedToolCall {
   input: Record<string, unknown>;
 }
 
-/** Extracts the first tool call from assistant text: fenced JSON first, then provider-native XML. */
-export function parseToolCall(text: string): ParsedToolCall | undefined {
-  const match = TOOL_FENCE_PATTERN.exec(text);
-  if (match?.[1]) {
-    const fenced = parseFencedToolCall(match[1]);
-    if (fenced) return fenced;
+/** Extracts every tool call from assistant text: fenced JSON blocks first, then provider-native XML. */
+export function parseToolCalls(text: string): ParsedToolCall[] {
+  const fenced: ParsedToolCall[] = [];
+  for (const match of text.matchAll(TOOL_FENCE_GLOBAL_PATTERN)) {
+    const parsed = match[1] ? parseFencedToolCall(match[1]) : undefined;
+    if (parsed) fenced.push(parsed);
   }
-  return parseXmlToolCall(text);
+  if (fenced.length > 0) return fenced;
+  const xml: ParsedToolCall[] = [];
+  for (const match of text.matchAll(TOOL_INVOKE_GLOBAL_PATTERN)) {
+    const input: Record<string, unknown> = {};
+    for (const parameter of match[2].matchAll(TOOL_PARAMETER_PATTERN)) {
+      input[parameter[1]] = decodeToolParameter(parameter[2]);
+    }
+    xml.push({ tool: match[1], input });
+  }
+  return xml;
+}
+
+/** Extracts the first tool call from assistant text, if any. */
+export function parseToolCall(text: string): ParsedToolCall | undefined {
+  return parseToolCalls(text)[0];
 }
 
 function parseFencedToolCall(body: string): ParsedToolCall | undefined {
@@ -100,21 +114,6 @@ function parseFencedToolCall(body: string): ParsedToolCall | undefined {
     ? (rawInput as Record<string, unknown>)
     : {};
   return { tool, input };
-}
-
-/**
- * Tolerates provider-native XML tool calls (invoke/parameter blocks, optionally
- * wrapped in tool_calls, with mismatched closing tags) emitted by models that
- * ignore the fenced JSON protocol.
- */
-function parseXmlToolCall(text: string): ParsedToolCall | undefined {
-  const match = TOOL_INVOKE_PATTERN.exec(text);
-  if (!match) return undefined;
-  const input: Record<string, unknown> = {};
-  for (const parameter of match[2].matchAll(TOOL_PARAMETER_PATTERN)) {
-    input[parameter[1]] = decodeToolParameter(parameter[2]);
-  }
-  return { tool: match[1], input };
 }
 
 /** Parameter values may be plain text or embedded JSON (numbers, arrays, objects). */
@@ -145,7 +144,7 @@ const CODE_DUMP_STEERING_MESSAGE = [
   'You pasted code blocks into the answer instead of applying them to the workspace.',
   'This workspace is read-write, so you must apply the changes yourself with apply_patch.',
   'If you have not read the target file yet, call read_file first; for a brand-new file use "baseContentHash": "" with a single insertion edit.',
-  'Reply with exactly one ```tool call now and never paste replacement code into the answer.',
+  'Reply with ```tool calls now (a single apply_patch with a "files" array when several files change) and never paste replacement code into the answer.',
 ].join(' ');
 
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
@@ -172,7 +171,7 @@ export function buildAgentSystemPrompt(
     '',
     `The user has granted you ${readOnly ? 'read-only' : 'read-write'} access to the workspace "${workspaceDisplayName}".`,
     `You may inspect it with these tools: ${toolList}.`,
-    'To call a tool, reply with exactly one fenced JSON block:',
+    'To call tools, reply with fenced JSON blocks; independent calls may share one reply:',
     '```tool',
     '{"tool": "read_file", "input": {"path": "src/main.ts"}}',
     '```',
@@ -185,7 +184,7 @@ export function buildAgentSystemPrompt(
   ];
   if (!readOnly) {
     lines.push(
-      '- apply_patch: {"path", "baseContentHash", "edits": [{"startLine", "endLine", "replacement"}]}',
+      '- apply_patch: {"path", "baseContentHash", "edits": [{"startLine", "endLine", "replacement"}]} or a batch {"files": [{...}, ...]} that changes several files in one approved changeset,',
       '- run_command: {"command", "args"?, "timeoutMs"?}',
       'Write rules:',
       '- To create a brand-new file, call apply_patch with "baseContentHash": "" and a single insertion edit, for example:',
@@ -194,12 +193,13 @@ export function buildAgentSystemPrompt(
       '- Edit lines are 1-based; "endLine": startLine - 1 inserts before "startLine".',
       '- run_command runs only inside the workspace directory; commands outside the verification allowlist pause for user approval.',
       '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
+      '- When several files change together, prefer one apply_patch with a "files" array so the user reviews a single changeset.',
       'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',
       'This holds even for very large rewrites: send the complete replacement text inside apply_patch edits; the answer must only describe what changed.',
     );
   }
   lines.push(
-    'Rules: at most one tool call per reply; wait for the tool result before continuing;',
+    'Rules: batch only independent tool calls in one reply; wait for the tool results before continuing;',
     'when you have enough information, answer directly without any tool block.',
     'If a tool call fails, read the error, fix the input (re-read the file when it reports stale-content), and retry; never tell the user to paste code manually.',
   );
@@ -241,8 +241,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     iterations = iteration;
     const { text } = await runOnce();
-    const parsed = parseToolCall(text);
-    if (!parsed) {
+    const parsedCalls = parseToolCalls(text);
+    if (parsedCalls.length === 0) {
       const answer = stripToolFences(text);
       if (
         options.toolContext.trustLevel !== 'read-only' &&
@@ -260,22 +260,24 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     messages.push({ role: 'assistant', content: text });
-    const callId = createCallId();
-    const call: AgentToolCall = {
-      callId,
-      turnId: options.turnId ?? '',
-      toolName: parsed.tool as AgentToolCall['toolName'],
-      input: parsed.input,
-    };
-    await options.emit({ type: 'tool.started', toolId: callId, title: parsed.tool });
-    const result = await executeAgentToolCall(call, options.toolContext, {
-      signal: options.signal,
-      requestApproval: options.requestApproval,
-    });
-    throwIfAborted(options.signal);
-    toolCallsExecuted += 1;
-    await options.emit({ type: 'tool.output', toolId: callId, output: summarizeToolResult(parsed.tool, result) });
-    messages.push({ role: 'user', content: toolResultMessage(callId, result) });
+    for (const parsed of parsedCalls) {
+      const callId = createCallId();
+      const call: AgentToolCall = {
+        callId,
+        turnId: options.turnId ?? '',
+        toolName: parsed.tool as AgentToolCall['toolName'],
+        input: parsed.input,
+      };
+      await options.emit({ type: 'tool.started', toolId: callId, title: parsed.tool });
+      const result = await executeAgentToolCall(call, options.toolContext, {
+        signal: options.signal,
+        requestApproval: options.requestApproval,
+      });
+      throwIfAborted(options.signal);
+      toolCallsExecuted += 1;
+      await options.emit({ type: 'tool.output', toolId: callId, output: summarizeToolResult(parsed.tool, result) });
+      messages.push({ role: 'user', content: toolResultMessage(callId, result) });
+    }
   }
 
   // Budget exhausted: force a direct answer without further tool calls.

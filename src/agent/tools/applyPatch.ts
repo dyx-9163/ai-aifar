@@ -14,6 +14,13 @@ export interface PatchEdit {
   replacement: string;
 }
 
+/** One file entry of an apply_patch call; the legacy single-file shape maps to one spec. */
+export interface PatchFileSpec {
+  path: string;
+  baseContentHash: string;
+  edits: PatchEdit[];
+}
+
 export interface ApplyPatchOutput {
   /** Workspace-relative path using forward slashes. */
   path: string;
@@ -24,8 +31,13 @@ export interface ApplyPatchOutput {
   contentHash: string;
 }
 
+export interface ApplyPatchBatchOutput {
+  files: ApplyPatchOutput[];
+}
+
 const PATCH_MAX_FILE_BYTES = 1024 * 1024;
 const PATCH_MAX_EDITS = 50;
+const PATCH_MAX_FILES = 8;
 const PREVIEW_CONTEXT_RADIUS = 3;
 const PREVIEW_MAX_LINES = 200;
 
@@ -42,17 +54,62 @@ export interface PreparedPatch {
 }
 
 /**
- * Validates the patch input and applies it in memory without touching the
+ * Accepts the legacy single-file shape ({path, baseContentHash, edits}) or a
+ * batch shape ({files: [...]}) so several files can change in one approved
+ * changeset. Duplicate paths within one call are rejected.
+ */
+export function parsePatchSpecs(rawInput: Record<string, unknown>): PatchFileSpec[] {
+  if (rawInput.files !== undefined) {
+    if (!Array.isArray(rawInput.files) || rawInput.files.length === 0) {
+      throw toolInputError('invalid-input', 'Tool input "files" must be a non-empty array.');
+    }
+    if (rawInput.files.length > PATCH_MAX_FILES) {
+      throw toolInputError('invalid-input', `At most ${PATCH_MAX_FILES} files are allowed per patch.`);
+    }
+    const specs = (rawInput.files as unknown[]).map((entry, index) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        throw toolInputError('invalid-input', `File ${index + 1} must be an object.`);
+      }
+      const record = entry as Record<string, unknown>;
+      return {
+        path: requireToolString(record, 'path'),
+        baseContentHash: requireToolString(record, 'baseContentHash', { optional: true }) ?? '',
+        edits: parseEdits(record.edits),
+      };
+    });
+    const seen = new Set<string>();
+    for (const spec of specs) {
+      if (seen.has(spec.path)) {
+        throw toolInputError('invalid-input', `Duplicate path in one patch: ${spec.path}`);
+      }
+      seen.add(spec.path);
+    }
+    return specs;
+  }
+  return [{
+    path: requireToolString(rawInput, 'path'),
+    baseContentHash: requireToolString(rawInput, 'baseContentHash', { optional: true }) ?? '',
+    edits: parseEdits(rawInput.edits),
+  }];
+}
+
+/**
+ * Validates every patch entry and applies each in memory without touching the
  * disk. Shared by the executor and the approval preview so both always agree
- * on what the write will produce.
+ * on what the write will produce. Preparation is all-or-nothing: one invalid
+ * entry rejects the whole batch before any file is written.
  */
 export function prepareApplyPatch(
   rawInput: Record<string, unknown>,
   context: WorkspaceToolContext,
-): PreparedPatch {
-  const relativePath = requireToolString(rawInput, 'path');
-  const baseContentHash = requireToolString(rawInput, 'baseContentHash', { optional: true }) ?? '';
-  const edits = parseEdits(rawInput.edits);
+): PreparedPatch[] {
+  return parsePatchSpecs(rawInput).map((spec) => prepareSinglePatch(spec, context));
+}
+
+function prepareSinglePatch(spec: PatchFileSpec, context: WorkspaceToolContext): PreparedPatch {
+  const relativePath = spec.path;
+  const baseContentHash = spec.baseContentHash;
+  const edits = spec.edits;
 
   const absolute = resolveWithinRoot(context.canonicalRootPath, relativePath);
   if (isExcludedPath(context.canonicalRootPath, absolute)) {
@@ -99,43 +156,47 @@ export function prepareApplyPatch(
 export function previewApplyPatch(
   rawInput: Record<string, unknown>,
   context: WorkspaceToolContext,
-): FileChangePreview {
-  const prepared = prepareApplyPatch(rawInput, context);
-  return {
+): FileChangePreview[] {
+  return prepareApplyPatch(rawInput, context).map((prepared) => ({
     relativePath: prepared.normalizedRelativePath,
     action: prepared.existed ? 'modified' : 'created',
     lines: buildPatchDiffLines(prepared.originalText, prepared.edits),
-  };
+  }));
 }
 
 export async function runApplyPatch(
   rawInput: Record<string, unknown>,
   context: WorkspaceToolContext,
-): Promise<{ output: ApplyPatchOutput; truncated: boolean }> {
-  const prepared = prepareApplyPatch(rawInput, context);
+): Promise<{ output: ApplyPatchBatchOutput; truncated: boolean }> {
+  // Prepare every file first so a failing entry never leaves a partial write.
+  const preparedList = prepareApplyPatch(rawInput, context);
 
-  // Snapshot the pre-change state before touching the disk so the turn stays
-  // rollable even when a later patch targets the same file again.
-  context.recordFileChange?.({
-    relativePath: prepared.normalizedRelativePath,
-    previousAction: prepared.existed ? 'existed' : 'absent',
-    previousContent: prepared.existed ? prepared.originalText : null,
-    previousContentHash: prepared.previousContentHash,
-    newContentHash: prepared.newContentHash,
-  });
+  for (const prepared of preparedList) {
+    // Snapshot the pre-change state before touching the disk so the turn stays
+    // rollable even when a later patch targets the same file again.
+    context.recordFileChange?.({
+      relativePath: prepared.normalizedRelativePath,
+      previousAction: prepared.existed ? 'existed' : 'absent',
+      previousContent: prepared.existed ? prepared.originalText : null,
+      previousContentHash: prepared.previousContentHash,
+      newContentHash: prepared.newContentHash,
+    });
 
-  if (!prepared.existed) {
-    mkdirSync(path.dirname(prepared.absolute), { recursive: true });
+    if (!prepared.existed) {
+      mkdirSync(path.dirname(prepared.absolute), { recursive: true });
+    }
+    writeFileSync(prepared.absolute, prepared.patched.text, 'utf-8');
   }
-  writeFileSync(prepared.absolute, prepared.patched.text, 'utf-8');
 
   return {
     output: {
-      path: prepared.normalizedRelativePath,
-      action: prepared.existed ? 'modified' : 'created',
-      totalLines: prepared.patched.totalLines,
-      linesChanged: prepared.patched.linesChanged,
-      contentHash: prepared.newContentHash,
+      files: preparedList.map((prepared) => ({
+        path: prepared.normalizedRelativePath,
+        action: prepared.existed ? 'modified' : 'created',
+        totalLines: prepared.patched.totalLines,
+        linesChanged: prepared.patched.linesChanged,
+        contentHash: prepared.newContentHash,
+      })),
     },
     truncated: false,
   };

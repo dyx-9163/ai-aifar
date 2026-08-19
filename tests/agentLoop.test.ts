@@ -282,6 +282,56 @@ describe('runAgentLoop', () => {
     expect(String(modelCalls[1].at(-1)?.content)).toContain('"status": "success"');
   });
 
+  it('executes every tool call of a multi-call reply in order', async () => {
+    const { emitted, outcome } = await runLoop(
+      [
+        `${fencedToolCall('{"tool": "read_file", "input": {"path": "src/main.ts"}}')}\n${fencedToolCall('{"tool": "workspace_tree", "input": {}}')}`,
+        'It exports answer = 42.',
+      ],
+      context,
+    );
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 2 });
+    expect(emitted.map((event) => event.type)).toEqual([
+      'tool.started', 'tool.output', 'tool.started', 'tool.output', 'answer.delta',
+    ]);
+  });
+
+  it('applies a batch apply_patch changeset with one approval', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
+    const batchCall = JSON.stringify({
+      tool: 'apply_patch',
+      input: {
+        files: [
+          {
+            path: 'src/main.ts',
+            baseContentHash: baseHash,
+            edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
+          },
+          {
+            path: 'src/extra.ts',
+            edits: [{ startLine: 1, endLine: 0, replacement: 'export const extra = true;' }],
+          },
+        ],
+      },
+    });
+    const approvals: string[] = [];
+    const { modelCalls } = await runLoop([fencedToolCall(batchCall), 'Updated both files.'], readWrite, {
+      requestApproval: async (request) => {
+        approvals.push(request.title);
+        return true;
+      },
+    });
+    expect(approvals).toEqual(['Edit 2 files']);
+    expect(readFileSync(join(context.canonicalRootPath, 'src', 'main.ts'), 'utf-8')).toBe(
+      'export const answer = 43;\n',
+    );
+    expect(readFileSync(join(context.canonicalRootPath, 'src', 'extra.ts'), 'utf-8')).toBe(
+      'export const extra = true;',
+    );
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('"status": "success"');
+  });
+
   it('steers manual code dumps back into apply_patch in read-write workspaces', async () => {
     const readWrite = { ...context, trustLevel: 'read-write' as const };
     const dump = 'Let me give you the complete code, please replace src/main.ts manually:\n```ts\n' +

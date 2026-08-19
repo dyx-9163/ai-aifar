@@ -84,14 +84,14 @@ export const WRITE_TOOL_NAMES: readonly AgentToolName[] = ['apply_patch', 'run_c
 export interface ToolApprovalRequest {
   title: string;
   description: string;
-  /** Computed diff for file writes, so the user can review before approving. */
-  fileChange?: FileChangePreview;
+  /** Computed diffs for file writes, so the user can review before approving. */
+  fileChanges?: FileChangePreview[];
 }
 
 export type ToolPolicy =
   | { kind: 'allow' }
   | { kind: 'deny'; error: AgentToolError }
-  | ({ kind: 'approval'; title: string; description: string } & Pick<ToolApprovalRequest, 'fileChange'>);
+  | ({ kind: 'approval'; title: string; description: string } & Pick<ToolApprovalRequest, 'fileChanges'>);
 
 /**
  * Decides whether a call may run, must be approved, or is rejected outright.
@@ -112,19 +112,22 @@ export function classifyToolCall(call: AgentToolCall, context: WorkspaceToolCont
     };
   }
   if (call.toolName === 'apply_patch') {
-    let preview;
+    let previews: FileChangePreview[];
     try {
-      preview = previewApplyPatch(call.input as Record<string, unknown>, context);
+      previews = previewApplyPatch(call.input as Record<string, unknown>, context);
     } catch (error) {
       return { kind: 'deny', error: toToolError(error) };
     }
+    const paths = previews.map((preview) => preview.relativePath);
     return {
       kind: 'approval',
-      title: `Edit file: ${preview.relativePath}`,
-      description: preview.action === 'created'
-        ? `The agent wants to create "${preview.relativePath}" in the workspace.`
-        : `The agent wants to modify "${preview.relativePath}" in the workspace.`,
-      fileChange: preview,
+      title: previews.length === 1 ? `Edit file: ${paths[0]}` : `Edit ${previews.length} files`,
+      description: previews.length === 1
+        ? previews[0].action === 'created'
+          ? `The agent wants to create "${paths[0]}" in the workspace.`
+          : `The agent wants to modify "${paths[0]}" in the workspace.`
+        : `The agent wants to change ${previews.length} files in the workspace: ${paths.join(', ')}.`,
+      fileChanges: previews,
     };
   }
   if (call.toolName === 'run_command') {
@@ -202,7 +205,7 @@ export async function executeAgentToolCall(
     const approved = await options.requestApproval({
       title: policy.title,
       description: policy.description,
-      ...(policy.fileChange ? { fileChange: policy.fileChange } : {}),
+      ...(policy.fileChanges ? { fileChanges: policy.fileChanges } : {}),
     });
     if (!approved) {
       return agentToolCancelledResult(

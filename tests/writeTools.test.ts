@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentToolCall } from '../src/shared/toolProtocol';
-import type { ApplyPatchOutput } from '../src/agent/tools/applyPatch';
+import type { ApplyPatchBatchOutput } from '../src/agent/tools/applyPatch';
 import {
   classifyCommand,
   parseCommandInput,
@@ -65,8 +65,8 @@ describe('apply_patch', () => {
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }],
     }, approveAll);
     expect(result.status).toBe('success');
-    const output = result.output as ApplyPatchOutput;
-    expect(output).toMatchObject({ path: 'src/helper.ts', action: 'created', totalLines: 1 });
+    const output = result.output as ApplyPatchBatchOutput;
+    expect(output.files[0]).toMatchObject({ path: 'src/helper.ts', action: 'created', totalLines: 1 });
     expect(readFileSync(join(workspaceRoot, 'src', 'helper.ts'), 'utf-8')).toBe('export const helper = true;');
   });
 
@@ -76,7 +76,7 @@ describe('apply_patch', () => {
       edits: [{ startLine: 0, endLine: 0, replacement: 'export const zero = true;' }],
     }, approveAll);
     expect(result.status).toBe('success');
-    expect(result.output).toMatchObject({ path: 'src/zero.ts', action: 'created' });
+    expect(result.output).toMatchObject({ files: [{ path: 'src/zero.ts', action: 'created' }] });
     expect(readFileSync(join(workspaceRoot, 'src', 'zero.ts'), 'utf-8')).toBe('export const zero = true;');
   });
 
@@ -99,8 +99,9 @@ describe('apply_patch', () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0].title).toBe('Edit file: src/main.ts');
-    expect(requests[0].fileChange).toMatchObject({ relativePath: 'src/main.ts', action: 'modified' });
-    expect(requests[0].fileChange?.lines).toEqual([
+    expect(requests[0].fileChanges).toHaveLength(1);
+    expect(requests[0].fileChanges?.[0]).toMatchObject({ relativePath: 'src/main.ts', action: 'modified' });
+    expect(requests[0].fileChanges?.[0]?.lines).toEqual([
       { kind: 'removed', text: 'export const answer = 41;' },
       { kind: 'added', text: 'export const answer = 42;' },
       { kind: 'context', text: 'export const label = "answer";' },
@@ -119,8 +120,9 @@ describe('apply_patch', () => {
     expect(policy.kind).toBe('approval');
     if (policy.kind !== 'approval') return;
     expect(policy.title).toBe('Edit file: src/new.ts');
-    expect(policy.fileChange).toMatchObject({ relativePath: 'src/new.ts', action: 'created' });
-    expect(policy.fileChange?.lines).toEqual([{ kind: 'added', text: 'export const fresh = true;' }]);
+    expect(policy.fileChanges).toHaveLength(1);
+    expect(policy.fileChanges?.[0]).toMatchObject({ relativePath: 'src/new.ts', action: 'created' });
+    expect(policy.fileChanges?.[0]?.lines).toEqual([{ kind: 'added', text: 'export const fresh = true;' }]);
   });
 
   it('modifies a file when the baseline hash matches', async () => {
@@ -130,9 +132,9 @@ describe('apply_patch', () => {
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
     }, approveAll);
     expect(result.status).toBe('success');
-    const output = result.output as ApplyPatchOutput;
-    expect(output.action).toBe('modified');
-    expect(output.contentHash).not.toBe(sha256(MAIN_TS));
+    const output = result.output as ApplyPatchBatchOutput;
+    expect(output.files[0].action).toBe('modified');
+    expect(output.files[0].contentHash).not.toBe(sha256(MAIN_TS));
     expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(
       'export const answer = 42;\nexport const label = "answer";\n',
     );
@@ -147,10 +149,68 @@ describe('apply_patch', () => {
     expect(first.status).toBe('success');
     const second = await runTool('apply_patch', {
       path: 'src/main.ts',
-      baseContentHash: (first.output as ApplyPatchOutput).contentHash,
+      baseContentHash: (first.output as ApplyPatchBatchOutput).files[0].contentHash,
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
     }, approveAll);
     expect(second.status).toBe('success');
+  });
+
+  it('applies a batch patch to several files with a single approval', async () => {
+    const requests: ToolApprovalRequest[] = [];
+    const result = await runTool('apply_patch', {
+      files: [
+        {
+          path: 'src/main.ts',
+          baseContentHash: sha256(MAIN_TS),
+          edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
+        },
+        { path: 'src/helper.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }] },
+      ],
+    }, { requestApproval: async (request) => { requests.push(request); return true; } });
+
+    expect(result.status).toBe('success');
+    expect(requests).toHaveLength(1);
+    expect(requests[0].title).toBe('Edit 2 files');
+    expect(requests[0].fileChanges?.map((change) => change.relativePath)).toEqual(['src/main.ts', 'src/helper.ts']);
+    const output = result.output as ApplyPatchBatchOutput;
+    expect(output.files.map((file) => file.path)).toEqual(['src/main.ts', 'src/helper.ts']);
+    expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(
+      'export const answer = 42;\nexport const label = "answer";\n',
+    );
+    expect(readFileSync(join(workspaceRoot, 'src', 'helper.ts'), 'utf-8')).toBe('export const helper = true;');
+  });
+
+  it('rejects a batch atomically when one entry is stale', async () => {
+    const result = await runTool('apply_patch', {
+      files: [
+        { path: 'src/helper.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }] },
+        { path: 'src/main.ts', baseContentHash: sha256('outdated content'), edits: [{ startLine: 1, endLine: 1, replacement: 'tampered' }] },
+      ],
+    }, approveAll);
+    expect(result.status).toBe('error');
+    expect(result.error?.code).toBe('stale-content');
+    expect(existsSync(join(workspaceRoot, 'src', 'helper.ts'))).toBe(false);
+    expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(MAIN_TS);
+  });
+
+  it('rejects duplicate paths and oversized batches', async () => {
+    const duplicate = await runTool('apply_patch', {
+      files: [
+        { path: 'src/a.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'a' }] },
+        { path: 'src/a.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'b' }] },
+      ],
+    }, approveAll);
+    expect(duplicate.status).toBe('error');
+    expect(duplicate.error?.code).toBe('invalid-input');
+
+    const oversized = await runTool('apply_patch', {
+      files: Array.from({ length: 9 }, (_, index) => ({
+        path: `src/f${index}.ts`,
+        edits: [{ startLine: 1, endLine: 0, replacement: 'x' }],
+      })),
+    }, approveAll);
+    expect(oversized.status).toBe('error');
+    expect(oversized.error?.code).toBe('invalid-input');
   });
 
   it('records the pre-change state through the checkpoint hook before writing', async () => {

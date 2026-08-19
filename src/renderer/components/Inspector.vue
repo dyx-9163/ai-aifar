@@ -111,18 +111,20 @@ function diffPrefix(kind: PatchDiffLineKind): string {
         <p class="pane-label">{{ t('approval') }}</p>
         <h2>{{ pendingApproval.title }}</h2>
         <p>{{ pendingApproval.description }}</p>
-        <div v-if="pendingApproval.fileChange" class="file-change-preview" data-testid="approval-file-change">
-          <p class="file-change-path" data-testid="approval-file-change-path">
-            {{ pendingApproval.fileChange.relativePath }}
-            <small>{{ pendingApproval.fileChange.action }}</small>
-          </p>
-          <pre class="file-change-diff"><code><span
-            v-for="(line, index) in pendingApproval.fileChange.lines"
-            :key="index"
-            class="diff-line"
-            :class="`diff-line-${line.kind}`"
-          >{{ diffPrefix(line.kind) }}{{ line.text }}
+        <div v-if="pendingApproval.fileChanges?.length" class="file-change-preview" data-testid="approval-file-change">
+          <template v-for="(change, changeIndex) in pendingApproval.fileChanges" :key="changeIndex">
+            <p class="file-change-path" data-testid="approval-file-change-path">
+              {{ change.relativePath }}
+              <small>{{ change.action }}</small>
+            </p>
+            <pre class="file-change-diff"><code><span
+              v-for="(line, index) in change.lines"
+              :key="index"
+              class="diff-line"
+              :class="`diff-line-${line.kind}`"
+            >{{ diffPrefix(line.kind) }}{{ line.text }}
 </span></code></pre>
+          </template>
         </div>
         <div class="approval-actions">
           <button type="button" class="secondary-button" data-testid="approval-reject-button" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('reject', pendingApproval.id)">{{ t('reject') }}</button>
