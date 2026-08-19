@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ModelRunMetrics } from '../src/shared/domain';
 import {
   buildAgentSystemPrompt,
+  looksLikeManualCodeDump,
   parseToolCall,
   runAgentLoop,
   stripToolFences,
@@ -165,6 +166,14 @@ describe('tool call parsing', () => {
     expect(readWrite).toContain('run_command');
     expect(readWrite).toContain('read-write');
     expect(readWrite).toContain('Never paste full file contents or complete replacement code into the answer');
+    expect(readWrite).toContain('This holds even for very large rewrites');
+  });
+
+  it('detects manual code dumps by fenced block size', () => {
+    expect(looksLikeManualCodeDump('Short snippet:\n```ts\nconst a = 1;\n```\nDone.')).toBe(false);
+    expect(looksLikeManualCodeDump('No fences at all, just prose.')).toBe(false);
+    const longFence = 'Replace manually:\n```vue\n' + Array.from({ length: 15 }, (_, i) => `const v${i} = ${i};`).join('\n') + '\n```\n';
+    expect(looksLikeManualCodeDump(longFence)).toBe(true);
   });
 });
 
@@ -271,6 +280,54 @@ describe('runAgentLoop', () => {
       'export const answer = 43;\n',
     );
     expect(String(modelCalls[1].at(-1)?.content)).toContain('"status": "success"');
+  });
+
+  it('steers manual code dumps back into apply_patch in read-write workspaces', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const dump = 'Let me give you the complete code, please replace src/main.ts manually:\n```ts\n' +
+      Array.from({ length: 15 }, (_, i) => `const line${i} = ${i};`).join('\n') + '\n```\n';
+    const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
+    const patchCall = JSON.stringify({
+      tool: 'apply_patch',
+      input: {
+        path: 'src/main.ts',
+        baseContentHash: baseHash,
+        edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
+      },
+    });
+    const { emitted, outcome, modelCalls } = await runLoop(
+      [dump, fencedToolCall(patchCall), 'Updated the constant.'],
+      readWrite,
+      { requestApproval: async () => true },
+    );
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('apply the changes yourself with apply_patch');
+    expect(readFileSync(join(context.canonicalRootPath, 'src', 'main.ts'), 'utf-8')).toBe(
+      'export const answer = 43;\n',
+    );
+  });
+
+  it('emits code dumps untouched in read-only workspaces', async () => {
+    const dump = '```ts\n' + Array.from({ length: 15 }, (_, i) => `const l${i} = ${i};`).join('\n') + '\n```';
+    const { emitted, outcome, modelCalls } = await runLoop([dump], context);
+    expect(outcome).toMatchObject({ iterations: 1, toolCallsExecuted: 0 });
+    expect(modelCalls).toHaveLength(1);
+    expect(emitted).toHaveLength(1);
+    expect(String((emitted[0] as { text: string }).text)).toContain('const l0 = 0;');
+  });
+
+  it('gives up steering after two retries and emits the dump', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const dump = '```ts\n' + Array.from({ length: 15 }, (_, i) => `const l${i} = ${i};`).join('\n') + '\n```';
+    const { emitted, outcome, modelCalls } = await runLoop([dump], readWrite);
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 0 });
+    expect(modelCalls).toHaveLength(3);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('apply the changes yourself with apply_patch');
+    expect(String(modelCalls[2].at(-1)?.content)).toContain('apply the changes yourself with apply_patch');
+    const final = emitted.at(-1) as { type: string; text: string };
+    expect(final.type).toBe('answer.delta');
+    expect(final.text).toContain('const l0 = 0;');
   });
 
   it('refuses write tools in a read-only workspace and feeds the error back', async () => {

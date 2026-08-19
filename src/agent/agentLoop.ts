@@ -21,9 +21,14 @@ import {
   type WorkspaceToolContext,
 } from './tools/toolRouter.js';
 
-export const AGENT_LOOP_MAX_ITERATIONS = 4;
+export const AGENT_LOOP_MAX_ITERATIONS = 6;
 
 const TOOL_FENCE_PATTERN = /```tool\s*\n([\s\S]*?)```/;
+const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
+/** A fenced code block with at least this many non-empty lines counts as a manual code dump. */
+const CODE_DUMP_MIN_LINES = 12;
+/** How many times the loop re-prompts the model instead of accepting a pasted-code answer. */
+const MAX_CODE_DUMP_STEERS = 2;
 const TOOL_INVOKE_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
@@ -122,6 +127,27 @@ function decodeToolParameter(raw: string): unknown {
   }
 }
 
+/**
+ * Detects answers that paste whole code blocks ("here is the full file, replace it
+ * manually") instead of applying changes through apply_patch. Tool fences are
+ * stripped before this check, so only user-visible code fences are counted.
+ */
+export function looksLikeManualCodeDump(text: string): boolean {
+  for (const match of text.matchAll(CODE_FENCE_PATTERN)) {
+    const body = match[1] ?? '';
+    const codeLines = body.split('\n').filter((line) => line.trim().length > 0).length;
+    if (codeLines >= CODE_DUMP_MIN_LINES) return true;
+  }
+  return false;
+}
+
+const CODE_DUMP_STEERING_MESSAGE = [
+  'You pasted code blocks into the answer instead of applying them to the workspace.',
+  'This workspace is read-write, so you must apply the changes yourself with apply_patch.',
+  'If you have not read the target file yet, call read_file first; for a brand-new file use "baseContentHash": "" with a single insertion edit.',
+  'Reply with exactly one ```tool call now and never paste replacement code into the answer.',
+].join(' ');
+
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
   return text
@@ -169,6 +195,7 @@ export function buildAgentSystemPrompt(
       '- run_command runs only inside the workspace directory; commands outside the verification allowlist pause for user approval.',
       '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
       'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',
+      'This holds even for very large rewrites: send the complete replacement text inside apply_patch edits; the answer must only describe what changed.',
     );
   }
   lines.push(
@@ -192,6 +219,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   let iterations = 0;
   let toolCallsExecuted = 0;
+  let codeDumpSteersUsed = 0;
   let lastMetrics: ModelRunMetrics | undefined;
 
   const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
@@ -216,6 +244,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const parsed = parseToolCall(text);
     if (!parsed) {
       const answer = stripToolFences(text);
+      if (
+        options.toolContext.trustLevel !== 'read-only' &&
+        codeDumpSteersUsed < MAX_CODE_DUMP_STEERS &&
+        looksLikeManualCodeDump(answer)
+      ) {
+        // The model dumped code for manual pasting; re-prompt it to use apply_patch.
+        codeDumpSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: CODE_DUMP_STEERING_MESSAGE });
+        continue;
+      }
       if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
       return { metrics: lastMetrics, iterations, toolCallsExecuted };
     }
