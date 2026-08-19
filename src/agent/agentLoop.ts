@@ -36,6 +36,8 @@ const MAX_TRUNCATED_TOOL_STEERS = 3;
 const MAX_INTENT_STEERS = 2;
 /** How many times the loop re-prompts when a fenced tool call was not valid JSON. */
 const MAX_MALFORMED_TOOL_STEERS = 2;
+/** How many times the loop re-prompts when the visible answer is empty. */
+const MAX_EMPTY_ANSWER_STEERS = 2;
 /** How many times per turn the loop runs deterministic post-write verification. */
 const MAX_AUTO_VERIFICATIONS = 3;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
@@ -78,6 +80,8 @@ export interface AgentLoopOutcome {
   toolCallsExecuted: number;
   /** True when the iteration budget ran out and the final answer was forced. */
   budgetExhausted: boolean;
+  /** True when the loop ended on a visible-empty answer after steering retries. */
+  emptyAnswer: boolean;
 }
 
 export interface ParsedToolCall {
@@ -240,6 +244,12 @@ const MALFORMED_TOOL_STEERING_MESSAGE = [
   'Never paste code into the answer.',
 ].join(' ');
 
+const EMPTY_ANSWER_STEERING_MESSAGE = [
+  'Your reply was empty: it contained neither a visible answer nor a tool call, so nothing happened.',
+  'Either act now with ```tool calls (apply_patch to finish the edits you planned, read_file when you need fresh content), or write the final answer for the user.',
+  'Never end a turn silently.',
+].join(' ');
+
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
   return text
@@ -318,6 +328,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let truncatedToolSteersUsed = 0;
   let intentSteersUsed = 0;
   let malformedToolSteersUsed = 0;
+  let emptyAnswerSteersUsed = 0;
   let autoVerificationsUsed = 0;
   let lastMetrics: ModelRunMetrics | undefined;
 
@@ -357,6 +368,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         messages.push({ role: 'user', content: MALFORMED_TOOL_STEERING_MESSAGE });
         continue;
       }
+      if (answer.length === 0 && emptyAnswerSteersUsed < MAX_EMPTY_ANSWER_STEERS) {
+        // Reasoning-heavy models can spend the whole reply on thinking and emit
+        // nothing visible; force an act-or-answer decision instead of ending silent.
+        emptyAnswerSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text.length > 0 ? text : '(empty reply)' });
+        messages.push({ role: 'user', content: EMPTY_ANSWER_STEERING_MESSAGE });
+        continue;
+      }
       if (
         options.toolContext.trustLevel !== 'read-only' &&
         codeDumpSteersUsed < MAX_CODE_DUMP_STEERS &&
@@ -380,7 +399,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         continue;
       }
       if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
-      return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: false };
+      return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: false, emptyAnswer: answer.length === 0 };
     }
 
     messages.push({ role: 'assistant', content: text });
@@ -430,7 +449,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   iterations += 1;
   const answer = stripToolFences(text);
   if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
-  return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: true };
+  return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: true, emptyAnswer: false };
 }
 
 function toolResultMessage(callId: string, result: AgentToolResult): string {

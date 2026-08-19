@@ -637,6 +637,31 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('fails the turn when the model keeps replying with an empty visible answer', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-silentws-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    const harness = createHarness(async () => metrics());
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Silent model');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Fix the CSS',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.completed');
+    const failed = harness.database.getSnapshot().turns.find((turn) => turn.id === turnId);
+    expect(failed).toMatchObject({ status: 'failed', incomplete: true });
+    expect(failed?.error).toContain('The model ended the turn without a visible answer and no files were changed');
+    harness.database.close();
+  });
+
   it('completes a rewrite by recovering from the observed cloud-model failure sequence', async () => {
     const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-recoverws-'));
     tempDirectories.push(workspaceDirectory);

@@ -547,4 +547,21 @@ describe('runAgentLoop', () => {
     const { modelCalls } = await runLoop([fencedToolCall(patchCall), 'Done.'], readWrite);
     expect(String(modelCalls[1].at(-1)?.content)).toContain('[auto-verify] npm run typecheck passed');
   }, 30_000);
+
+  it('re-prompts the model when the visible answer is empty', async () => {
+    const { emitted, modelCalls, outcome } = await runLoop(['', 'It exports answer = 42.'], context);
+    expect(outcome).toMatchObject({ iterations: 2, emptyAnswer: false });
+    expect(modelCalls).toHaveLength(2);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('Your reply was empty');
+    const answers = emitted.filter((event) => event.type === 'answer.delta') as Array<{ text: string }>;
+    expect(answers.map((event) => event.text)).toEqual(['It exports answer = 42.']);
+  });
+
+  it('reports emptyAnswer after two silent replies instead of completing silently', async () => {
+    const { emitted, modelCalls, outcome } = await runLoop([''], context);
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 0, budgetExhausted: false, emptyAnswer: true });
+    expect(modelCalls).toHaveLength(3);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('Never end a turn silently.');
+    expect(emitted.filter((event) => event.type === 'answer.delta')).toEqual([]);
+  });
 });

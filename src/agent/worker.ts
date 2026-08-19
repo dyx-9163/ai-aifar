@@ -238,6 +238,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
 
     let finalMetrics: ModelRunMetrics | undefined;
     let budgetExhausted = false;
+    let emptyAnswer = false;
     let fileChangesRecorded = 0;
     try {
       let outcome: 'completed' | 'awaiting-approval' = 'completed';
@@ -295,6 +296,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
           });
           finalMetrics = loopOutcome.metrics;
           budgetExhausted = loopOutcome.budgetExhausted;
+          emptyAnswer = loopOutcome.emptyAnswer;
         } else {
           const handlers: ModelStreamHandlers = {
             onAnswerDelta: (delta) => context.next({ type: 'answer.delta', text: delta }),
@@ -343,6 +345,21 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         const message = fileChangesRecorded > 0
           ? `Iteration budget exhausted before the task finished; ${fileChangesRecorded} file change(s) were applied before the budget ran out. Review the answer above and send a follow-up to continue.`
           : 'Iteration budget exhausted before the task finished and no files were changed. Review the answer above and send a follow-up to continue.';
+        database.failTurn(turn.turnId, now(), message);
+        try {
+          await context.next({ type: 'turn.failed', error: message });
+        } finally {
+          approvalResolvers.delete(`approval-${turn.turnId}`);
+          active.delete(turn.turnId);
+        }
+        return;
+      }
+      if (emptyAnswer) {
+        // The model ended silently (no visible answer, no tool call); reporting
+        // completion would hide that nothing concluded the turn.
+        const message = fileChangesRecorded > 0
+          ? `The model ended the turn without a visible answer; ${fileChangesRecorded} file change(s) were applied. Review the changes above and send a follow-up to continue.`
+          : 'The model ended the turn without a visible answer and no files were changed. Send a follow-up to continue.';
         database.failTurn(turn.turnId, now(), message);
         try {
           await context.next({ type: 'turn.failed', error: message });
