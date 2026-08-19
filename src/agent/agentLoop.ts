@@ -22,7 +22,7 @@ import {
   type WorkspaceToolContext,
 } from './tools/toolRouter.js';
 
-export const AGENT_LOOP_MAX_ITERATIONS = 12;
+export const AGENT_LOOP_MAX_ITERATIONS = Number.POSITIVE_INFINITY;
 
 const TOOL_FENCE_GLOBAL_PATTERN = /```tool\s*\n([\s\S]*?)```/g;
 const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
@@ -64,6 +64,7 @@ export interface AgentLoopOptions {
   ) => Promise<ModelRunMetrics>;
   emit: AgentLoopEmit;
   signal: AbortSignal;
+  /** Caps tool round-trips per turn; omitted (the production default) is unlimited. */
   maxIterations?: number;
   createCallId?: () => string;
   /** Stamped into every `AgentToolCall` for traceability. */

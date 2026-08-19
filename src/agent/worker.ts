@@ -89,6 +89,8 @@ export interface WorkerTurnRuntimeOptions {
   runDemo?: RunDemo;
   createTurnId?: () => string;
   now?: () => string;
+  /** Optional agent-loop iteration cap; omitted means unlimited. */
+  maxAgentIterations?: number;
 }
 
 export interface WorkerTurnRuntime {
@@ -162,6 +164,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
   const executeDemo = options.runDemo ?? runDemoTurn;
   const createTurnId = options.createTurnId ?? (() => `turn-${randomUUID()}`);
   const now = options.now ?? (() => new Date().toISOString());
+  const maxAgentIterations = options.maxAgentIterations;
   const active = new Map<string, ActiveTurnContext>();
   const approvalResolvers = new Map<string, (approved: boolean) => void>();
 
@@ -288,6 +291,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
             signal,
             turnId: turn.turnId,
             requestApproval,
+            ...(maxAgentIterations !== undefined ? { maxIterations: maxAgentIterations } : {}),
             reasoningHandlers: {
               onRawReasoningDelta: (delta) => context.next({ type: 'reasoning.raw.delta', text: delta }),
               onReasoningSummaryDelta: (delta) => context.next({ type: 'reasoning.summary.delta', text: delta }),

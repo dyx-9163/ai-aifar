@@ -617,7 +617,7 @@ describe('worker turn runtime', () => {
     const harness = createHarness(async (_profile, _messages, handlers) => {
       await handlers.onAnswerDelta('```tool\n{"tool": "workspace_tree", "input": {}}\n```');
       return metrics();
-    });
+    }, undefined, true, undefined, false, undefined, 2);
     const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
     const thread = harness.database.createThread('Budget exhausted');
 
@@ -1136,6 +1136,7 @@ function createHarness(
   rejectEventType?: AgentEvent['type'],
   failApprovalSettlement = false,
   blockedEvent?: { type: AgentEvent['type']; wait(): Promise<void> },
+  maxAgentIterations?: number,
 ): {
   database: AppDatabase;
   databasePath: string;
@@ -1188,6 +1189,7 @@ function createHarness(
     streamModel,
     createTurnId: deterministicIds ? () => `turn-${nextTurn++}` : undefined,
     now: () => new Date(Date.UTC(2026, 7, 17, 0, 0, clock++)).toISOString(),
+    ...(maxAgentIterations !== undefined ? { maxAgentIterations } : {}),
   });
   return {
     database,
