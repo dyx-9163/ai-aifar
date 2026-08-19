@@ -8,7 +8,7 @@ import {
   buildAgentSystemPrompt,
   looksLikeManualCodeDump,
   looksLikeTruncatedToolCall,
-  looksLikeUnfulfilledWriteIntent,
+  looksLikeUnfulfilledToolIntent,
   parseToolCall,
   runAgentLoop,
   stripToolFences,
@@ -187,11 +187,12 @@ describe('tool call parsing', () => {
   });
 
   it('detects announced edits that contain no tool call', () => {
-    expect(looksLikeUnfulfilledWriteIntent('好的，现在用完整代码替换 `src/App.vue`，同时更新 `index.html`：')).toBe(true);
-    expect(looksLikeUnfulfilledWriteIntent('Okay, now replacing src/App.vue:')).toBe(true);
-    expect(looksLikeUnfulfilledWriteIntent('已更新 src/App.vue。')).toBe(false);
-    expect(looksLikeUnfulfilledWriteIntent('Here is the plan:')).toBe(false);
-    expect(looksLikeUnfulfilledWriteIntent('The answer is 42.')).toBe(false);
+    expect(looksLikeUnfulfilledToolIntent('好的，现在用完整代码替换 `src/App.vue`，同时更新 `index.html`：')).toBe(true);
+    expect(looksLikeUnfulfilledToolIntent('Okay, now replacing src/App.vue:')).toBe(true);
+    expect(looksLikeUnfulfilledToolIntent('Let me first read the current state of both files:')).toBe(true);
+    expect(looksLikeUnfulfilledToolIntent('已更新 src/App.vue。')).toBe(false);
+    expect(looksLikeUnfulfilledToolIntent('Here is the plan:')).toBe(false);
+    expect(looksLikeUnfulfilledToolIntent('The answer is 42.')).toBe(false);
   });
 });
 
