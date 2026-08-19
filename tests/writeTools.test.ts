@@ -219,6 +219,13 @@ describe('apply_patch', () => {
     }, approveAll);
     expect(singleObjectFiles.status).toBe('success');
 
+    const clamped = await runTool('apply_patch', {
+      path: 'src/extra.ts',
+      baseContentHash: sha256('export const extra = 1;'),
+      edits: [{ startLine: 1, endLine: 999, replacement: 'export const extra = 2;' }],
+    }, approveAll);
+    expect(clamped.status).toBe('success');
+
     const coerced = await runTool('apply_patch', {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),

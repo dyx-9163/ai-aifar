@@ -133,6 +133,11 @@ function prepareSinglePatch(spec: PatchFileSpec, context: WorkspaceToolContext):
   }
 
   const originalText = stat ? readFileSync(absolute, 'utf-8').replace(/\r\n/g, '\n') : '';
+  // Models frequently overshoot endLine when replacing "to the end of the file"
+  // (or count a trailing newline as a line); clamp to the real line count so
+  // the intent survives instead of failing validation.
+  const totalLines = splitLogicalLines(originalText).length;
+  const clampedEdits = edits.map((edit) => ({ ...edit, endLine: Math.min(edit.endLine, totalLines) }));
   let previousContentHash = '';
   if (stat) {
     previousContentHash = createHash('sha256').update(readFileSync(absolute)).digest('hex');
@@ -146,7 +151,7 @@ function prepareSinglePatch(spec: PatchFileSpec, context: WorkspaceToolContext):
     throw toolInputError('invalid-input', 'Creating a new file requires an empty baseContentHash.');
   }
 
-  const patched = applyEdits(originalText, edits);
+  const patched = applyEdits(originalText, clampedEdits);
   const newContentHash = createHash('sha256').update(Buffer.from(patched.text, 'utf-8')).digest('hex');
   return {
     absolute,
@@ -154,7 +159,7 @@ function prepareSinglePatch(spec: PatchFileSpec, context: WorkspaceToolContext):
     existed: Boolean(stat),
     originalText,
     previousContentHash,
-    edits,
+    edits: clampedEdits,
     patched,
     newContentHash,
   };
@@ -324,7 +329,7 @@ function applyEdits(
     if (edit.startLine > minAllowedStart || edit.endLine > totalBefore) {
       throw toolInputError(
         'invalid-input',
-        `Edit at line ${edit.startLine} is out of range or overlaps a previous edit (file has ${totalBefore} lines).`,
+        `Edit at line ${edit.startLine} (endLine ${edit.endLine}) is out of range or overlaps a previous edit (file has ${totalBefore} lines).`,
       );
     }
     const replacementLines = edit.replacement === '' ? [] : edit.replacement.split('\n');
