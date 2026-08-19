@@ -368,6 +368,14 @@ describe('run_command execution', () => {
     expect(output.timedOut).toBe(false);
   });
 
+  it('runs package-manager .cmd shims through the cmd wrapper', async () => {
+    const result = await runTool('run_command', { command: 'pnpm', args: ['--version'] });
+    expect(result.status).toBe('success');
+    const output = result.output as RunCommandOutput;
+    expect(output.exitCode).toBe(0);
+    expect(output.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  }, 15_000);
+
   it('auto-runs allowlisted commands without asking for approval', async () => {
     let approvalRequests = 0;
     const result = await runTool(

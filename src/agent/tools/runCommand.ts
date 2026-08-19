@@ -237,7 +237,12 @@ function spawnCommand(
     let child: ChildProcess;
     try {
       const target = resolveSpawnTarget(command, args);
-      child = spawn(target.command, target.args, { cwd: options.cwd, shell: false, windowsHide: true });
+      child = spawn(target.command, target.args, {
+        cwd: cmdSafeCwd(options.cwd),
+        shell: false,
+        windowsHide: true,
+        ...(target.verbatim ? { windowsVerbatimArguments: true } : {}),
+      });
     } catch (error) {
       reject(error);
       return;
@@ -316,14 +321,26 @@ function isMissingExecutable(error: unknown): boolean {
 }
 
 /**
- * `.cmd`/`.bat` shims cannot be spawned without a shell on Windows, so they
- * run through `cmd /d /s /c` with every token individually quoted. Arguments
- * were already screened for shell metacharacters in `parseCommandInput`.
+ * `cmd.exe` (used for `.cmd`/`.bat` shims) rejects `\\?\` long-path prefixes,
+ * exiting 1 with "directory name is invalid"; strip the prefix for spawning.
  */
-function resolveSpawnTarget(command: string, args: string[]): { command: string; args: string[] } {
+function cmdSafeCwd(cwd: string): string {
+  return cwd.startsWith('\\\\?\\') ? cwd.slice(4) : cwd;
+}
+
+/**
+ * `.cmd`/`.bat` shims cannot be spawned without a shell on Windows, so they
+ * run through `cmd /d /s /c`. Arguments were already screened for shell
+ * metacharacters in `parseCommandInput` and keep their quotes; the command
+ * token must stay UNQUOTED so cmd resolves it via PATH and the batch file
+ * sees its real `%~dp0` (a quoted first token breaks both). The line travels
+ * with `windowsVerbatimArguments` so Node's own argument escaping cannot
+ * corrupt cmd's `/S` quote handling.
+ */
+function resolveSpawnTarget(command: string, args: string[]): { command: string; args: string[]; verbatim?: boolean } {
   if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
-    const commandLine = [command, ...args].map((part) => `"${part}"`).join(' ');
-    return { command: process.env.ComSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', commandLine] };
+    const commandLine = [command, ...args.map((part) => `"${part}"`)].join(' ');
+    return { command: process.env.ComSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', commandLine], verbatim: true };
   }
   return { command, args };
 }

@@ -500,4 +500,51 @@ describe('runAgentLoop', () => {
     expect(toolResult).toContain('"status": "success"');
     expect(toolResult).toContain('"exitCode": 0');
   });
+
+  it('appends a failing auto-verify report to apply_patch feedback', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    writeFileSync(
+      join(context.canonicalRootPath, 'verify.js'),
+      'console.error("src/main.ts(1,1): error TS2322: bad"); process.exit(2);\n',
+    );
+    writeFileSync(
+      join(context.canonicalRootPath, 'package.json'),
+      JSON.stringify({ scripts: { typecheck: 'node verify.js' } }),
+    );
+    const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
+    const patchCall = JSON.stringify({
+      tool: 'apply_patch',
+      input: {
+        path: 'src/main.ts',
+        baseContentHash: baseHash,
+        edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
+      },
+    });
+    const { emitted, modelCalls } = await runLoop([fencedToolCall(patchCall), 'Done.'], readWrite);
+    const feedback = String(modelCalls[1].at(-1)?.content);
+    expect(feedback).toContain('[auto-verify] npm run typecheck exited 2');
+    expect(feedback).toContain('TS2322');
+    const toolOutput = emitted.find((event) => event.type === 'tool.output') as { output: string };
+    expect(toolOutput.output).toContain('[auto-verify]');
+  }, 30_000);
+
+  it('reports a passing auto-verify after apply_patch', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    writeFileSync(join(context.canonicalRootPath, 'verify.js'), 'console.log("ok");\n');
+    writeFileSync(
+      join(context.canonicalRootPath, 'package.json'),
+      JSON.stringify({ scripts: { typecheck: 'node verify.js' } }),
+    );
+    const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
+    const patchCall = JSON.stringify({
+      tool: 'apply_patch',
+      input: {
+        path: 'src/main.ts',
+        baseContentHash: baseHash,
+        edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
+      },
+    });
+    const { modelCalls } = await runLoop([fencedToolCall(patchCall), 'Done.'], readWrite);
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('[auto-verify] npm run typecheck passed');
+  }, 30_000);
 });

@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ModelRunMetrics, WorkspaceTrustLevel } from '../shared/domain.js';
 import type { AgentToolCall, AgentToolResult } from '../shared/toolProtocol.js';
+import { runAutoVerification } from './tools/autoVerify.js';
 import type { RuntimeModelProfile } from './database.js';
 import type { ChatMessage, ModelStreamHandlers } from './modelProvider.js';
 import {
@@ -35,6 +36,8 @@ const MAX_TRUNCATED_TOOL_STEERS = 3;
 const MAX_INTENT_STEERS = 2;
 /** How many times the loop re-prompts when a fenced tool call was not valid JSON. */
 const MAX_MALFORMED_TOOL_STEERS = 2;
+/** How many times per turn the loop runs deterministic post-write verification. */
+const MAX_AUTO_VERIFICATIONS = 3;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
@@ -282,7 +285,7 @@ export function buildAgentSystemPrompt(
       '- For existing files, apply_patch requires the contentHash of a fresh read_file of the same file; re-read if it reports stale-content.',
       '- Edit lines are 1-based; "endLine": startLine - 1 inserts before "startLine".',
       '- run_command runs only inside the workspace directory; every command executes automatically in read-write workspaces except forbidden ones, which are blocked.',
-      '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
+      '- After each successful apply_patch the harness automatically runs the project verification script (typecheck/check/build from package.json) and appends an [auto-verify] report to the tool result; when it reports errors, fix them with follow-up apply_patch edits before answering.',
       '- When several files change together, prefer one apply_patch with a "files" array so related files change together in a single changeset.',
       '- Keep every reply within the output limit: for large rewrites, split the work into several apply_patch edits with replacements of at most ~120 lines instead of one huge edit.',
       '- Promising changes is not acting: a reply that says it will read, replace, or update files but contains no ```tool call changes nothing; either issue the ```tool calls or answer directly.',
@@ -315,6 +318,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let truncatedToolSteersUsed = 0;
   let intentSteersUsed = 0;
   let malformedToolSteersUsed = 0;
+  let autoVerificationsUsed = 0;
   let lastMetrics: ModelRunMetrics | undefined;
 
   const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
@@ -395,8 +399,25 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       });
       throwIfAborted(options.signal);
       toolCallsExecuted += 1;
-      await options.emit({ type: 'tool.output', toolId: callId, output: summarizeToolResult(parsed.tool, result) });
-      messages.push({ role: 'user', content: toolResultMessage(callId, result) });
+      let summary = summarizeToolResult(parsed.tool, result);
+      let feedback = toolResultMessage(callId, result);
+      if (
+        parsed.tool === 'apply_patch' &&
+        result.status === 'success' &&
+        options.toolContext.trustLevel !== 'read-only' &&
+        autoVerificationsUsed < MAX_AUTO_VERIFICATIONS
+      ) {
+        // Deterministic safety net: build/typecheck the workspace right after a
+        // write so compile errors reach the model inside the same turn.
+        autoVerificationsUsed += 1;
+        const report = await runAutoVerification(options.toolContext.canonicalRootPath, options.signal);
+        if (report) {
+          summary = `${summary}\n${report}`;
+          feedback = `${feedback}\n${report}`;
+        }
+      }
+      await options.emit({ type: 'tool.output', toolId: callId, output: summary });
+      messages.push({ role: 'user', content: feedback });
     }
   }
 
