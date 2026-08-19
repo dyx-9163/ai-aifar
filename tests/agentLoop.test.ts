@@ -272,6 +272,18 @@ describe('tool call parsing', () => {
     expect(stripToolFences(unknownTool)).toContain('restart_server');
   });
 
+  it('parses lenient XML invoke blocks', () => {
+    const dq = String.fromCharCode(34);
+    const singleQuotedName = [
+      "<invoke name='read_file'>",
+      `<parameter name=${dq}path${dq}>src/main.ts`,
+      '<\/parameter><\/invoke>',
+    ].join('');
+    expect(parseToolCall(singleQuotedName)).toEqual({ tool: 'read_file', input: { path: 'src/main.ts' } });
+    const reordered = [`<invoke id=${dq}x-1${dq} name=${dq}workspace_tree${dq}><\/invoke>`].join('');
+    expect(parseToolCall(reordered)).toEqual({ tool: 'workspace_tree', input: {} });
+  });
+
   it('repairs fenced tool JSON with missing closers or trailing commas', () => {
     const missingCloser = parseToolCall('```tool\n{"tool": "read_file", "input": {"path": "a.ts"}\n```');
     expect(missingCloser?.tool).toBe('read_file');
@@ -719,5 +731,16 @@ describe('runAgentLoop', () => {
     expect(outcome.falseCompletion).toBe(true);
     expect(modelCalls).toHaveLength(3);
     expect(String(modelCalls[1].at(-1)?.content)).toContain('Never report unexecuted work as done');
+  });
+
+  it('steers unparseable XML tool blocks instead of silently emptying the reply', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const xml = ['<tool_calls>', '<invoke>', '<name>read_file</name>', '<\/invoke>', '<\/tool_calls>'].join('\n');
+    const { modelCalls, outcome } = await runLoop(
+      [xml, fencedToolCall('{"tool": "read_file", "input": {"path": "src/main.ts"}}'), 'It exports answer = 42.'],
+      readWrite,
+    );
+    expect(outcome).toMatchObject({ toolCallsExecuted: 1, emptyAnswer: false });
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('XML tool block');
   });
 });

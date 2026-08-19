@@ -40,6 +40,8 @@ const MAX_INTENT_STEERS = 2;
 const MAX_MALFORMED_TOOL_STEERS = 2;
 /** How many times the loop re-prompts when the visible answer is empty. */
 const MAX_EMPTY_ANSWER_STEERS = 2;
+/** How many times the loop re-prompts when an XML tool block survived parsing but not stripping. */
+const MAX_UNPARSED_XML_STEERS = 2;
 /** How many times the loop re-prompts when the answer claims work no tool call executed. */
 const MAX_FALSE_COMPLETION_STEERS = 2;
 /** How many times per turn the loop runs deterministic post-write verification. */
@@ -48,6 +50,12 @@ const MAX_AUTO_VERIFICATIONS = 3;
 const MAX_REPEAT_READS = 4;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>((?:(?!<invoke\b)[\s\S])*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>((?:(?!<parameter\b|<invoke\b|<\/invoke\b)[\s\S])*?)<\/parameter>/g;
+/** Lenient fallback for invoke blocks whose name attribute is single-quoted, unquoted, or not the first attribute. */
+const TOOL_INVOKE_LENIENT_PATTERN = /<invoke\b[^>]*>((?:(?!<invoke\b)[\s\S])*?)<\/invoke>/g;
+const TOOL_PARAMETER_LENIENT_PATTERN = /<parameter\b[^>]*>((?:(?!<parameter\b|<invoke\b|<\/invoke\b)[\s\S])*?)<\/parameter>/g;
+const TOOL_INVOKE_NAME_PATTERN = /\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/;
+/** Providers sometimes emit plain XML tool blocks this harness cannot parse; their leftovers mark a swallowed call. */
+const UNPARSED_XML_TOOL_PATTERN = /<tool_calls\b|<invoke\b|<parameter\b/i;
 const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES]);
 
 export type AgentLoopEmit = (
@@ -122,7 +130,30 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
     }
     xml.push({ tool: match[1], input });
   }
+  if (xml.length > 0) return xml;
+  // Providers occasionally emit invoke blocks whose name attribute is
+  // single-quoted, unquoted, or not the first attribute; recover those instead
+  // of letting the strip step swallow the whole reply into silence.
+  for (const match of source.matchAll(TOOL_INVOKE_LENIENT_PATTERN)) {
+    const nameMatch = match[0].match(TOOL_INVOKE_NAME_PATTERN);
+    const tool = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+    if (!tool) continue;
+    xml.push({ tool, input: parseLenientXmlParameters(match[1] ?? '') });
+  }
   return xml;
+}
+
+/** Reads parameter name/value pairs tolerating single-quoted, unquoted, or reordered name attributes. */
+function parseLenientXmlParameters(body: string): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  for (const parameter of body.matchAll(TOOL_PARAMETER_LENIENT_PATTERN)) {
+    const openTag = (parameter[0] ?? '').slice(0, (parameter[0] ?? '').indexOf('>') + 1);
+    const nameMatch = openTag.match(TOOL_INVOKE_NAME_PATTERN);
+    const name = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+    if (!name) continue;
+    input[name] = decodeToolParameter(parameter[1] ?? '');
+  }
+  return input;
 }
 
 /** Extracts the first tool call from assistant text, if any. */
@@ -136,6 +167,13 @@ export function hasUnparsedToolFence(text: string): boolean {
     if (!match[1] || !parseFencedToolCall(match[1])) return true;
   }
   return false;
+}
+
+/** True when the reply carries XML tool syntax that no parser turned into a call (checked where parsedCalls is empty). */
+export function hasUnparsedXmlToolBlock(text: string): boolean {
+  // The check runs on the original text: stripping removes closed blocks without
+  // a trace, so testing the stripped remainder would miss the swallowed-call case.
+  return UNPARSED_XML_TOOL_PATTERN.test(normalizeDsmlTags(text));
 }
 
 /** Closes unterminated strings, escapes raw control characters inside them and appends missing ]/} closers so truncated JSON can re-parse. */
@@ -236,7 +274,9 @@ export function looksLikeManualCodeDump(text: string): boolean {
 export function looksLikeTruncatedToolCall(text: string): boolean {
   const withoutCompleteCalls = normalizeDsmlTags(text)
     .replace(/```tool\s*\n[\s\S]*?```/g, '')
-    .replace(TOOL_INVOKE_GLOBAL_PATTERN, '');
+    // Any closed invoke block is complete syntax (even one the parsers reject,
+    // which takes the dedicated XML steering path); only open blocks mean truncation.
+    .replace(TOOL_INVOKE_LENIENT_PATTERN, '');
   return /```tool\b/.test(withoutCompleteCalls) || /<invoke\b/.test(withoutCompleteCalls);
 }
 
@@ -297,6 +337,14 @@ const MALFORMED_TOOL_STEERING_MESSAGE = [
   'A ```tool block in your previous reply was not valid JSON, so it was ignored and nothing ran.',
   'Resend the call now as one strict-JSON ```tool block: close every { and [, quote every string, keep numbers unquoted, and keep each "replacement" at most ~120 lines.',
   'Never paste code into the answer.',
+].join(' ');
+
+const UNPARSED_XML_STEERING_MESSAGE = [
+  'Your reply contained an XML tool block (such as <tool_calls>/<invoke>) that could not be parsed, so nothing happened.',
+  'Resend the same call as a fenced JSON block exactly like: ```tool',
+  '{"tool": "read_file", "input": {"path": "src/main.ts"}}',
+  '```',
+  'Never use XML tool syntax.',
 ].join(' ');
 
 const EMPTY_ANSWER_STEERING_MESSAGE = [
@@ -395,6 +443,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let intentSteersUsed = 0;
   let malformedToolSteersUsed = 0;
   let emptyAnswerSteersUsed = 0;
+  let unparsedXmlSteersUsed = 0;
   let falseCompletionSteersUsed = 0;
   let actingToolsExecuted = 0;
   let autoVerificationsUsed = 0;
@@ -448,6 +497,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         malformedToolSteersUsed += 1;
         messages.push({ role: 'assistant', content: text });
         messages.push({ role: 'user', content: MALFORMED_TOOL_STEERING_MESSAGE });
+        continue;
+      }
+      if (unparsedXmlSteersUsed < MAX_UNPARSED_XML_STEERS && hasUnparsedXmlToolBlock(text)) {
+        // An XML tool block escaped both parsing and stripping; without this
+        // steer the reply would strip down to "" and loop as a silent empty answer.
+        unparsedXmlSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: UNPARSED_XML_STEERING_MESSAGE });
         continue;
       }
       if (answer.length === 0 && emptyAnswerSteersUsed < MAX_EMPTY_ANSWER_STEERS) {
