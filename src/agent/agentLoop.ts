@@ -26,6 +26,8 @@ export const AGENT_LOOP_MAX_ITERATIONS = Number.POSITIVE_INFINITY;
 
 const TOOL_FENCE_GLOBAL_PATTERN = /```tool\s*\n([\s\S]*?)```/g;
 const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
+/** Code fence with a captured language tag: group 1 = language, group 2 = body. */
+const FENCE_WITH_LANG_PATTERN = /```([^\n]*)\n([\s\S]*?)```/g;
 /** A fenced code block with at least this many non-empty lines counts as a manual code dump. */
 const CODE_DUMP_MIN_LINES = 12;
 /** How many times the loop re-prompts the model instead of accepting a pasted-code answer. */
@@ -42,6 +44,7 @@ const MAX_EMPTY_ANSWER_STEERS = 2;
 const MAX_AUTO_VERIFICATIONS = 3;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
+const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES]);
 
 export type AgentLoopEmit = (
   payload:
@@ -93,9 +96,15 @@ export interface ParsedToolCall {
 /** Extracts every tool call from assistant text: fenced JSON blocks first, then provider-native XML. */
 export function parseToolCalls(text: string): ParsedToolCall[] {
   const fenced: ParsedToolCall[] = [];
-  for (const match of text.matchAll(TOOL_FENCE_GLOBAL_PATTERN)) {
-    const parsed = match[1] ? parseFencedToolCall(match[1]) : undefined;
-    if (parsed) fenced.push(parsed);
+  for (const match of text.matchAll(FENCE_WITH_LANG_PATTERN)) {
+    const language = (match[1] ?? '').trim().toLowerCase();
+    const body = match[2] ?? '';
+    const parsed = parseFencedToolCall(body);
+    if (!parsed) continue;
+    // ```tool fences may name any tool; ordinary code fences (```json, ```...)
+    // are honored only when the JSON names a known tool, so pasted examples
+    // never execute by accident.
+    if (language === 'tool' || KNOWN_TOOL_NAMES.has(parsed.tool)) fenced.push(parsed);
   }
   if (fenced.length > 0) return fenced;
   const xml: ParsedToolCall[] = [];
@@ -258,7 +267,11 @@ const EMPTY_ANSWER_STEERING_MESSAGE = [
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
   return text
-    .replace(/```tool\s*\n[\s\S]*?```/g, '')
+    .replace(FENCE_WITH_LANG_PATTERN, (whole, language: string, body: string) => {
+      if (language.trim().toLowerCase() === 'tool') return '';
+      const parsed = parseFencedToolCall(body);
+      return parsed && KNOWN_TOOL_NAMES.has(parsed.tool) ? '' : whole;
+    })
     .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/g, '')
     .replace(/<invoke\b[\s\S]*?<\/invoke>/g, '')
     .replace(/<parameter\b[\s\S]*?<\/parameter>/g, '')

@@ -199,6 +199,15 @@ describe('tool call parsing', () => {
     expect(looksLikeUnfulfilledToolIntent('The answer is 42.')).toBe(false);
   });
 
+  it('parses tool calls emitted in ordinary code fences with the arguments alias', () => {
+    const generic = '```json\n{"tool": "read_file", "arguments": {"path": "src/App.vue"}}\n```';
+    expect(parseToolCall(generic)).toEqual({ tool: 'read_file', input: { path: 'src/App.vue' } });
+    expect(stripToolFences(generic)).toBe('');
+    const unknownTool = '```json\n{"tool": "restart_server", "arguments": {}}\n```';
+    expect(parseToolCall(unknownTool)).toBeUndefined();
+    expect(stripToolFences(unknownTool)).toContain('restart_server');
+  });
+
   it('repairs fenced tool JSON with missing closers or trailing commas', () => {
     const missingCloser = parseToolCall('```tool\n{"tool": "read_file", "input": {"path": "a.ts"}\n```');
     expect(missingCloser?.tool).toBe('read_file');
@@ -566,6 +575,13 @@ describe('runAgentLoop', () => {
     expect(modelCalls).toHaveLength(3);
     expect(String(modelCalls[1].at(-1)?.content)).toContain('Never end a turn silently.');
     expect(emitted.filter((event) => event.type === 'answer.delta')).toEqual([]);
+  });
+
+  it('executes tool calls fenced as ordinary code blocks', async () => {
+    const generic = '```json\n{"tool": "read_file", "arguments": {"path": "src/main.ts"}}\n```';
+    const { emitted, outcome } = await runLoop([generic, 'It exports answer = 42.'], context);
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 1 });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
   });
 
   it('steers period-terminated action promises back into tool calls', async () => {
