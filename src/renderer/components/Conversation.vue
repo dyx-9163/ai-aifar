@@ -492,7 +492,14 @@ function nextAnimationFrame(): Promise<void> {
                 @click="handleAssistantContentClick"
                 v-html="renderMarkdown(entry.text, { copyCodeLabel: t('copyCode') })"
               ></div>
-              <div v-else class="message-content user-message-content" :data-testid="`${entry.role}-message-content`">
+              <div
+                v-if="entry.role === 'assistant' && entry.truncated"
+                class="truncation-notice"
+                data-testid="answer-truncated-notice"
+              >
+                {{ t('answerTruncated') }}
+              </div>
+              <div v-if="entry.role !== 'assistant'" class="message-content user-message-content" :data-testid="`${entry.role}-message-content`">
                 <p>{{ userMessageText(entry.text) }}</p>
                 <div v-if="imageAttachments(entry).length > 0" class="message-attachments" :aria-label="t('attachedImages')">
                   <figure

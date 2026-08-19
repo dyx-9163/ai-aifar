@@ -48,7 +48,7 @@ import {
   threadRuntimePresentation,
 } from '../src/renderer/modelControls';
 import { isNearBottom } from '../src/renderer/scrolling';
-import { createTimelineEntries } from '../src/renderer/timeline';
+import { createTimelineEntries, type TimelineEntry } from '../src/renderer/timeline';
 
 function deltaEvent(sequence: number): AgentEvent {
   return {
@@ -1934,6 +1934,73 @@ describe('renderer state reducer', () => {
       'item-turn-2-assistant',
       'model.metrics-turn-2-persisted',
     ]);
+  });
+
+  it('flags truncated assistant answers from unclosed code fences or length-limited runs', () => {
+    const baseMetrics = {
+      modelProfileId: 'model-1',
+      modelName: 'Model 1',
+      reasoningRequested: 'disabled' as const,
+      reasoningProtocol: 'qwen' as const,
+      reasoningObserved: false,
+      durationMs: 1_000,
+      completionTokens: 4_096,
+    };
+    const completedTurn = (id: string, finishReason: 'stop' | 'length') => ({
+      id,
+      threadId: 'thread-1',
+      modelProfileId: 'model-1',
+      status: 'completed' as const,
+      createdAt: '2026-08-17T00:00:00.000Z',
+      completedAt: '2026-08-17T00:00:02.000Z',
+      incomplete: false,
+      metrics: { ...baseMetrics, finishReason },
+    });
+    const items: Item[] = [
+      {
+        id: 'item-fence',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'assistant',
+        text: 'Here is the file:\n```vue\n<script setup>\nconst a = 1',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      },
+      {
+        id: 'item-user-fence',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        kind: 'message',
+        role: 'user',
+        text: '```',
+        createdAt: '2026-08-17T00:00:00.500Z',
+      },
+      {
+        id: 'item-length',
+        threadId: 'thread-1',
+        turnId: 'turn-2',
+        kind: 'message',
+        role: 'assistant',
+        text: 'Looks complete even without fences.',
+        createdAt: '2026-08-17T00:00:03.000Z',
+      },
+      {
+        id: 'item-streaming-assistant-live',
+        threadId: 'thread-1',
+        turnId: 'turn-3',
+        kind: 'message',
+        role: 'assistant',
+        text: '```ts\nconst streaming = true',
+        createdAt: '2026-08-17T00:00:04.000Z',
+      },
+    ];
+
+    const messages = createTimelineEntries(items, [], [
+      completedTurn('turn-1', 'stop'),
+      completedTurn('turn-2', 'length'),
+    ], createTranslator('en-US')).filter((entry): entry is Extract<TimelineEntry, { kind: 'message' }> => entry.kind === 'message');
+
+    expect(messages.map((entry) => entry.truncated)).toEqual([true, undefined, true, undefined]);
   });
 
   it('rebuilds active Inspector and timeline metrics from a reloaded snapshot', () => {

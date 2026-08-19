@@ -871,6 +871,18 @@ button {
   color: var(--danger);
 }
 
+.truncation-notice {
+  align-self: flex-start;
+  width: min(880px, 100%);
+  margin-top: 4px;
+  padding: 4px 10px;
+  border-left: 2px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
 .metrics-row {
   align-self: center;
   width: fit-content;

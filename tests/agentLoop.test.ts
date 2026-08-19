@@ -153,6 +153,7 @@ describe('tool call parsing', () => {
     const prompt = buildAgentSystemPrompt('my-project');
     expect(prompt).toContain('my-project');
     expect(prompt).toContain('read_file');
+    expect(prompt).toContain('never tell the user to paste code manually');
   });
 
   it('only offers write tools when the workspace is read-write', () => {
@@ -163,6 +164,7 @@ describe('tool call parsing', () => {
     expect(readWrite).toContain('apply_patch');
     expect(readWrite).toContain('run_command');
     expect(readWrite).toContain('read-write');
+    expect(readWrite).toContain('Never paste full file contents or complete replacement code into the answer');
   });
 });
 

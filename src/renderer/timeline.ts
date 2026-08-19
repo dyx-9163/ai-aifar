@@ -11,6 +11,7 @@ export type TimelineEntry =
       attachments?: TurnAttachment[];
       turnId?: string;
       live: boolean;
+      truncated?: boolean;
     }
   | {
       id: string;
@@ -82,15 +83,28 @@ export function createTimelineEntries(
     });
   }
 
+  // Turns whose final model run stopped at the output-token limit produced a
+  // truncated answer even when the text happens to look complete.
+  const lengthLimitedTurns = new Set<string>();
+  for (const [turnId, entry] of metricsByTurn) {
+    if (entry.metrics.finishReason === 'length') lengthLimitedTurns.add(turnId);
+  }
+
   for (const item of items) {
     if (item.kind === 'message') {
+      const live = item.id.endsWith('-assistant-live');
+      const settled = !live && (!item.turnId || terminalTurns.has(item.turnId));
       appendMessage(entries, {
         id: item.id,
         role: item.role,
         text: item.text,
         attachments: item.attachments,
         turnId: item.turnId,
-        live: item.id.endsWith('-assistant-live'),
+        live,
+        truncated: item.role === 'assistant' && settled &&
+          (lengthLimitedTurns.has(item.turnId ?? '') || hasUnclosedCodeFence(item.text))
+          ? true
+          : undefined,
       });
       appendMetricsIfTurnEnds(entries, metricsByTurn, item, items);
       continue;
@@ -215,6 +229,11 @@ function formatMetrics(metrics: ModelRunMetrics, t: Translator): string {
 
 type MessageDraft = Omit<Extract<TimelineEntry, { kind: 'message' }>, 'kind'>;
 
+/** True when ``` fence markers are unbalanced, i.e. a code block was never closed (truncated output). */
+export function hasUnclosedCodeFence(text: string): boolean {
+  return (text.match(/```/g) ?? []).length % 2 !== 0;
+}
+
 function appendMessage(entries: TimelineEntry[], next: MessageDraft): void {
   const previous = entries.at(-1);
   if (
@@ -227,6 +246,7 @@ function appendMessage(entries: TimelineEntry[], next: MessageDraft): void {
   ) {
     previous.text = next.text.startsWith(previous.text) ? next.text : previous.text + next.text;
     previous.live = true;
+    previous.truncated = previous.truncated || next.truncated;
     return;
   }
 
@@ -238,6 +258,7 @@ function appendMessage(entries: TimelineEntry[], next: MessageDraft): void {
     previous.live === next.live
   ) {
     previous.text += next.text;
+    previous.truncated = previous.truncated || next.truncated;
     return;
   }
 

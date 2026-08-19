@@ -18,14 +18,16 @@
 - [src/shared/protocol.ts](file://src/shared/protocol.ts)
 - [src/shared/toolProtocol.ts](file://src/shared/toolProtocol.ts)
 - [src/renderer/App.vue](file://src/renderer/App.vue)
+- [tests/agentLoop.test.ts](file://tests/agentLoop.test.ts)
 </cite>
 
 ## 更新摘要
 **所做更改**
-- 新增了Git只读工具（git_status、git_diff）的完整支持
-- 增强了文件修改审批工作流，提供详细的差异预览
-- 改进了工具路由的安全策略和执行流程
-- 更新了工具协议以支持新的Git工具类型
+- 新增provider-native XML工具调用支持，与现有围栏JSON协议并存
+- 增强Agent循环的解析能力，支持XML结构和JSON参数自动解码
+- 实现正则表达式模式匹配用于解析`<invoke name="tool_name">...</invoke>`块
+- 添加从`<parameter>`标签提取参数的功能，支持自动JSON解码参数值
+- 扩展工具调用格式支持，提高与不同模型提供商的兼容性
 
 ## 目录
 1. [简介](#简介)
@@ -42,7 +44,7 @@
 ## 简介
 这是一个基于 Electron、Vue 3、TypeScript 的私有桌面端 AI 客户端原型。它通过主进程、预加载脚本、渲染进程与一个独立的 Utility Process（Agent 运行时）协作，使用 SQLite 进行本地持久化，并通过 OpenAI 兼容接口与模型服务通信。系统支持"思考→工具→观察→再思考"的多轮 Agent 循环、流式输出、工作区安全策略、并发调度、以及可撤销的文件变更等能力。
 
-**最新更新**：系统现已增强工具能力，新增了Git只读工具和改进的文件修改审批工作流，提供更安全的代码操作体验。
+**最新更新**：系统现已支持provider-native XML工具调用格式，与原有的围栏JSON协议并存，增强了与不同模型提供商的兼容性。新增的XML解析功能包括正则表达式模式匹配、参数提取和自动JSON解码。
 
 ## 项目结构
 - 渲染层：Vue 3 UI，仅负责展示与交互，不直接访问文件系统或数据库。
@@ -90,7 +92,7 @@ WORKER --> DB
 - [src/preload.ts:1-38](file://src/preload.ts#L1-L38)
 - [src/main/agentRequestBroker.ts:1-86](file://src/main/agentRequestBroker.ts#L1-L86)
 - [src/agent/worker.ts:1-787](file://src/agent/worker.ts#L1-L787)
-- [src/agent/agentLoop.ts:1-241](file://src/agent/agentLoop.ts#L1-L241)
+- [src/agent/agentLoop.ts:1-286](file://src/agent/agentLoop.ts#L1-L286)
 - [src/agent/modelProvider.ts:1-800](file://src/agent/modelProvider.ts#L1-L800)
 - [src/agent/database.ts:1-800](file://src/agent/database.ts#L1-L800)
 - [src/agent/tools/toolRouter.ts:1-229](file://src/agent/tools/toolRouter.ts#L1-L229)
@@ -105,18 +107,20 @@ WORKER --> DB
 - 主进程与 IPC 路由：创建窗口、启动 Agent 运行时、处理健康检查与桌面请求转发。
 - Agent 运行时：接收并执行桌面请求，编排回合调度、模型流式调用、工具执行、审批流程与事件回推。
 - 模型提供者：封装 SSE 流解析、上下文压缩、重试与指标收集。
-- Agent 循环：多轮"思考→工具→观察"，将工具调用以围栏 JSON 嵌入文本，最终答案才进入用户可见流。
+- Agent 循环：多轮"思考→工具→观察"，支持围栏 JSON 和 provider-native XML 两种工具调用格式，最终答案才进入用户可见流。
 - 工具路由：统一入口，按信任策略与安全白名单决定允许、拒绝或需审批。
 - Git只读工具：提供仓库状态检查和差异查看功能，无需用户审批即可执行。
 - 文件修改审批：增强的预览机制，显示详细的文件变更差异供用户审核。
 - 数据库：SQLite 持久化会话、回合、设置、模型配置、工作区与文件检查点。
 - 前端：Vue 组件与状态管理，订阅事件、发起请求、展示对话与推理面板。
 
+**更新**：Agent循环现在支持两种工具调用格式，提高了与不同模型提供商的兼容性。
+
 章节来源
 - [src/main.ts:1-170](file://src/main.ts#L1-L170)
 - [src/agent/worker.ts:1-787](file://src/agent/worker.ts#L1-L787)
 - [src/agent/modelProvider.ts:1-800](file://src/agent/modelProvider.ts#L1-L800)
-- [src/agent/agentLoop.ts:1-241](file://src/agent/agentLoop.ts#L1-L241)
+- [src/agent/agentLoop.ts:1-286](file://src/agent/agentLoop.ts#L1-L286)
 - [src/agent/tools/toolRouter.ts:1-229](file://src/agent/tools/toolRouter.ts#L1-L229)
 - [src/agent/tools/gitTools.ts:1-187](file://src/agent/tools/gitTools.ts#L1-L187)
 - [src/agent/tools/applyPatch.ts:1-277](file://src/agent/tools/applyPatch.ts#L1-L277)
@@ -210,12 +214,17 @@ MP-->>UI : agent : event (answer/reasoning/metrics)
 
 ### Agent 循环（多轮思考与工具调用）
 - 默认最大迭代次数为 4，超出预算强制回答。
-- 从助手回复中解析围栏 JSON 的工具调用，执行后以结构化结果追加到上下文。
+- **更新**：从助手回复中解析围栏 JSON 的工具调用，如果失败则尝试解析 provider-native XML 工具调用。
+- 支持两种工具调用格式：
+  - 围栏 JSON：` ```tool { "tool": "read_file", "input": {...} } ``` `
+  - Provider-native XML：`<invoke name="tool_name"><parameter name="param">value</parameter></invoke>`
 - 中间过程不会泄露到用户可见答案流，仅最终答案以 delta 形式发出。
 - 支持读取/搜索/补丁/命令/Git等工具，受工作区信任级别与安全策略约束。
 
+**新增功能**：增强的工具调用解析能力，支持XML结构和JSON参数自动解码。
+
 章节来源
-- [src/agent/agentLoop.ts:1-241](file://src/agent/agentLoop.ts#L1-L241)
+- [src/agent/agentLoop.ts:1-286](file://src/agent/agentLoop.ts#L1-L286)
 - [src/agent/tools/toolRouter.ts:1-229](file://src/agent/tools/toolRouter.ts#L1-L229)
 
 ### 工具路由与安全策略
@@ -271,13 +280,27 @@ MP-->>UI : agent : event (answer/reasoning/metrics)
 章节来源
 - [src/renderer/App.vue:1-228](file://src/renderer/App.vue#L1-L228)
 
+### 增强的工具调用解析系统
+- **双格式支持**：同时支持围栏JSON和provider-native XML两种工具调用格式。
+- **优先级处理**：首先尝试解析围栏JSON，失败后回退到XML解析。
+- **XML结构解析**：使用正则表达式匹配`<invoke name="tool_name">...</invoke>`块。
+- **参数提取**：从`<parameter name="param">value</parameter>`标签中提取参数。
+- **自动JSON解码**：参数值可以是纯文本或嵌入的JSON（数字、数组、对象）。
+- **容错处理**：支持不匹配的闭合标签和嵌套结构。
+
+**新增功能**：provider-native XML工具调用支持，提高与不同模型提供商的兼容性。
+
+章节来源
+- [src/agent/agentLoop.ts:72-134](file://src/agent/agentLoop.ts#L72-L134)
+- [tests/agentLoop.test.ts:130-150](file://tests/agentLoop.test.ts#L130-L150)
+
 ## 依赖关系分析
 - 主进程依赖 AgentRequestBroker 管理请求与超时。
 - Agent 运行时依赖 database、modelProvider、agentLoop、toolRouter 与 turnScheduler。
 - 共享协议 domain.ts、protocol.ts、toolProtocol.ts 被多处引用，保证类型一致。
 - 前端依赖预加载暴露的 window.desktop 与事件订阅。
 
-**更新**：新增Git工具和文件修改审批的相关依赖关系。
+**更新**：新增Git工具和文件修改审批的相关依赖关系，以及增强的工具调用解析依赖。
 
 ```mermaid
 graph LR
@@ -294,6 +317,7 @@ ROUTER --> GITTOOLS["agent/tools/gitTools.ts"]
 ROUTER --> PATCH["agent/tools/applyPatch.ts"]
 WORKER --> DOMAIN["shared/domain.ts"]
 PRELOAD --> DOMAIN
+LOOP --> TESTS["tests/agentLoop.test.ts"]
 ```
 
 图表来源
@@ -302,7 +326,7 @@ PRELOAD --> DOMAIN
 - [src/preload.ts:1-38](file://src/preload.ts#L1-L38)
 - [src/agent/worker.ts:1-787](file://src/agent/worker.ts#L1-L787)
 - [src/agent/database.ts:1-800](file://src/agent/database.ts#L1-L800)
-- [src/agent/agentLoop.ts:1-241](file://src/agent/agentLoop.ts#L1-L241)
+- [src/agent/agentLoop.ts:1-286](file://src/agent/agentLoop.ts#L1-L286)
 - [src/agent/modelProvider.ts:1-800](file://src/agent/modelProvider.ts#L1-L800)
 - [src/agent/tools/toolRouter.ts:1-229](file://src/agent/tools/toolRouter.ts#L1-L229)
 - [src/agent/tools/gitTools.ts:1-187](file://src/agent/tools/gitTools.ts#L1-L187)
@@ -310,6 +334,7 @@ PRELOAD --> DOMAIN
 - [src/shared/domain.ts:1-349](file://src/shared/domain.ts#L1-L349)
 - [src/shared/protocol.ts:1-374](file://src/shared/protocol.ts#L1-L374)
 - [src/shared/toolProtocol.ts:1-77](file://src/shared/toolProtocol.ts#L1-L77)
+- [tests/agentLoop.test.ts:1-325](file://tests/agentLoop.test.ts#L1-L325)
 
 ## 性能考量
 - 流式传输：答案、推理与摘要独立流，减少阻塞，提升交互体验。
@@ -318,6 +343,7 @@ PRELOAD --> DOMAIN
 - 超时与取消：请求与读取均有超时保护，支持中止信号快速释放资源。
 - 指标采集：首 token 时间、吞吐与用量来源可观测，便于调优。
 - **新增**：Git工具使用专用超时设置（15秒），避免长时间阻塞。
+- **新增**：XML解析使用高效的正则表达式匹配，减少解析开销。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -325,6 +351,8 @@ PRELOAD --> DOMAIN
 - 模型不可达或超时：检查 baseUrl、API Key、网络连通性与超时配置；连接测试会返回离线或槽位未验证等状态。
 - 上下文超限：关注压缩日志与继续生成行为；必要时降低上下文消息限制或调整模型窗口。
 - 工具被拒绝：确认工作区信任级别与命令白名单；非白名单命令需用户审批。
+- **新增**：XML工具调用解析失败：检查XML格式是否正确，确保`<invoke>`和`<parameter>`标签正确闭合。
+- **新增**：参数解码错误：验证XML参数值是否为有效的JSON格式；对于复杂参数，确保正确转义特殊字符。
 - **新增**：Git工具错误：检查Git安装和仓库状态；git_diff在非Git仓库中会返回特定错误。
 - **新增**：文件修改审批失败：检查baseContentHash是否匹配；确认文件路径在工作区内。
 - 回合中断：应用重启后未完成回合会被标记为中断，需重新提交。
@@ -335,13 +363,14 @@ PRELOAD --> DOMAIN
 - [src/agent/tools/toolRouter.ts:1-229](file://src/agent/tools/toolRouter.ts#L1-L229)
 - [src/agent/tools/gitTools.ts:1-187](file://src/agent/tools/gitTools.ts#L1-L187)
 - [src/agent/tools/applyPatch.ts:1-277](file://src/agent/tools/applyPatch.ts#L1-L277)
+- [src/agent/agentLoop.ts:72-134](file://src/agent/agentLoop.ts#L72-L134)
 - [src/agent/worker.ts:1-787](file://src/agent/worker.ts#L1-L787)
 - [src/agent/database.ts:1-800](file://src/agent/database.ts#L1-L800)
 
 ## 结论
 该 AI 代理系统通过清晰的进程划分、严格的协议校验与安全的工具执行策略，实现了可靠的本地桌面端 AI 交互。其多轮 Agent 循环、流式输出、上下文压缩与并发调度共同保证了良好的用户体验与稳定性。配合 SQLite 持久化与可撤销的工作区变更，系统在安全性与可用性之间取得了平衡。
 
-**最新更新**：新增的Git只读工具和改进的文件修改审批工作流进一步增强了系统的实用性和安全性，使AI代理能够更安全地协助开发者进行代码管理和版本控制操作。
+**最新更新**：新增的provider-native XML工具调用支持与围栏JSON协议并存，显著提高了与不同模型提供商的兼容性。增强的XML解析功能包括正则表达式模式匹配、参数提取和自动JSON解码，使系统能够处理更多样化的模型输出格式。配合新增的Git只读工具和改进的文件修改审批工作流，进一步增强了系统的实用性和安全性。
 
 [本节为总结，不直接分析具体文件]
 
@@ -349,9 +378,11 @@ PRELOAD --> DOMAIN
 - 安装与运行：参考 README 中的命令与模型配置说明。
 - 本地 Qwen 运行时：独立 Docker Compose 服务，通过 HTTP 暴露 OpenAI 兼容接口。
 - E2E 测试：包含确定性用例与可选的真实模型测试套件。
+- **新增**：XML工具调用测试：完整的单元测试覆盖XML解析、参数解码和工具执行功能。
 - **新增**：Git工具测试：完整的单元测试覆盖git_status和git_diff功能。
 
 章节来源
 - [README.md:1-121](file://README.md#L1-L121)
 - [package.json:1-35](file://package.json#L1-L35)
+- [tests/agentLoop.test.ts:130-210](file://tests/agentLoop.test.ts#L130-L210)
 - [tests/gitTools.test.ts:1-219](file://tests/gitTools.test.ts#L1-L219)

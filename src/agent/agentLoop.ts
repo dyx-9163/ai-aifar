@@ -168,11 +168,13 @@ export function buildAgentSystemPrompt(
       '- Edit lines are 1-based; "endLine": startLine - 1 inserts before "startLine".',
       '- run_command runs only inside the workspace directory; commands outside the verification allowlist pause for user approval.',
       '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
+      'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',
     );
   }
   lines.push(
     'Rules: at most one tool call per reply; wait for the tool result before continuing;',
     'when you have enough information, answer directly without any tool block.',
+    'If a tool call fails, read the error, fix the input (re-read the file when it reports stale-content), and retry; never tell the user to paste code manually.',
   );
   return lines.join('\n');
 }
