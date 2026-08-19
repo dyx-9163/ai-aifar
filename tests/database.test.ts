@@ -112,7 +112,7 @@ describe('sqlite app database', () => {
     const migrated = new DatabaseSync(path);
     try {
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 },
       ]);
     } finally {
       migrated.close();
@@ -131,7 +131,7 @@ describe('sqlite app database', () => {
         baseUrl: 'http://127.0.0.1:8080/v1',
         model: 'Qwen3.5-9B',
         maxConcurrency: 1,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 8192,
         reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
         capabilities: { reasoning: { inputMode: 'toggle', outputModes: ['raw'] } },
         isDefault: true,
@@ -260,7 +260,7 @@ describe('sqlite app database', () => {
         baseUrl: 'http://127.0.0.1:8080/v1',
         model: 'Qwen3.5-9B',
         maxConcurrency: 1,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 8192,
         reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
         capabilities: { reasoning: { inputMode: 'toggle', outputModes: ['raw'] } },
         isDefault: true,
@@ -316,7 +316,7 @@ describe('sqlite app database', () => {
         },
       ]);
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 },
       ]);
     } finally {
       migrated.close();
@@ -967,6 +967,39 @@ describe('sqlite app database', () => {
         maxOutputTokens: 4096,
         isDefault: false,
       });
+    } finally {
+      second.close();
+    }
+  });
+
+  it('raises legacy profiles stuck on the 2048 output default while keeping deliberate values', () => {
+    const dbPath = createDbPath();
+    const first = openDatabase(dbPath);
+    const legacy = first.saveModelProfile({
+      name: 'Legacy default model',
+      provider: 'openai-compatible',
+      baseUrl: 'https://models.example.com/v1',
+      model: 'legacy-model',
+      maxOutputTokens: 2048,
+    });
+    const deliberate = first.saveModelProfile({
+      name: 'Deliberately small model',
+      provider: 'openai-compatible',
+      baseUrl: 'https://models.example.com/v1',
+      model: 'small-model',
+      maxOutputTokens: 1024,
+    });
+    first.close();
+
+    // Pretend the database predates the raise so the migration reruns on reopen.
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 10').run();
+    raw.close();
+
+    const second = openDatabase(dbPath);
+    try {
+      expect(second.getModelProfileForRuntime(legacy.id)?.maxOutputTokens).toBe(8192);
+      expect(second.getModelProfileForRuntime(deliberate.id)?.maxOutputTokens).toBe(1024);
     } finally {
       second.close();
     }

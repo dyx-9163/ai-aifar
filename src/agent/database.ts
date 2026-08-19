@@ -23,6 +23,7 @@ import type {
   WorkspaceTrustLevel,
 } from '../shared/domain.js';
 import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../shared/modelProfileLimits.js';
 import {
   normalizeMaxConcurrency,
   normalizeMaxOutputTokens,
@@ -950,7 +951,7 @@ class SqliteAppDatabase implements AppDatabase {
         api_key TEXT,
         capabilities TEXT NOT NULL,
         max_concurrency INTEGER NOT NULL DEFAULT 1,
-        max_output_tokens INTEGER NOT NULL DEFAULT 2048,
+        max_output_tokens INTEGER NOT NULL DEFAULT 8192,
         is_default INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -993,13 +994,21 @@ class SqliteAppDatabase implements AppDatabase {
     this.applyMigration(6, () => this.ensureColumn(
       'model_profiles',
       'max_output_tokens',
-      'ALTER TABLE model_profiles ADD COLUMN max_output_tokens INTEGER NOT NULL DEFAULT 2048',
+      'ALTER TABLE model_profiles ADD COLUMN max_output_tokens INTEGER NOT NULL DEFAULT 8192',
     ));
     this.applyMigration(8, () => this.ensureColumn('approvals', 'file_change', 'ALTER TABLE approvals ADD COLUMN file_change TEXT'));
     this.applyMigration(7, () => this.repairOrSeedLocalQwenProfile());
     this.applyMigration(9, () => {
       this.ensureColumn('threads', 'workspace_id', 'ALTER TABLE threads ADD COLUMN workspace_id TEXT');
       this.ensureColumn('threads', 'pinned', 'ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+    });
+    this.applyMigration(10, () => {
+      // The old 2048 product default truncated any agent rewrite larger than
+      // ~2k tokens and sent turns into retry loops; raise only the profiles
+      // still sitting on that exact default so deliberate user choices survive.
+      this.db
+        .prepare('UPDATE model_profiles SET max_output_tokens = :raised, updated_at = :updatedAt WHERE max_output_tokens = 2048')
+        .run({ raised: DEFAULT_MAX_OUTPUT_TOKENS, updatedAt: new Date().toISOString() });
     });
     this.interruptUnfinishedTurns();
   }

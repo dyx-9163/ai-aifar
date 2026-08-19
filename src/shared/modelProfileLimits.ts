@@ -1,2 +1,2 @@
-export const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 export const MAX_OUTPUT_TOKENS = 32768;

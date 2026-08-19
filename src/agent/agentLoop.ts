@@ -481,7 +481,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         if (readPath) {
           const count = (readCounts.get(readPath) ?? 0) + 1;
           readCounts.set(readPath, count);
-          if (count === MAX_REPEAT_READS) {
+          if (count % MAX_REPEAT_READS === 0) {
             // Reading the same file over and over without writing burns the turn;
             // force the model to act on the context it already has.
             const note = `[harness] You have read "${readPath}" ${count} times without applying changes. Stop re-reading: apply the edits now with apply_patch (split large rewrites into ~120-line replacements), or answer with what you already know; use startLine/endLine only for a single missing range.`;

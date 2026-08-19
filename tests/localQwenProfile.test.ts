@@ -12,7 +12,7 @@ describe('local Qwen profile preset', () => {
       baseUrl: 'http://127.0.0.1:8080/v1',
       model: 'Qwen3.5-9B',
       maxConcurrency: 1,
-      maxOutputTokens: 2048,
+      maxOutputTokens: 8192,
       reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
       capabilities: { reasoning: { inputMode: 'toggle', outputModes: ['raw'] } },
     });

@@ -45,7 +45,7 @@ with a 16,384-token total context capacity. `LLAMA_CTX_SIZE` is shared across
 all slots: to operate two 16,384-token slots, set `LLAMA_PARALLEL=2` and
 `LLAMA_CTX_SIZE=32768`. This increases K/V-cache memory substantially.
 
-`LLAMA_N_PREDICT=2048` remains a server-side generation cap.
+`LLAMA_N_PREDICT=8192` remains a server-side generation cap.
 
 Stopping or exiting Electron never starts, stops, or otherwise manages this
 runtime. Operators manage the Compose project explicitly with the commands
