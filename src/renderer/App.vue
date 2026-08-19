@@ -220,6 +220,7 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
       @back="view = 'chat'"
       @delete-model-profile="app.deleteModelProfile"
       @delete-workspace="app.deleteWorkspace"
+      @set-workspace-trust="app.updateWorkspaceTrust"
       @add-workspace="openWorkspaceDialog"
       @select-model-profile="app.selectModelProfile"
       @set-language="app.setLanguage"

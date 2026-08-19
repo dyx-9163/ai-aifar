@@ -283,12 +283,17 @@ describe('desktop protocol guards', () => {
     expect(isDesktopRequest({ type: 'workspace.register', path: 'd:\\projects\\demo', trustLevel: 'read-only' })).toBe(true);
     expect(isDesktopRequest({ type: 'workspace.register', path: 'd:\\projects\\demo', trustLevel: 'read-write' })).toBe(true);
     expect(isDesktopRequest({ type: 'workspace.delete', workspaceId: 'workspace-1' })).toBe(true);
+    expect(isDesktopRequest({ type: 'workspace.setTrust', workspaceId: 'workspace-1', trustLevel: 'read-write' })).toBe(true);
+    expect(isDesktopRequest({ type: 'workspace.setTrust', workspaceId: 'workspace-1', trustLevel: 'read-only' })).toBe(true);
   });
 
   it('rejects malformed workspace requests', () => {
     expect(isDesktopRequest({ type: 'workspace.register', path: '', trustLevel: 'read-only' })).toBe(false);
     expect(isDesktopRequest({ type: 'workspace.register', path: 'd:\\projects\\demo', trustLevel: 'full-access' })).toBe(false);
     expect(isDesktopRequest({ type: 'workspace.delete', workspaceId: '' })).toBe(false);
+    expect(isDesktopRequest({ type: 'workspace.setTrust', workspaceId: '', trustLevel: 'read-write' })).toBe(false);
+    expect(isDesktopRequest({ type: 'workspace.setTrust', workspaceId: 'workspace-1', trustLevel: 'full-access' })).toBe(false);
+    expect(isDesktopRequest({ type: 'workspace.setTrust', workspaceId: 'workspace-1' })).toBe(false);
   });
 
   it('accepts a streamed message event', () => {

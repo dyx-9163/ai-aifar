@@ -12,6 +12,7 @@ import type {
   ReasoningProtocol,
   RuntimeSettingsInput,
   WorkspaceRecord,
+  WorkspaceTrustLevel,
 } from '../../shared/domain';
 import { isLocalQwenServiceProfile } from '../../shared/localQwenIdentity';
 import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../../shared/modelProfileLimits';
@@ -50,6 +51,7 @@ const emit = defineEmits<{
   back: [];
   deleteModelProfile: [id: string];
   deleteWorkspace: [workspaceId: string];
+  setWorkspaceTrust: [workspaceId: string, trustLevel: WorkspaceTrustLevel];
   addWorkspace: [];
   selectModelProfile: [id?: string];
   setLanguage: [language: LanguagePreference];
@@ -385,6 +387,13 @@ function handleMetricsChange(event: Event): void {
   emit('updateSettings', { showModelMetrics: (event.target as HTMLInputElement).checked });
 }
 
+function handleWorkspaceTrustChange(workspaceId: string, event: Event): void {
+  const value = (event.target as HTMLSelectElement).value as WorkspaceTrustLevel;
+  if (value === 'read-only' || value === 'read-write') {
+    emit('setWorkspaceTrust', workspaceId, value);
+  }
+}
+
 function handleReasoningDisplayChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value as ReasoningDisplayMode;
   if (value === 'auto' || value === 'raw' || value === 'summary') {
@@ -469,9 +478,17 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
               <strong>{{ workspace.displayName }}</strong>
               <small>{{ workspace.canonicalRootPath }}</small>
             </div>
-            <span class="workspace-trust-badge" :data-trust="workspace.trustLevel">
-              {{ workspace.trustLevel === 'read-write' ? t('workspaceReadWrite') : t('workspaceReadOnly') }}
-            </span>
+            <select
+              class="model-select workspace-trust-select"
+              :data-trust="workspace.trustLevel"
+              :value="workspace.trustLevel"
+              :aria-label="t('workspaceTrustLabel')"
+              data-testid="workspace-trust-select"
+              @change="handleWorkspaceTrustChange(workspace.id, $event)"
+            >
+              <option value="read-only">{{ t('workspaceReadOnly') }}</option>
+              <option value="read-write">{{ t('workspaceReadWrite') }}</option>
+            </select>
             <button type="button" class="secondary-button compact" @click="emit('deleteWorkspace', workspace.id)">{{ t('delete') }}</button>
           </li>
         </ul>

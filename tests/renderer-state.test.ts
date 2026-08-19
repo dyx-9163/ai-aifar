@@ -884,6 +884,43 @@ describe('renderer state reducer', () => {
     }
   });
 
+  it('updates a workspace trust level and refreshes the snapshot', async () => {
+    const originalWindow = globalThis.window;
+    let request: { workspaceId: string; trustLevel: string } | undefined;
+    const refreshed = {
+      ...emptyState().snapshot,
+      workspaces: [{
+        id: 'workspace-1', displayName: 'Demo', rootPath: 'D:\\Projects\\demo',
+        canonicalRootPath: 'd:\\projects\\demo', trustLevel: 'read-write' as const,
+        networkPolicy: 'disabled' as const, createdAt: '2026-08-17T00:00:00.000Z',
+        lastOpenedAt: '2026-08-17T00:00:00.000Z',
+      }],
+    };
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          setWorkspaceTrust: async (workspaceId: string, trustLevel: string) => {
+            request = { workspaceId, trustLevel };
+            return refreshed.workspaces[0];
+          },
+          getSnapshot: async () => refreshed,
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      await app.updateWorkspaceTrust('workspace-1', 'read-write');
+      expect(request).toEqual({ workspaceId: 'workspace-1', trustLevel: 'read-write' });
+      expect(app.state.value.snapshot.workspaces).toEqual([
+        expect.objectContaining({ id: 'workspace-1', trustLevel: 'read-write' }),
+      ]);
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it.each([
     { name: 'false', respond: async () => false },
     { name: 'rejection', respond: async () => { throw new Error('agent unavailable'); } },

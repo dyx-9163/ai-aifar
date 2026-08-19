@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.invoke('desktop:request', { type: 'workspace.register', path, trustLevel }),
   deleteWorkspace: (workspaceId: string): Promise<void> =>
     ipcRenderer.invoke('desktop:request', { type: 'workspace.delete', workspaceId }),
+  setWorkspaceTrust: (workspaceId: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord> =>
+    ipcRenderer.invoke('desktop:request', { type: 'workspace.setTrust', workspaceId, trustLevel }),
   subscribe: (listener: (event: AgentEvent) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, value: AgentEvent) => listener(value);
     ipcRenderer.on('agent:event', wrapped);

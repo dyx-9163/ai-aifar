@@ -37,6 +37,7 @@ declare global {
       testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult>;
       registerWorkspace(path: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord>;
       deleteWorkspace(workspaceId: string): Promise<void>;
+      setWorkspaceTrust(workspaceId: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord>;
       subscribe(listener: (event: AgentEvent) => void): () => void;
     };
   }

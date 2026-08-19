@@ -20,6 +20,7 @@ import type {
   UndoableTurnSummary,
   WorkspaceRecord,
   WorkspaceRegistrationInput,
+  WorkspaceTrustLevel,
 } from '../shared/domain.js';
 import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import {
@@ -61,6 +62,7 @@ export interface AppDatabase {
   getModelProfileForRuntime(id?: string): RuntimeModelProfile | undefined;
   registerWorkspace(input: WorkspaceRegistrationInput): WorkspaceRecord;
   deleteWorkspace(workspaceId: string): void;
+  setWorkspaceTrust(workspaceId: string, trustLevel: WorkspaceTrustLevel): WorkspaceRecord;
   getWorkspace(workspaceId: string): WorkspaceRecord | undefined;
   touchWorkspace(workspaceId: string): void;
   recordFileCheckpoint(input: FileCheckpointInput): void;
@@ -731,6 +733,23 @@ class SqliteAppDatabase implements AppDatabase {
       this.db.prepare('DELETE FROM file_checkpoints WHERE workspace_id = :workspaceId').run({ workspaceId });
       this.db.prepare('UPDATE threads SET workspace_id = NULL WHERE workspace_id = :workspaceId').run({ workspaceId });
     });
+  }
+
+  setWorkspaceTrust(workspaceId: string, trustLevel: WorkspaceTrustLevel): WorkspaceRecord {
+    if (!this.getWorkspace(workspaceId)) {
+      throw new Error(`Workspace ${workspaceId} does not exist.`);
+    }
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.db
+        .prepare('UPDATE workspaces SET trust_level = :trustLevel, updated_at = :updatedAt WHERE id = :workspaceId')
+        .run({ workspaceId, trustLevel, updatedAt: now });
+    });
+    const updated = this.getWorkspace(workspaceId);
+    if (!updated) {
+      throw new Error(`Workspace ${workspaceId} does not exist.`);
+    }
+    return updated;
   }
 
   getWorkspace(workspaceId: string): WorkspaceRecord | undefined {

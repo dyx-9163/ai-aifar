@@ -403,6 +403,11 @@ export function useApp() {
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
   }
 
+  async function updateWorkspaceTrust(workspaceId: string, trustLevel: WorkspaceTrustLevel): Promise<void> {
+    await window.desktop.setWorkspaceTrust(workspaceId, trustLevel);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
   async function undoTurn(turnId: string): Promise<TurnRollbackReport> {
     const report = await window.desktop.undoTurn(turnId);
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
@@ -455,6 +460,7 @@ export function useApp() {
     testModelProfile,
     registerWorkspace,
     deleteWorkspace,
+    updateWorkspaceTrust,
     undoTurn,
     setLanguage,
     updateSettings,

@@ -509,6 +509,7 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
     return registerWorkspaceFromPath(database, { path: message.path, trustLevel: message.trustLevel });
   }
   if (message.type === 'workspace.delete') return database.deleteWorkspace(message.workspaceId);
+  if (message.type === 'workspace.setTrust') return database.setWorkspaceTrust(message.workspaceId, message.trustLevel);
   return undefined;
 }
 

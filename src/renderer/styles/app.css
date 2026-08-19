@@ -1771,16 +1771,12 @@ textarea:disabled {
   overflow-wrap: anywhere;
 }
 
-.workspace-trust-badge {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 10px;
-  font-size: 12px;
+.workspace-trust-select {
   color: var(--muted);
   white-space: nowrap;
 }
 
-.workspace-trust-badge[data-trust='read-write'] {
+.workspace-trust-select[data-trust='read-write'] {
   border-color: var(--accent);
   color: var(--accent);
 }

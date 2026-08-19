@@ -36,6 +36,7 @@ export type DesktopRequest =
   | { type: 'settings.update'; settings: RuntimeSettingsInput }
   | { type: 'workspace.register'; path: string; trustLevel: WorkspaceTrustLevel }
   | { type: 'workspace.delete'; workspaceId: string }
+  | { type: 'workspace.setTrust'; workspaceId: string; trustLevel: WorkspaceTrustLevel }
   | { type: 'language.set'; language: LanguagePreference }
   | { type: 'theme.set'; theme: ThemePreference };
 
@@ -324,6 +325,8 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
       return hasString(value, 'path') && (value.trustLevel === 'read-only' || value.trustLevel === 'read-write');
     case 'workspace.delete':
       return hasString(value, 'workspaceId');
+    case 'workspace.setTrust':
+      return hasString(value, 'workspaceId') && (value.trustLevel === 'read-only' || value.trustLevel === 'read-write');
     case 'language.set':
       return value.language === 'zh-CN' || value.language === 'en-US';
     case 'theme.set':

@@ -793,6 +793,20 @@ describe('workspace registration', () => {
     expect(second.trustLevel).toBe('read-write');
     expect(database.getSnapshot().workspaces).toHaveLength(1);
   });
+
+  it('updates the trust level of a registered workspace without re-registering it', () => {
+    const database = openWorkspaceDatabase();
+    const directory = mkdtempSync(join(tmpdir(), 'private-ai-workspace-'));
+    tempDirectories.push(directory);
+
+    const record = registerWorkspaceFromPath(database, { path: directory, trustLevel: 'read-only' });
+    const upgraded = database.setWorkspaceTrust(record.id, 'read-write');
+
+    expect(upgraded).toMatchObject({ id: record.id, trustLevel: 'read-write' });
+    expect(database.getSnapshot().workspaces).toEqual([
+      expect.objectContaining({ id: record.id, trustLevel: 'read-write' }),
+    ]);
+  });
 });
 
 describe('workspace agent turns', () => {

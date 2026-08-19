@@ -1361,4 +1361,21 @@ describe('workspace persistence', () => {
       db.close();
     }
   });
+
+  it('updates a workspace trust level in place and rejects unknown workspaces', () => {
+    const db = openDatabase(createDbPath());
+    try {
+      const record = db.registerWorkspace(registration);
+      const upgraded = db.setWorkspaceTrust(record.id, 'read-write');
+      expect(upgraded).toMatchObject({ id: record.id, trustLevel: 'read-write' });
+      expect(db.getSnapshot().workspaces[0]).toMatchObject({ id: record.id, trustLevel: 'read-write' });
+
+      const downgraded = db.setWorkspaceTrust(record.id, 'read-only');
+      expect(downgraded.trustLevel).toBe('read-only');
+
+      expect(() => db.setWorkspaceTrust('missing-workspace', 'read-write')).toThrow('does not exist');
+    } finally {
+      db.close();
+    }
+  });
 });
