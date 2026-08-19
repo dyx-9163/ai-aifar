@@ -47,8 +47,8 @@ const CONTINUE_AFTER_LENGTH_PROMPT =
   'Continue from exactly where the previous answer stopped. Do not repeat any previous text. Continue until the task is complete.';
 const CONTEXT_COMPRESSION_NOTICE = '[Local context compaction active]';
 const APPROX_CONTEXT_CHARS_PER_TOKEN = 4;
-const DEFAULT_CONTEXT_TOKEN_WINDOW = 16_384;
-const LONG_CONTEXT_TOKEN_WINDOW = 32_768;
+const DEFAULT_CONTEXT_TOKEN_WINDOW = 32_768;
+const LONG_CONTEXT_TOKEN_WINDOW = 131_072;
 const CONTEXT_COMPRESSION_THRESHOLD = 0.75;
 const MIN_CONTINUATION_SECTION_TOKENS = 768;
 const MAX_REASONING_RECOVERY_ATTEMPTS = 1;
@@ -242,7 +242,7 @@ function initialRequestMessages(
   return compressedInitialRequestMessages(profile, messages, options.compressionLevel ?? 0);
 }
 
-function compressedInitialRequestMessages(
+export function compressedInitialRequestMessages(
   profile: RuntimeModelProfile,
   messages: ChatMessage[],
   compressionLevel: number,
@@ -253,25 +253,44 @@ function compressedInitialRequestMessages(
     Math.floor(contextCompressionSoftLimit(profile) * compressionFactor),
   );
   const systemBudget = Math.max(512, Math.floor(softLimit * 0.12));
-  const userBudget = Math.max(MIN_CONTINUATION_SECTION_TOKENS, Math.floor(softLimit * 0.58));
-  const historyBudget = Math.max(384, softLimit - systemBudget - userBudget);
+  const userBudget = Math.max(MIN_CONTINUATION_SECTION_TOKENS, Math.floor(softLimit * 0.4));
+  const tailBudget = Math.max(MIN_CONTINUATION_SECTION_TOKENS, Math.floor(softLimit * 0.35));
+  const historyBudget = Math.max(384, softLimit - systemBudget - userBudget - tailBudget);
   const latestUser = findLatestUserMessage(messages);
   const systemMessages = compactSystemMessages(messages.filter((message) => message.role === 'system'), systemBudget);
   const historyMessages = messages.filter((message) => message.role !== 'system' && message !== latestUser);
-  const historySummary = compactHistorySummary(historyMessages, historyBudget);
+  // Keep the most recent history messages intact so an agent loop retains its
+  // working set (tool calls plus their observations); only the older prefix is
+  // summarized. Compacting everything but the latest user message made models
+  // forget file contents they had just read and re-read forever.
+  const intactTail: ChatMessage[] = [];
+  let tailTokens = 0;
+  for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
+    const message = historyMessages[index];
+    if (!message) continue;
+    const tokens = estimatedMessagesTokens([message]);
+    if (tailTokens + tokens > tailBudget) break;
+    intactTail.unshift(message);
+    tailTokens += tokens;
+  }
+  const olderMessages = historyMessages.slice(0, historyMessages.length - intactTail.length);
+  const historySummary = compactHistorySummary(olderMessages, historyBudget);
 
   return [
     ...systemMessages,
-    {
-      role: 'user',
-      content: [
-        CONTEXT_COMPRESSION_NOTICE,
-        `The request is near roughly ${Math.round(CONTEXT_COMPRESSION_THRESHOLD * 100)}% of the estimated model context, so earlier chat history was compacted locally before this request.`,
-        'Follow the latest user request below. Use the compacted history only as background; do not repeat it back unless needed.',
-        'Do not mention this compaction unless the user asks about it.',
-        historySummary,
-      ].filter(Boolean).join('\n\n'),
-    },
+    ...(olderMessages.length > 0
+      ? [{
+          role: 'user' as const,
+          content: [
+            CONTEXT_COMPRESSION_NOTICE,
+            `The request is near roughly ${Math.round(CONTEXT_COMPRESSION_THRESHOLD * 100)}% of the estimated model context, so earlier chat history was compacted locally before this request.`,
+            'Follow the latest user request below. Use the compacted history only as background; do not repeat it back unless needed.',
+            'Do not mention this compaction unless the user asks about it.',
+            historySummary,
+          ].filter(Boolean).join('\n\n'),
+        }]
+      : []),
+    ...intactTail,
     ...(latestUser
       ? [{
           role: 'user' as const,

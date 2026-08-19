@@ -1,7 +1,7 @@
 import { ReadableStream } from 'node:stream/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildChatMessages } from '../src/agent/chatContext';
-import { streamChatCompletion, testModelProfile, type ModelStreamHandlers } from '../src/agent/modelProvider';
+import { compressedInitialRequestMessages, streamChatCompletion, testModelProfile, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import type { RuntimeModelProfile } from '../src/agent/database';
 
 const profile: RuntimeModelProfile = {
@@ -1404,6 +1404,39 @@ describe('OpenAI-compatible model provider', () => {
       { role: 'user', content: 'two' },
       { role: 'user', content: 'three' },
     ]);
+  });
+});
+
+describe('context compression for oversized prompts', () => {
+  const agentProfile: RuntimeModelProfile = { ...profile, maxOutputTokens: 8192 };
+
+  it('keeps the recent tool-call/observation tail intact and summarizes only older history', () => {
+    const older = { role: 'user' as const, content: `old context ${'O'.repeat(40_000)}` };
+    const toolCall = { role: 'assistant' as const, content: '```tool\n{"tool": "read_file", "input": {"path": "src/App.vue"}}\n```' };
+    const observation = { role: 'user' as const, content: `Tool result for call "call-1":\n${'R'.repeat(20_000)}` };
+    const latest = { role: 'user' as const, content: `add auto-fire back ${'L'.repeat(500)}` };
+
+    const compressed = compressedInitialRequestMessages(agentProfile, [older, toolCall, observation, latest], 0);
+
+    const noticeIndex = compressed.findIndex((message) =>
+      typeof message.content === 'string' && message.content.includes('[Local context compaction active]'));
+    expect(noticeIndex).toBeGreaterThanOrEqual(0);
+    const notice = compressed[noticeIndex];
+    expect(typeof notice.content === 'string' && notice.content.includes('old context')).toBe(true);
+    expect(typeof notice.content === 'string' && notice.content.includes('O'.repeat(5_000))).toBe(false);
+
+    expect(compressed.indexOf(toolCall)).toBe(noticeIndex + 1);
+    expect(compressed.indexOf(observation)).toBe(noticeIndex + 2);
+    expect(compressed[compressed.length - 1]?.content).toContain('add auto-fire back');
+  });
+
+  it('omits the compaction notice when the recent tail already fits', () => {
+    const toolCall = { role: 'assistant' as const, content: 'reading now' };
+    const latest = { role: 'user' as const, content: 'please continue' };
+    const compressed = compressedInitialRequestMessages(agentProfile, [toolCall, latest], 0);
+    expect(compressed.some((message) =>
+      typeof message.content === 'string' && message.content.includes('[Local context compaction active]'))).toBe(false);
+    expect(compressed[compressed.length - 2]).toBe(toolCall);
   });
 });
 
