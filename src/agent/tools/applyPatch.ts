@@ -137,7 +137,22 @@ function prepareSinglePatch(spec: PatchFileSpec, context: WorkspaceToolContext):
   // (or count a trailing newline as a line); clamp to the real line count so
   // the intent survives instead of failing validation.
   const totalLines = splitLogicalLines(originalText).length;
-  const clampedEdits = edits.map((edit) => ({ ...edit, endLine: Math.min(edit.endLine, totalLines) }));
+  // For a brand-new file the line anchors are meaningless: models usually send
+  // replacement ranges (startLine 1, endLine N) instead of the documented
+  // insertion shape, so accept any edit shape and build the content from the
+  // replacements in startLine order.
+  const effectiveEdits = stat
+    ? edits
+    : [{
+      startLine: 1,
+      endLine: 0,
+      replacement: [...edits]
+        .sort((left, right) => left.startLine - right.startLine)
+        .map((edit) => edit.replacement)
+        .filter((replacement) => replacement.length > 0)
+        .join('\n'),
+    }];
+  const clampedEdits = effectiveEdits.map((edit) => ({ ...edit, endLine: Math.min(edit.endLine, totalLines) }));
   let previousContentHash = '';
   if (stat) {
     previousContentHash = createHash('sha256').update(readFileSync(absolute)).digest('hex');

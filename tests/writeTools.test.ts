@@ -68,6 +68,18 @@ describe('apply_patch', () => {
     expect(readFileSync(join(workspaceRoot, 'src', 'helper.ts'), 'utf-8')).toBe('export const helper = true;');
   });
 
+  it('creates a missing file from replacement-range edits meant for an existing file', async () => {
+    const result = await runTool('apply_patch', {
+      path: 'src/style.css',
+      baseContentHash: '',
+      edits: [{ startLine: 1, endLine: 12, replacement: '.beach { color: sandybrown; }' }],
+    });
+    expect(result.status).toBe('success');
+    const output = result.output as ApplyPatchBatchOutput;
+    expect(output.files[0]).toMatchObject({ path: 'src/style.css', action: 'created', totalLines: 1 });
+    expect(readFileSync(join(workspaceRoot, 'src', 'style.css'), 'utf-8')).toBe('.beach { color: sandybrown; }');
+  });
+
   it('treats a zero-based top-of-file insertion as line 1', async () => {
     const result = await runTool('apply_patch', {
       path: 'src/zero.ts',

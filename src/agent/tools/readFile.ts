@@ -34,7 +34,10 @@ export async function runReadFile(
 
   const stat = safeStat(absolute);
   if (!stat || !stat.isFile()) {
-    throw toolInputError('not-a-file', `Not a file: ${relativePath}`);
+    const hint = !stat
+      ? ' The file does not exist yet; create it with apply_patch ("baseContentHash": "" — any edit shape works for a missing file, the replacements become the file content).'
+      : '';
+    throw toolInputError('not-a-file', `Not a file: ${relativePath}.${hint}`);
   }
   if (stat.size > READ_FILE_MAX_BYTES) {
     throw toolInputError('file-too-large', `File exceeds the ${READ_FILE_MAX_BYTES} byte read limit.`);

@@ -577,6 +577,14 @@ describe('runAgentLoop', () => {
     expect(emitted.filter((event) => event.type === 'answer.delta')).toEqual([]);
   });
 
+  it('steers the model after four reads of the same path without a write', async () => {
+    const readCall = '```tool\n{"tool": "read_file", "input": {"path": "src/main.ts"}}\n```';
+    const { modelCalls, outcome } = await runLoop([readCall, readCall, readCall, readCall, 'Done.'], context);
+    expect(outcome.toolCallsExecuted).toBe(4);
+    expect(modelCalls[3].map((message) => message.content).join('\n')).not.toContain('[harness]');
+    expect(modelCalls[4].map((message) => message.content).join('\n')).toContain('[harness] You have read "src/main.ts" 4 times');
+  });
+
   it('executes tool calls fenced as ordinary code blocks', async () => {
     const generic = '```json\n{"tool": "read_file", "arguments": {"path": "src/main.ts"}}\n```';
     const { emitted, outcome } = await runLoop([generic, 'It exports answer = 42.'], context);

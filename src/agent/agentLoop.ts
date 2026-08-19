@@ -42,6 +42,8 @@ const MAX_MALFORMED_TOOL_STEERS = 2;
 const MAX_EMPTY_ANSWER_STEERS = 2;
 /** How many times per turn the loop runs deterministic post-write verification. */
 const MAX_AUTO_VERIFICATIONS = 3;
+/** Reads of the same path without an intervening write that trigger a steering note. */
+const MAX_REPEAT_READS = 4;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES]);
@@ -308,7 +310,7 @@ export function buildAgentSystemPrompt(
       '- apply_patch: {"path", "baseContentHash", "edits": [{"startLine", "endLine", "replacement"}]} or a batch {"files": [{...}, ...]} that changes several files in one atomic changeset,',
       '- run_command: {"command", "args"?, "timeoutMs"?}',
       'Write rules:',
-      '- To create a brand-new file, call apply_patch with "baseContentHash": "" and a single insertion edit, for example:',
+      '- To create a brand-new file, call apply_patch with "baseContentHash": "" — any edit shape works for a missing file, the replacements become the file content; for example:',
       '  {"tool": "apply_patch", "input": {"path": "src/new.ts", "baseContentHash": "", "edits": [{"startLine": 1, "endLine": 0, "replacement": "file contents here"}]}}',
       '- For existing files, apply_patch requires the contentHash of a fresh read_file of the same file; re-read if it reports stale-content.',
       '- Edit lines are 1-based; "endLine": startLine - 1 inserts before "startLine".',
@@ -348,6 +350,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let malformedToolSteersUsed = 0;
   let emptyAnswerSteersUsed = 0;
   let autoVerificationsUsed = 0;
+  const readCounts = new Map<string, number>();
   let lastMetrics: ModelRunMetrics | undefined;
 
   const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
@@ -438,6 +441,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       toolCallsExecuted += 1;
       let summary = summarizeToolResult(parsed.tool, result);
       let feedback = toolResultMessage(callId, result);
+      if (parsed.tool === 'read_file' && result.status === 'success') {
+        const readPath = typeof parsed.input.path === 'string' ? parsed.input.path : '';
+        if (readPath) {
+          const count = (readCounts.get(readPath) ?? 0) + 1;
+          readCounts.set(readPath, count);
+          if (count === MAX_REPEAT_READS) {
+            // Reading the same file over and over without writing burns the turn;
+            // force the model to act on the context it already has.
+            const note = `[harness] You have read "${readPath}" ${count} times without applying changes. Stop re-reading: apply the edits now with apply_patch (split large rewrites into ~120-line replacements), or answer with what you already know; use startLine/endLine only for a single missing range.`;
+            summary = `${summary}\n${note}`;
+            feedback = `${feedback}\n${note}`;
+          }
+        }
+      }
+      if (parsed.tool === 'apply_patch' && result.status === 'success') {
+        readCounts.clear();
+      }
       if (
         parsed.tool === 'apply_patch' &&
         result.status === 'success' &&
