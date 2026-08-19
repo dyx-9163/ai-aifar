@@ -44,8 +44,8 @@ const MAX_EMPTY_ANSWER_STEERS = 2;
 const MAX_AUTO_VERIFICATIONS = 3;
 /** Reads of the same path without an intervening write that trigger a steering note. */
 const MAX_REPEAT_READS = 4;
-const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
-const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
+const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>((?:(?!<invoke\b)[\s\S])*?)<\/invoke>/g;
+const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>((?:(?!<parameter\b|<invoke\b|<\/invoke\b)[\s\S])*?)<\/parameter>/g;
 const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES]);
 
 export type AgentLoopEmit = (
@@ -134,23 +134,29 @@ export function hasUnparsedToolFence(text: string): boolean {
   return false;
 }
 
-/** Closes unterminated strings and appends missing ]/} closers so truncated JSON can re-parse. */
+/** Closes unterminated strings, escapes raw control characters inside them and appends missing ]/} closers so truncated JSON can re-parse. */
 function repairToolJson(body: string): string {
-  let repaired = body.replace(/,(\s*[}\]])/g, '$1');
+  const cleaned = body.replace(/,(\s*[}\]])/g, '$1');
+  let repaired = '';
   const stack: string[] = [];
   let inString = false;
   let escaped = false;
-  for (const char of repaired) {
+  for (const char of cleaned) {
     if (inString) {
       if (escaped) escaped = false;
       else if (char === '\\') escaped = true;
       else if (char === '"') inString = false;
+      else if (char === '\n') { repaired += '\\n'; continue; }
+      else if (char === '\r') continue;
+      else if (char === '\t') { repaired += '\\t'; continue; }
+      repaired += char;
       continue;
     }
     if (char === '"') inString = true;
     else if (char === '{') stack.push('}');
     else if (char === '[') stack.push(']');
     else if (char === '}' || char === ']') stack.pop();
+    repaired += char;
   }
   if (inString) repaired += '"';
   return repaired + stack.reverse().join('');
@@ -195,7 +201,13 @@ function decodeToolParameter(raw: string): unknown {
   try {
     return JSON.parse(trimmed);
   } catch {
-    return trimmed;
+    // DSML parameters often carry JSON with trailing commas or raw newlines
+    // inside strings; repair before treating the value as plain text.
+    try {
+      return JSON.parse(repairToolJson(trimmed));
+    } catch {
+      return trimmed;
+    }
   }
 }
 
@@ -220,7 +232,7 @@ export function looksLikeManualCodeDump(text: string): boolean {
 export function looksLikeTruncatedToolCall(text: string): boolean {
   const withoutCompleteCalls = normalizeDsmlTags(text)
     .replace(/```tool\s*\n[\s\S]*?```/g, '')
-    .replace(/<invoke\b[\s\S]*?<\/invoke>/g, '');
+    .replace(TOOL_INVOKE_GLOBAL_PATTERN, '');
   return /```tool\b/.test(withoutCompleteCalls) || /<invoke\b/.test(withoutCompleteCalls);
 }
 
@@ -232,7 +244,7 @@ const CODE_DUMP_STEERING_MESSAGE = [
 ].join(' ');
 
 const TRUNCATED_TOOL_STEERING_MESSAGE = [
-  'Your previous reply was cut off by the output limit while a ```tool call was still open, so no tool ran.',
+  'Your previous reply was cut off by the output limit while a tool call was still open, so nothing ran.',
   'Resend the tool call now, but keep each reply small enough to finish: split big file rewrites into several apply_patch edits whose "replacement" is at most ~120 lines each, spreading the work over multiple replies if needed.',
   'Never paste replacement code into the answer.',
 ].join(' ');
@@ -383,6 +395,19 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     iterations = iteration;
     const { text } = await runOnce();
     const parsedCalls = parseToolCalls(text);
+    if (
+      parsedCalls.length > 0 &&
+      truncatedToolSteersUsed < MAX_TRUNCATED_TOOL_STEERS &&
+      looksLikeTruncatedToolCall(text)
+    ) {
+      // The output limit cut a later call mid-parameter; executing the
+      // half-parsed batch would feed garbage errors back into the loop, so
+      // ask for a smaller resend instead.
+      truncatedToolSteersUsed += 1;
+      messages.push({ role: 'assistant', content: text });
+      messages.push({ role: 'user', content: TRUNCATED_TOOL_STEERING_MESSAGE });
+      continue;
+    }
     if (parsedCalls.length === 0) {
       const answer = stripToolFences(text);
       if (truncatedToolSteersUsed < MAX_TRUNCATED_TOOL_STEERS && looksLikeTruncatedToolCall(text)) {

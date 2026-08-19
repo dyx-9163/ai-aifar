@@ -11,6 +11,7 @@ import {
   looksLikeTruncatedToolCall,
   looksLikeUnfulfilledToolIntent,
   parseToolCall,
+  parseToolCalls,
   runAgentLoop,
   stripToolFences,
 } from '../src/agent/agentLoop';
@@ -158,6 +159,36 @@ describe('tool call parsing', () => {
       input: { path: 'src/style.css', edits: [{ startLine: 1, endLine: 0, replacement: '.a { color: red; }' }] },
     });
     expect(stripToolFences(dsml)).toBe('');
+  });
+
+  it('does not let a truncated DSML parameter swallow the next invoke', () => {
+    const broken =
+      '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="apply_patch">\n' +
+      '<｜DSML｜parameter name="files" string="false">[{"path": "src/App.vue", "edits": [{"replacement": "game\nLet me read the current state.\n' +
+      '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="read_file">\n' +
+      '<｜DSML｜parameter name="path" string="true">src/App.vue</｜DSML｜parameter>\n' +
+      '</｜DSML｜invoke>\n</｜DSML｜tool_calls>';
+    expect(parseToolCalls(broken)).toEqual([{ tool: 'read_file', input: { path: 'src/App.vue' } }]);
+    expect(looksLikeTruncatedToolCall(broken)).toBe(true);
+  });
+
+  it('repairs DSML JSON parameters with trailing commas or raw newlines', () => {
+    const trailing =
+      '<｜DSML｜invoke name="apply_patch">\n' +
+      '<｜DSML｜parameter name="edits" string="false">[{"startLine": 1, "endLine": 0, "replacement": "x",},]</｜DSML｜parameter>\n' +
+      '</｜DSML｜invoke>';
+    expect(parseToolCall(trailing)).toEqual({
+      tool: 'apply_patch',
+      input: { edits: [{ startLine: 1, endLine: 0, replacement: 'x' }] },
+    });
+    const rawNewline =
+      '<｜DSML｜invoke name="apply_patch">\n' +
+      '<｜DSML｜parameter name="edits" string="false">[{"startLine": 1, "endLine": 0, "replacement": "a\nb"}]</｜DSML｜parameter>\n' +
+      '</｜DSML｜invoke>';
+    expect(parseToolCall(rawNewline)).toEqual({
+      tool: 'apply_patch',
+      input: { edits: [{ startLine: 1, endLine: 0, replacement: 'a\nb' }] },
+    });
   });
 
   it('detects DSML tool calls cut off mid-parameter', () => {
@@ -604,6 +635,18 @@ describe('runAgentLoop', () => {
     expect(outcome.toolCallsExecuted).toBe(4);
     expect(modelCalls[3].map((message) => message.content).join('\n')).not.toContain('[harness]');
     expect(modelCalls[4].map((message) => message.content).join('\n')).toContain('[harness] You have read "src/main.ts" 4 times');
+  });
+
+  it('steers instead of executing when a later tool call was truncated', async () => {
+    const broken =
+      '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="apply_patch">\n' +
+      '<｜DSML｜parameter name="files" string="false">[{"path": "src/App.vue", "edits": [{"replacement": "game\nLet me read on.\n' +
+      '<｜DSML｜invoke name="read_file">\n' +
+      '<｜DSML｜parameter name="path" string="true">src/App.vue</｜DSML｜parameter>\n' +
+      '</｜DSML｜invoke>\n</｜DSML｜tool_calls>';
+    const { modelCalls, outcome } = await runLoop([broken, 'Done.'], context);
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 0 });
+    expect(modelCalls[1].map((message) => message.content).join('\n')).toContain('cut off by the output limit');
   });
 
   it('executes DeepSeek DSML native tool calls', async () => {
