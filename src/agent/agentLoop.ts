@@ -114,6 +114,8 @@ export function buildAgentSystemPrompt(
     '- workspace_tree: {"path"?, "maxDepth"?, "maxEntries"?}',
     '- read_file: {"path", "startLine"?, "endLine"?}',
     '- search_code: {"query", "glob"?, "caseSensitive"?, "maxResults"?}',
+    '- git_status: {} (working-tree state: branch, staged/unstaged/untracked entries)',
+    '- git_diff: {"path"?, "staged"?} (unified diff of working tree or staged changes)',
   ];
   if (!readOnly) {
     lines.push(

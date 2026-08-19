@@ -11,6 +11,8 @@ export type AgentToolName =
   | 'workspace_tree'
   | 'read_file'
   | 'search_code'
+  | 'git_status'
+  | 'git_diff'
   | 'apply_patch'
   | 'run_command';
 

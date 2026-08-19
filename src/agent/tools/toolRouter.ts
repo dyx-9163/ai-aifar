@@ -25,6 +25,7 @@ import {
 import { toToolError } from './toolInput.js';
 import { previewApplyPatch, runApplyPatch } from './applyPatch.js';
 import { classifyCommand, parseCommandInput, runRunCommand } from './runCommand.js';
+import { runGitDiff, runGitStatus } from './gitTools.js';
 import { runReadFile } from './readFile.js';
 import { runSearchCode } from './searchCode.js';
 import { runWorkspaceTree } from './workspaceTree.js';
@@ -62,12 +63,20 @@ const TOOL_REGISTRY: Record<AgentToolName, ToolExecutor> = {
   workspace_tree: runWorkspaceTree,
   read_file: runReadFile,
   search_code: runSearchCode,
+  git_status: runGitStatus,
+  git_diff: runGitDiff,
   apply_patch: runApplyPatch,
   run_command: runRunCommand,
 };
 
 /** Tools executable without approval in any workspace. */
-export const READ_ONLY_TOOL_NAMES: readonly AgentToolName[] = ['workspace_tree', 'read_file', 'search_code'];
+export const READ_ONLY_TOOL_NAMES: readonly AgentToolName[] = [
+  'workspace_tree',
+  'read_file',
+  'search_code',
+  'git_status',
+  'git_diff',
+];
 
 /** Tools that mutate the workspace or run processes; gated by trust level. */
 export const WRITE_TOOL_NAMES: readonly AgentToolName[] = ['apply_patch', 'run_command'];

@@ -165,7 +165,7 @@ export async function runRunCommand(
   );
 
   const startedAt = Date.now();
-  const run = await spawnWithWindowsFallback(parsed.command, parsed.args, {
+  const run = await runWorkspaceProcess(parsed.command, parsed.args, {
     cwd: context.canonicalRootPath,
     timeoutMs,
     signal: extras.signal,
@@ -194,12 +194,17 @@ interface SpawnOutcome {
 }
 
 /**
+ * Runs a single child process inside the workspace sandbox with timeout,
+ * output byte caps and cancellation support. Shared by `run_command` and the
+ * read-only Git tools so every spawned process goes through the same guard
+ * rails.
+ *
  * Windows ships package managers as `.cmd` shims that `spawn` cannot resolve
  * without a shell. `.exe`/bare names are tried first; `.cmd` failures arrive
  * either synchronously (EINVAL since CVE-2024-27980) or via the async `error`
  * event (ENOENT), and both fall through to the next candidate.
  */
-async function spawnWithWindowsFallback(
+export async function runWorkspaceProcess(
   command: string,
   args: string[],
   options: { cwd: string; timeoutMs: number; signal?: AbortSignal },
