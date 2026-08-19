@@ -103,9 +103,9 @@ export function parsePatchSpecs(rawInput: Record<string, unknown>): PatchFileSpe
 
 /**
  * Validates every patch entry and applies each in memory without touching the
- * disk. Shared by the executor and the approval preview so both always agree
- * on what the write will produce. Preparation is all-or-nothing: one invalid
- * entry rejects the whole batch before any file is written.
+ * disk. Shared by the executor and the router's up-front validation so both
+ * always agree on what the write will produce. Preparation is all-or-nothing:
+ * one invalid entry rejects the whole batch before any file is written.
  */
 export function prepareApplyPatch(
   rawInput: Record<string, unknown>,
@@ -165,7 +165,7 @@ function prepareSinglePatch(spec: PatchFileSpec, context: WorkspaceToolContext):
   };
 }
 
-/** Dry-run used by the approval gate; never writes and never records checkpoints. */
+/** Dry-run used for up-front validation and previews; never writes and never records checkpoints. */
 export function previewApplyPatch(
   rawInput: Record<string, unknown>,
   context: WorkspaceToolContext,

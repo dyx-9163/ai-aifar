@@ -274,16 +274,16 @@ export function buildAgentSystemPrompt(
   ];
   if (!readOnly) {
     lines.push(
-      '- apply_patch: {"path", "baseContentHash", "edits": [{"startLine", "endLine", "replacement"}]} or a batch {"files": [{...}, ...]} that changes several files in one approved changeset,',
+      '- apply_patch: {"path", "baseContentHash", "edits": [{"startLine", "endLine", "replacement"}]} or a batch {"files": [{...}, ...]} that changes several files in one atomic changeset,',
       '- run_command: {"command", "args"?, "timeoutMs"?}',
       'Write rules:',
       '- To create a brand-new file, call apply_patch with "baseContentHash": "" and a single insertion edit, for example:',
       '  {"tool": "apply_patch", "input": {"path": "src/new.ts", "baseContentHash": "", "edits": [{"startLine": 1, "endLine": 0, "replacement": "file contents here"}]}}',
       '- For existing files, apply_patch requires the contentHash of a fresh read_file of the same file; re-read if it reports stale-content.',
       '- Edit lines are 1-based; "endLine": startLine - 1 inserts before "startLine".',
-      '- run_command runs only inside the workspace directory; commands outside the verification allowlist pause for user approval.',
+      '- run_command runs only inside the workspace directory; every command executes automatically in read-write workspaces except forbidden ones, which are blocked.',
       '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
-      '- When several files change together, prefer one apply_patch with a "files" array so the user reviews a single changeset.',
+      '- When several files change together, prefer one apply_patch with a "files" array so related files change together in a single changeset.',
       '- Keep every reply within the output limit: for large rewrites, split the work into several apply_patch edits with replacements of at most ~120 lines instead of one huge edit.',
       '- Promising changes is not acting: a reply that says it will read, replace, or update files but contains no ```tool call changes nothing; either issue the ```tool calls or answer directly.',
       'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',

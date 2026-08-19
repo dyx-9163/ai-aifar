@@ -342,7 +342,7 @@ describe('runAgentLoop', () => {
     expect(outcome.metrics?.durationMs).toBe(12);
   });
 
-  it('applies patches in a read-write workspace after approval', async () => {
+  it('applies patches automatically in a read-write workspace', async () => {
     const readWrite = { ...context, trustLevel: 'read-write' as const };
     const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
     const patchCall = JSON.stringify({
@@ -360,7 +360,7 @@ describe('runAgentLoop', () => {
         return true;
       },
     });
-    expect(approvals).toEqual(['Edit file: src/main.ts']);
+    expect(approvals).toEqual([]);
     expect(readFileSync(join(context.canonicalRootPath, 'src', 'main.ts'), 'utf-8')).toBe(
       'export const answer = 43;\n',
     );
@@ -381,7 +381,7 @@ describe('runAgentLoop', () => {
     ]);
   });
 
-  it('applies a batch apply_patch changeset with one approval', async () => {
+  it('applies a batch apply_patch changeset without approval', async () => {
     const readWrite = { ...context, trustLevel: 'read-write' as const };
     const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
     const batchCall = JSON.stringify({
@@ -407,7 +407,7 @@ describe('runAgentLoop', () => {
         return true;
       },
     });
-    expect(approvals).toEqual(['Edit 2 files']);
+    expect(approvals).toEqual([]);
     expect(readFileSync(join(context.canonicalRootPath, 'src', 'main.ts'), 'utf-8')).toBe(
       'export const answer = 43;\n',
     );
@@ -479,13 +479,13 @@ describe('runAgentLoop', () => {
     );
   });
 
-  it('pauses gated commands for approval and reports rejection to the model', async () => {
+  it('runs gated commands automatically in read-write workspaces', async () => {
     const readWrite = { ...context, trustLevel: 'read-write' as const };
     const requests: string[] = [];
-    const { emitted, modelCalls } = await runLoop(
+    const { modelCalls } = await runLoop(
       [
         fencedToolCall('{"tool": "run_command", "input": {"command": "node", "args": ["--version"]}}'),
-        'Understood, skipping the check.',
+        'Node is available.',
       ],
       readWrite,
       {
@@ -495,22 +495,7 @@ describe('runAgentLoop', () => {
         },
       },
     );
-    expect(requests).toEqual(['Run command: node']);
-    const output = emitted[1] as unknown as { output: string };
-    expect(output.output).toContain('was not executed');
-    expect(String(modelCalls[1].at(-1)?.content)).toContain('"status": "cancelled"');
-  });
-
-  it('runs gated commands after the user approves', async () => {
-    const readWrite = { ...context, trustLevel: 'read-write' as const };
-    const { modelCalls } = await runLoop(
-      [
-        fencedToolCall('{"tool": "run_command", "input": {"command": "node", "args": ["--version"]}}'),
-        'Node is available.',
-      ],
-      readWrite,
-      { requestApproval: async () => true },
-    );
+    expect(requests).toEqual([]);
     const toolResult = String(modelCalls[1].at(-1)?.content);
     expect(toolResult).toContain('"status": "success"');
     expect(toolResult).toContain('"exitCode": 0');

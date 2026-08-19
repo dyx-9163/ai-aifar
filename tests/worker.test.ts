@@ -684,25 +684,7 @@ ${JSON.stringify({ tool: 'read_file', input: { path: 'index.html' } })}
       workspaceId: workspace.id,
     });
 
-    const approver = (async () => {
-      for (let index = 0; index < 2; index += 1) {
-        await eventually(() => {
-          if (!harness.database.getSnapshot().approvals.some((approval) => approval.status === 'pending')) {
-            const turn = harness.database.getSnapshot().turns.find((candidate) => candidate.id === turnId);
-            const detail = harness.events.map((event) => {
-              const record = event as Record<string, unknown>;
-              return `${event.type}:${String(record.title ?? '').slice(0, 20)}:${String(record.output ?? '').slice(0, 60)}`;
-            }).join(' | ');
-            throw new Error(`no pending approval; status=${turn?.status}; detail=${detail}`);
-          }
-        });
-        const pending = harness.database.getSnapshot().approvals.find((approval) => approval.status === 'pending');
-        expect(harness.runtime.respondApproval(pending!.id, true)).toBe(true);
-      }
-    })();
-
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
-    await approver;
     expect(typesFor(harness.events, turnId)).not.toContain('turn.failed');
     expect(readFileSync(join(workspaceDirectory, 'src', 'App.vue'), 'utf-8')).toBe(newApp);
     expect(readFileSync(join(workspaceDirectory, 'index.html'), 'utf-8')).toBe(newHtml);
@@ -1005,7 +987,7 @@ describe('workspace agent turns', () => {
     harness.database.close();
   });
 
-  it('pauses a gated command for approval and resumes after the user responds', async () => {
+  it('runs a gated command automatically in a read-write workspace', async () => {
     const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-approvalws-'));
     tempDirectories.push(workspaceDirectory);
     writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
@@ -1023,7 +1005,7 @@ describe('workspace agent turns', () => {
       return metrics();
     });
     const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
-    const thread = harness.database.createThread('Approval flow');
+    const thread = harness.database.createThread('Auto-run flow');
 
     const { turnId } = harness.runtime.startTurn({
       type: 'turn.start',
@@ -1033,25 +1015,16 @@ describe('workspace agent turns', () => {
       workspaceId: workspace.id,
     });
 
-    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
-    const approvalEvent = harness.events.find(
-      (event) => event.turnId === turnId && event.type === 'approval.required',
-    ) as Extract<AgentEvent, { type: 'approval.required' }>;
-    expect(approvalEvent.title).toContain('node');
-    expect(harness.runtime.respondApproval(approvalEvent.approvalId, true)).toBe(true);
-
-    // The approved command spawns a real process, so poll with macrotask waits.
+    // The auto-run command spawns a real process, so poll with macrotask waits.
     await waitForTurn(harness.events, turnId, 'turn.completed');
     expect(modelRuns).toBe(2);
-    const approval = harness.database
-      .getSnapshot()
-      .approvals.find((candidate) => candidate.id === approvalEvent.approvalId);
-    expect(approval?.status).toBe('approved');
+    expect(typesFor(harness.events, turnId)).not.toContain('approval.required');
+    expect(harness.database.getSnapshot().approvals).toHaveLength(0);
     harness.database.close();
   }, 15_000);
 
-  it('skips execution and finishes the turn when the user rejects approval', async () => {
-    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-rejectws-'));
+  it('blocks forbidden commands without executing them', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-forbiddenws-'));
     tempDirectories.push(workspaceDirectory);
     writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
 
@@ -1060,36 +1033,27 @@ describe('workspace agent turns', () => {
       modelRuns += 1;
       if (modelRuns === 1) {
         await handlers.onAnswerDelta(
-          '```tool\n{"tool": "run_command", "input": {"command": "node", "args": ["--version"]}}\n```',
+          '```tool\n{"tool": "run_command", "input": {"command": "rm", "args": ["-rf", "."]}}\n```',
         );
       } else {
-        await handlers.onAnswerDelta('Understood, skipping the check.');
+        await handlers.onAnswerDelta('Understood, not deleting anything.');
       }
       return metrics();
     });
     const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
-    const thread = harness.database.createThread('Rejection flow');
+    const thread = harness.database.createThread('Forbidden flow');
 
     const { turnId } = harness.runtime.startTurn({
       type: 'turn.start',
       threadId: thread.id,
-      text: 'Check the node runtime',
+      text: 'Clean the workspace',
       modelProfileId: harness.profile.id,
       workspaceId: workspace.id,
     });
 
-    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
-    const approvalEvent = harness.events.find(
-      (event) => event.turnId === turnId && event.type === 'approval.required',
-    ) as Extract<AgentEvent, { type: 'approval.required' }>;
-    expect(harness.runtime.respondApproval(approvalEvent.approvalId, false)).toBe(true);
-
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
     expect(modelRuns).toBe(2);
-    const approval = harness.database
-      .getSnapshot()
-      .approvals.find((candidate) => candidate.id === approvalEvent.approvalId);
-    expect(approval?.status).toBe('rejected');
+    expect(existsSync(join(workspaceDirectory, 'README.md'))).toBe(true);
     harness.database.close();
   });
 
@@ -1120,13 +1084,6 @@ describe('workspace agent turns', () => {
       modelProfileId: harness.profile.id,
       workspaceId: workspace.id,
     });
-
-    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
-    const approvalEvent = harness.events.find(
-      (event) => event.turnId === turnId && event.type === 'approval.required',
-    ) as Extract<AgentEvent, { type: 'approval.required' }>;
-    expect(approvalEvent.fileChanges?.[0]).toMatchObject({ relativePath: 'hello.ts', action: 'created' });
-    expect(harness.runtime.respondApproval(approvalEvent.approvalId, true)).toBe(true);
 
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
     const createdFile = join(workspace.canonicalRootPath, 'hello.ts');

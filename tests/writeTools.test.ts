@@ -41,8 +41,6 @@ async function runTool(toolName: string, input: unknown, options: Parameters<typ
   return executeAgentToolCall(buildCall(toolName, input), context, options);
 }
 
-const approveAll = { requestApproval: async () => true };
-
 beforeEach(() => {
   workspaceRoot = mkdtempSync(join(tmpdir(), 'private-ai-writetools-'));
   tempDirectories.push(workspaceRoot);
@@ -63,7 +61,7 @@ describe('apply_patch', () => {
     const result = await runTool('apply_patch', {
       path: 'src/helper.ts',
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }],
-    }, approveAll);
+    });
     expect(result.status).toBe('success');
     const output = result.output as ApplyPatchBatchOutput;
     expect(output.files[0]).toMatchObject({ path: 'src/helper.ts', action: 'created', totalLines: 1 });
@@ -74,55 +72,39 @@ describe('apply_patch', () => {
     const result = await runTool('apply_patch', {
       path: 'src/zero.ts',
       edits: [{ startLine: 0, endLine: 0, replacement: 'export const zero = true;' }],
-    }, approveAll);
+    });
     expect(result.status).toBe('success');
     expect(result.output).toMatchObject({ files: [{ path: 'src/zero.ts', action: 'created' }] });
     expect(readFileSync(join(workspaceRoot, 'src', 'zero.ts'), 'utf-8')).toBe('export const zero = true;');
   });
 
-  it('reports approval-required and writes nothing when no responder is available', async () => {
+  it('executes writes automatically without any approval hook', async () => {
     const result = await runTool('apply_patch', {
       path: 'src/gated.ts',
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const gated = true;' }],
     });
-    expect(result.status).toBe('approval-required');
-    expect(existsSync(join(workspaceRoot, 'src', 'gated.ts'))).toBe(false);
+    expect(result.status).toBe('success');
+    expect(readFileSync(join(workspaceRoot, 'src', 'gated.ts'), 'utf-8')).toBe('export const gated = true;');
   });
 
-  it('hands the approval request a diff preview and cancels on rejection', async () => {
-    const requests: ToolApprovalRequest[] = [];
+  it('auto-executes writes even when an approval hook would reject', async () => {
     const result = await runTool('apply_patch', {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
-    }, { requestApproval: async (request) => { requests.push(request); return false; } });
-
-    expect(requests).toHaveLength(1);
-    expect(requests[0].title).toBe('Edit file: src/main.ts');
-    expect(requests[0].fileChanges).toHaveLength(1);
-    expect(requests[0].fileChanges?.[0]).toMatchObject({ relativePath: 'src/main.ts', action: 'modified' });
-    expect(requests[0].fileChanges?.[0]?.lines).toEqual([
-      { kind: 'removed', text: 'export const answer = 41;' },
-      { kind: 'added', text: 'export const answer = 42;' },
-      { kind: 'context', text: 'export const label = "answer";' },
-    ]);
-
-    expect(result.status).toBe('cancelled');
-    expect(result.error?.code).toBe('approval-rejected');
-    expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(MAIN_TS);
+    }, { requestApproval: async () => false });
+    expect(result.status).toBe('success');
+    expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(
+      'export const answer = 42;\nexport const label = "answer";\n',
+    );
   });
 
-  it('classifies apply_patch as an approval with a created-file preview', () => {
+  it('classifies apply_patch as allow in read-write workspaces', () => {
     const policy = classifyToolCall(buildCall('apply_patch', {
       path: 'src/new.ts',
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const fresh = true;' }],
     }), context);
-    expect(policy.kind).toBe('approval');
-    if (policy.kind !== 'approval') return;
-    expect(policy.title).toBe('Edit file: src/new.ts');
-    expect(policy.fileChanges).toHaveLength(1);
-    expect(policy.fileChanges?.[0]).toMatchObject({ relativePath: 'src/new.ts', action: 'created' });
-    expect(policy.fileChanges?.[0]?.lines).toEqual([{ kind: 'added', text: 'export const fresh = true;' }]);
+    expect(policy).toEqual({ kind: 'allow' });
   });
 
   it('modifies a file when the baseline hash matches', async () => {
@@ -130,7 +112,7 @@ describe('apply_patch', () => {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
-    }, approveAll);
+    });
     expect(result.status).toBe('success');
     const output = result.output as ApplyPatchBatchOutput;
     expect(output.files[0].action).toBe('modified');
@@ -145,17 +127,17 @@ describe('apply_patch', () => {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 2, endLine: 2, replacement: 'export const label = "updated";' }],
-    }, approveAll);
+    });
     expect(first.status).toBe('success');
     const second = await runTool('apply_patch', {
       path: 'src/main.ts',
       baseContentHash: (first.output as ApplyPatchBatchOutput).files[0].contentHash,
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
-    }, approveAll);
+    });
     expect(second.status).toBe('success');
   });
 
-  it('applies a batch patch to several files with a single approval', async () => {
+  it('applies a batch patch to several files without approval', async () => {
     const requests: ToolApprovalRequest[] = [];
     const result = await runTool('apply_patch', {
       files: [
@@ -169,9 +151,7 @@ describe('apply_patch', () => {
     }, { requestApproval: async (request) => { requests.push(request); return true; } });
 
     expect(result.status).toBe('success');
-    expect(requests).toHaveLength(1);
-    expect(requests[0].title).toBe('Edit 2 files');
-    expect(requests[0].fileChanges?.map((change) => change.relativePath)).toEqual(['src/main.ts', 'src/helper.ts']);
+    expect(requests).toHaveLength(0);
     const output = result.output as ApplyPatchBatchOutput;
     expect(output.files.map((file) => file.path)).toEqual(['src/main.ts', 'src/helper.ts']);
     expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(
@@ -186,7 +166,7 @@ describe('apply_patch', () => {
         { path: 'src/helper.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }] },
         { path: 'src/main.ts', baseContentHash: sha256('outdated content'), edits: [{ startLine: 1, endLine: 1, replacement: 'tampered' }] },
       ],
-    }, approveAll);
+    });
     expect(result.status).toBe('error');
     expect(result.error?.code).toBe('stale-content');
     expect(existsSync(join(workspaceRoot, 'src', 'helper.ts'))).toBe(false);
@@ -199,7 +179,7 @@ describe('apply_patch', () => {
         { path: 'src/a.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'a' }] },
         { path: 'src/a.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'b' }] },
       ],
-    }, approveAll);
+    });
     expect(duplicate.status).toBe('error');
     expect(duplicate.error?.code).toBe('invalid-input');
 
@@ -208,7 +188,7 @@ describe('apply_patch', () => {
         path: `src/f${index}.ts`,
         edits: [{ startLine: 1, endLine: 0, replacement: 'x' }],
       })),
-    }, approveAll);
+    });
     expect(oversized.status).toBe('error');
     expect(oversized.error?.code).toBe('invalid-input');
   });
@@ -216,24 +196,24 @@ describe('apply_patch', () => {
   it('normalizes common model input mistakes in apply_patch', async () => {
     const singleObjectFiles = await runTool('apply_patch', {
       files: { path: 'src/extra.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'export const extra = 1;' }] },
-    }, approveAll);
+    });
     expect(singleObjectFiles.status).toBe('success');
 
     const clamped = await runTool('apply_patch', {
       path: 'src/extra.ts',
       baseContentHash: sha256('export const extra = 1;'),
       edits: [{ startLine: 1, endLine: 999, replacement: 'export const extra = 2;' }],
-    }, approveAll);
+    });
     expect(clamped.status).toBe('success');
 
     const coerced = await runTool('apply_patch', {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: { startLine: '1', endLine: '1', replacement: 'export const answer = 43;' },
-    }, approveAll);
+    });
     expect(coerced.status).toBe('success');
 
-    const empty = await runTool('apply_patch', { path: 'src/main.ts', edits: [] }, approveAll);
+    const empty = await runTool('apply_patch', { path: 'src/main.ts', edits: [] });
     expect(empty.status).toBe('error');
     expect(empty.error?.code).toBe('invalid-input');
     expect(empty.error?.message).toContain('non-empty array');
@@ -250,13 +230,13 @@ describe('apply_patch', () => {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
-    }), recordingContext, approveAll);
+    }), recordingContext);
     expect(modified.status).toBe('success');
 
     const created = await executeAgentToolCall(buildCall('apply_patch', {
       path: 'src/helper.ts',
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }],
-    }), recordingContext, approveAll);
+    }), recordingContext);
     expect(created.status).toBe('success');
 
     expect(recorded).toHaveLength(2);
@@ -332,7 +312,7 @@ describe('command policy', () => {
     expect(classifyCommand('pnpm', ['run', 'build'])).toBe('allow');
   });
 
-  it('sends mutating or unknown commands to approval', () => {
+  it('flags mutating or unknown commands as gated (the router auto-runs them in read-write workspaces)', () => {
     expect(classifyCommand('git', ['push'])).toBe('approval');
     expect(classifyCommand('git', ['reset', '--hard'])).toBe('approval');
     expect(classifyCommand('npm', ['install', 'lodash'])).toBe('approval');
@@ -365,36 +345,27 @@ describe('command policy', () => {
 });
 
 describe('run_command execution', () => {
-  it('reports approval-required when no approval hook is available', async () => {
+  it('runs gated commands automatically without an approval hook', async () => {
     const result = await runTool('run_command', { command: 'node', args: ['--version'] });
-    expect(result.status).toBe('approval-required');
-    expect(result.output).toBeUndefined();
+    expect(result.status).toBe('success');
+    const output = result.output as RunCommandOutput;
+    expect(output.exitCode).toBe(0);
+    expect(output.timedOut).toBe(false);
   });
 
-  it('runs an approved command inside the workspace directory', async () => {
+  it('runs gated commands inside the workspace directory without asking', async () => {
     const approvals: Array<{ title: string }> = [];
     const result = await runTool(
       'run_command',
       { command: 'node', args: ['-e', 'console.log(process.cwd())'] },
       { requestApproval: async (request) => (approvals.push(request), true) },
     );
-    expect(approvals).toHaveLength(1);
-    expect(approvals[0].title).toContain('node');
+    expect(approvals).toHaveLength(0);
     expect(result.status).toBe('success');
     const output = result.output as RunCommandOutput;
     expect(output.exitCode).toBe(0);
     expect(output.stdout.trim()).toBe(context.canonicalRootPath);
     expect(output.timedOut).toBe(false);
-  });
-
-  it('returns a cancelled result when the user rejects approval', async () => {
-    const result = await runTool(
-      'run_command',
-      { command: 'node', args: ['--version'] },
-      { requestApproval: async () => false },
-    );
-    expect(result.status).toBe('cancelled');
-    expect(result.error?.code).toBe('approval-rejected');
   });
 
   it('auto-runs allowlisted commands without asking for approval', async () => {
@@ -415,7 +386,6 @@ describe('run_command execution', () => {
     const result = await runTool(
       'run_command',
       { command: 'node', args: ['-e', 'setTimeout(function keepAlive() {}, 30000)'], timeoutMs: 300 },
-      { requestApproval: async () => true },
     );
     expect(result).toEqual(expect.objectContaining({ status: 'success' }));
     const output = result.output as RunCommandOutput;

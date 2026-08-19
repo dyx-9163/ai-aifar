@@ -3,9 +3,9 @@
  *
  * Responsibilities:
  * - Route `AgentToolCall` to the registered executor for its tool name.
- * - Enforce the workspace trust policy: read-only tools run freely, write
- *   tools require read-write trust, and non-allowlisted commands pause for
- *   user approval before executing.
+ * - Enforce the workspace trust policy: read-only tools run freely, and in
+ *   read-write workspaces writes and commands execute automatically; only
+ *   forbidden commands and read-only workspaces are denied outright.
  * - Normalize every failure into a structured `AgentToolResult`, so callers
  *   never receive raw exceptions or unclassified text.
  * - Measure and attach `durationMs` on every result.
@@ -112,23 +112,13 @@ export function classifyToolCall(call: AgentToolCall, context: WorkspaceToolCont
     };
   }
   if (call.toolName === 'apply_patch') {
-    let previews: FileChangePreview[];
     try {
-      previews = previewApplyPatch(call.input as Record<string, unknown>, context);
+      // Validate the changeset up front so malformed input is denied, not executed.
+      previewApplyPatch(call.input as Record<string, unknown>, context);
     } catch (error) {
       return { kind: 'deny', error: toToolError(error) };
     }
-    const paths = previews.map((preview) => preview.relativePath);
-    return {
-      kind: 'approval',
-      title: previews.length === 1 ? `Edit file: ${paths[0]}` : `Edit ${previews.length} files`,
-      description: previews.length === 1
-        ? previews[0].action === 'created'
-          ? `The agent wants to create "${paths[0]}" in the workspace.`
-          : `The agent wants to modify "${paths[0]}" in the workspace.`
-        : `The agent wants to change ${previews.length} files in the workspace: ${paths.join(', ')}.`,
-      fileChanges: previews,
-    };
+    return { kind: 'allow' };
   }
   if (call.toolName === 'run_command') {
     let parsed;
@@ -148,13 +138,7 @@ export function classifyToolCall(call: AgentToolCall, context: WorkspaceToolCont
         },
       };
     }
-    if (verdict === 'allow') return { kind: 'allow' };
-    const commandLine = [parsed.command, ...parsed.args].join(' ');
-    return {
-      kind: 'approval',
-      title: `Run command: ${parsed.command}`,
-      description: `The agent wants to run "${commandLine}" inside the workspace.`,
-    };
+    return { kind: 'allow' };
   }
   return {
     kind: 'deny',
