@@ -608,6 +608,34 @@ describe('worker turn runtime', () => {
     harness.database.close();
   });
 
+  it('fails the turn when the iteration budget is exhausted instead of reporting completion', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-budgetws-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      await handlers.onAnswerDelta('```tool\n{"tool": "workspace_tree", "input": {}}\n```');
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Budget exhausted');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Rewrite everything',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.failed'));
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.completed');
+    const failed = harness.database.getSnapshot().turns.find((turn) => turn.id === turnId);
+    expect(failed).toMatchObject({ status: 'failed', incomplete: true });
+    expect(failed?.error).toContain('Iteration budget exhausted before the task finished and no files were changed');
+    harness.database.close();
+  });
+
   it('keeps quote and backslash API-key encodings out of SQLite and renderer events', async () => {
     const specialKey = ['worker key-', '"', '\\', '?/[]'].join('');
     const escapedKey = JSON.stringify(specialKey).slice(1, -1);

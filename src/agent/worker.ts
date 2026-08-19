@@ -237,6 +237,8 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     if (!context) return;
 
     let finalMetrics: ModelRunMetrics | undefined;
+    let budgetExhausted = false;
+    let fileChangesRecorded = 0;
     try {
       let outcome: 'completed' | 'awaiting-approval' = 'completed';
       if (profile) {
@@ -266,6 +268,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
               canonicalRootPath: workspace.canonicalRootPath,
               trustLevel: workspace.trustLevel,
               recordFileChange: (change) => {
+                fileChangesRecorded += 1;
                 database.recordFileCheckpoint({
                   workspaceId: workspace.id,
                   turnId: turn.turnId,
@@ -291,6 +294,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
             },
           });
           finalMetrics = loopOutcome.metrics;
+          budgetExhausted = loopOutcome.budgetExhausted;
         } else {
           const handlers: ModelStreamHandlers = {
             onAnswerDelta: (delta) => context.next({ type: 'answer.delta', text: delta }),
@@ -333,6 +337,21 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
 
       if (outcome === 'awaiting-approval') return;
       throwIfAborted(signal);
+      if (budgetExhausted) {
+        // The loop never reached a natural final answer; reporting completion
+        // would claim success for work that may not have happened.
+        const message = fileChangesRecorded > 0
+          ? `Iteration budget exhausted before the task finished; ${fileChangesRecorded} file change(s) were applied before the budget ran out. Review the answer above and send a follow-up to continue.`
+          : 'Iteration budget exhausted before the task finished and no files were changed. Review the answer above and send a follow-up to continue.';
+        database.failTurn(turn.turnId, now(), message);
+        try {
+          await context.next({ type: 'turn.failed', error: message });
+        } finally {
+          approvalResolvers.delete(`approval-${turn.turnId}`);
+          active.delete(turn.turnId);
+        }
+        return;
+      }
       if (!database.completeTurn(turn.turnId, now(), finalMetrics)) {
         if (signal.aborted) throw abortReason(signal);
         throw new Error(`Turn "${turn.turnId}" is no longer running.`);

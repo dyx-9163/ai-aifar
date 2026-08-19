@@ -69,6 +69,8 @@ export interface AgentLoopOutcome {
   metrics?: ModelRunMetrics;
   iterations: number;
   toolCallsExecuted: number;
+  /** True when the iteration budget ran out and the final answer was forced. */
+  budgetExhausted: boolean;
 }
 
 export interface ParsedToolCall {
@@ -284,7 +286,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         continue;
       }
       if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
-      return { metrics: lastMetrics, iterations, toolCallsExecuted };
+      return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: false };
     }
 
     messages.push({ role: 'assistant', content: text });
@@ -317,7 +319,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   iterations += 1;
   const answer = stripToolFences(text);
   if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
-  return { metrics: lastMetrics, iterations, toolCallsExecuted };
+  return { metrics: lastMetrics, iterations, toolCallsExecuted, budgetExhausted: true };
 }
 
 function toolResultMessage(callId: string, result: AgentToolResult): string {

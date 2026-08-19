@@ -190,6 +190,7 @@ describe('runAgentLoop', () => {
   it('answers directly when the model issues no tool call', async () => {
     const { emitted, outcome, modelCalls } = await runLoop(['The file exports answer.'], context);
     expect(outcome).toMatchObject({ iterations: 1, toolCallsExecuted: 0 });
+    expect(outcome.budgetExhausted).toBe(false);
     expect(emitted).toEqual([{ type: 'answer.delta', text: 'The file exports answer.' }]);
     expect(modelCalls[0][0]).toEqual({ role: 'system', content: expect.stringContaining('fixture') });
   });
@@ -253,6 +254,7 @@ describe('runAgentLoop', () => {
       { maxIterations: 2 },
     );
     expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 2 });
+    expect(outcome.budgetExhausted).toBe(true);
     const lastCall = modelCalls.at(-1);
     expect(String(lastCall?.at(-1)?.content)).toContain('Iteration budget exhausted');
     expect(String(lastCall?.at(-1)?.content)).toContain('never paste code blocks');
