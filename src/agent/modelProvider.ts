@@ -51,6 +51,11 @@ const DEFAULT_CONTEXT_TOKEN_WINDOW = 16_384;
 const LONG_CONTEXT_TOKEN_WINDOW = 32_768;
 const CONTEXT_COMPRESSION_THRESHOLD = 0.75;
 const MIN_CONTINUATION_SECTION_TOKENS = 768;
+const MAX_REASONING_RECOVERY_ATTEMPTS = 1;
+const OUTPUT_LIMIT_GUIDANCE =
+  'Model reached the output-token limit before producing a final answer. Increase the profile output limit or start a new chat.';
+const REASONING_RECOVERY_PROMPT =
+  'A previous attempt used its entire output budget on internal reasoning and never wrote the answer. Answer the latest user request directly and concisely now; keep any reasoning minimal and always finish with the concrete answer.';
 
 export async function streamChatCompletion(
   profile: RuntimeModelProfile,
@@ -85,6 +90,7 @@ export async function streamChatCompletion(
       let streamedMetrics: StreamedMetrics = {};
       let attemptIndex = 0;
       let contextCompressionLevel = 0;
+      let reasoningRecoveriesUsed = 0;
 
       while (true) {
         throwIfAborted(requestSignal.signal);
@@ -154,6 +160,25 @@ export async function streamChatCompletion(
           break;
         }
         if (allAnswerText.length <= answerLengthAtAttemptStart) {
+          if (
+            allAnswerText.length === 0 &&
+            attemptMetrics.reasoningObserved &&
+            reasoningRecoveriesUsed < MAX_REASONING_RECOVERY_ATTEMPTS
+          ) {
+            // Reasoning consumed the whole output budget before any answer existed;
+            // ask once for a direct answer instead of surfacing an error.
+            reasoningRecoveriesUsed += 1;
+            attemptIndex += 1;
+            attemptMessages = [
+              ...initialRequestMessages(profile, messages, {
+                forceCompress: true,
+                compressionLevel: contextCompressionLevel,
+              }),
+              { role: 'user', content: REASONING_RECOVERY_PROMPT },
+            ];
+            continue;
+          }
+          if (allAnswerText.length === 0) throw new Error(OUTPUT_LIMIT_GUIDANCE);
           throw new Error('Model reached the output-token limit without making final-answer progress while continuing.');
         }
         attemptMessages = continuationMessages(profile, messages, allAnswerText);
@@ -597,7 +622,7 @@ async function readSseDeltas(
     }
 
     if (data.trim() === '[DONE]') {
-      assertFinalAnswer(answer.value(), metrics.finishReason, allowLengthWithoutAnswer);
+      assertFinalAnswer(answer.value(), metrics.finishReason, allowLengthWithoutAnswer || Boolean(metrics.reasoningObserved));
       return true;
     }
 
@@ -659,7 +684,7 @@ async function readSseDeltas(
         buffer += decoder.decode();
         if (buffer && await consumeLine(buffer.replace(/\r$/, ''))) return metrics;
         if (eventDataLines.length > 0 && await dispatchEvent()) return metrics;
-        assertFinalAnswer(answer.value(), metrics.finishReason, allowLengthWithoutAnswer);
+        assertFinalAnswer(answer.value(), metrics.finishReason, allowLengthWithoutAnswer || Boolean(metrics.reasoningObserved));
         return metrics;
       }
       if (!value) {
@@ -1025,9 +1050,7 @@ function assertFinalAnswer(answer: string, finishReason: string | undefined, all
   if (answer.trim().length > 0) return;
   if (finishReason === 'length' && allowLengthWithoutAnswer) return;
   if (finishReason === 'length') {
-    throw new Error(
-      'Model reached the output-token limit before producing a final answer. Increase the profile output limit or start a new chat.',
-    );
+    throw new Error(OUTPUT_LIMIT_GUIDANCE);
   }
   throw new Error('Model stream ended without producing a final answer.');
 }

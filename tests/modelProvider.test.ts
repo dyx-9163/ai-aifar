@@ -747,6 +747,49 @@ describe('OpenAI-compatible model provider', () => {
     });
   });
 
+  it('recovers a reasoning-only length-truncated attempt with one direct-answer retry', async () => {
+    const responses = [
+      [
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n',
+      ],
+      [
+        'data: {"choices":[{"delta":{"content":"The answer is 42."}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ],
+    ];
+    const requests: Array<{ messages: ChatMessage[] }> = [];
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      requests.push(JSON.parse(String(init?.body)) as { messages: ChatMessage[] });
+      const chunks = responses.shift();
+      if (!chunks) throw new Error('unexpected extra continuation request');
+      return new Response(
+        ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+        { status: 200 },
+      );
+    };
+    const answer: string[] = [];
+
+    const metrics = await streamChatCompletion(
+      {
+        ...profile,
+        capabilities: { ...profile.capabilities, reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] } },
+        reasoning: { mode: 'enabled', protocol: 'qwen', effort: 'medium', display: 'auto' },
+      },
+      [{ role: 'user', content: 'hello' }],
+      { ...ignoreHandlers, onAnswerDelta: (delta) => answer.push(delta) },
+      new AbortController().signal,
+      fetchImpl,
+    );
+
+    expect(answer.join('')).toBe('The answer is 42.');
+    expect(requests).toHaveLength(2);
+    expect(String(requests[1]?.messages.at(-1)?.content)).toContain('entire output budget on internal reasoning');
+    expect(metrics.finishReason).toBe('stop');
+  });
+
   it('continues a length-bounded answer until the provider naturally stops', async () => {
     const responses = [
       [
