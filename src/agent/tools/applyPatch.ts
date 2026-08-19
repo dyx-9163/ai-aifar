@@ -38,6 +38,8 @@ export interface ApplyPatchBatchOutput {
 const PATCH_MAX_FILE_BYTES = 1024 * 1024;
 const PATCH_MAX_EDITS = 50;
 const PATCH_MAX_FILES = 8;
+const EDITS_EXAMPLE_MESSAGE = 'Tool input "edits" must be a non-empty array, e.g. [{"startLine": 1, "endLine": 1, "replacement": "new line"}]; use "endLine": startLine - 1 to insert without removing.';
+const FILES_EXAMPLE_MESSAGE = 'Tool input "files" must be a non-empty array of {path, baseContentHash, edits} objects, e.g. {"files": [{"path": "src/a.ts", "baseContentHash": "", "edits": [{"startLine": 1, "endLine": 0, "replacement": "content"}]}]}.';
 const PREVIEW_CONTEXT_RADIUS = 3;
 const PREVIEW_MAX_LINES = 200;
 
@@ -60,13 +62,19 @@ export interface PreparedPatch {
  */
 export function parsePatchSpecs(rawInput: Record<string, unknown>): PatchFileSpec[] {
   if (rawInput.files !== undefined) {
-    if (!Array.isArray(rawInput.files) || rawInput.files.length === 0) {
-      throw toolInputError('invalid-input', 'Tool input "files" must be a non-empty array.');
+    // Models sometimes wrap a single file entry as an object instead of an array.
+    const files = Array.isArray(rawInput.files)
+      ? rawInput.files
+      : typeof rawInput.files === 'object' && rawInput.files !== null
+        ? [rawInput.files]
+        : [];
+    if (files.length === 0) {
+      throw toolInputError('invalid-input', FILES_EXAMPLE_MESSAGE);
     }
-    if (rawInput.files.length > PATCH_MAX_FILES) {
+    if (files.length > PATCH_MAX_FILES) {
       throw toolInputError('invalid-input', `At most ${PATCH_MAX_FILES} files are allowed per patch.`);
     }
-    const specs = (rawInput.files as unknown[]).map((entry, index) => {
+    const specs = (files as unknown[]).map((entry, index) => {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
         throw toolInputError('invalid-input', `File ${index + 1} must be an object.`);
       }
@@ -255,13 +263,19 @@ function splitLogicalLines(text: string): string[] {
 }
 
 function parseEdits(value: unknown): PatchEdit[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw toolInputError('invalid-input', 'Tool input "edits" must be a non-empty array.');
+  // Models sometimes send a single edit object instead of an array.
+  const list = Array.isArray(value)
+    ? value
+    : typeof value === 'object' && value !== null
+      ? [value]
+      : [];
+  if (list.length === 0) {
+    throw toolInputError('invalid-input', EDITS_EXAMPLE_MESSAGE);
   }
-  if (value.length > PATCH_MAX_EDITS) {
+  if (list.length > PATCH_MAX_EDITS) {
     throw toolInputError('invalid-input', `At most ${PATCH_MAX_EDITS} edits are allowed per patch.`);
   }
-  return value.map((entry, index) => {
+  return list.map((entry, index) => {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
       throw toolInputError('invalid-input', `Edit ${index + 1} must be an object.`);
     }
@@ -274,18 +288,21 @@ function parseEdits(value: unknown): PatchEdit[] {
       startLine = 1;
       endLine = 0;
     }
-    if (!Number.isInteger(startLine) || Number(startLine) < 1) {
+    // Models frequently quote line numbers; coerce numeric strings before validating.
+    const start = Number(startLine);
+    const end = Number(endLine);
+    if (!Number.isInteger(start) || start < 1) {
       throw toolInputError('invalid-input', `Edit ${index + 1} needs a positive integer "startLine".`);
     }
-    if (!Number.isInteger(endLine) || Number(endLine) < Number(startLine) - 1) {
+    if (!Number.isInteger(end) || end < start - 1) {
       throw toolInputError('invalid-input', `Edit ${index + 1} needs "endLine" >= startLine - 1.`);
     }
     if (typeof record.replacement !== 'string') {
       throw toolInputError('invalid-input', `Edit ${index + 1} needs a string "replacement".`);
     }
     return {
-      startLine: Number(startLine),
-      endLine: Number(endLine),
+      startLine: start,
+      endLine: end,
       replacement: (record.replacement as string).replace(/\r\n/g, '\n'),
     };
   });

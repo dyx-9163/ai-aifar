@@ -213,6 +213,25 @@ describe('apply_patch', () => {
     expect(oversized.error?.code).toBe('invalid-input');
   });
 
+  it('normalizes common model input mistakes in apply_patch', async () => {
+    const singleObjectFiles = await runTool('apply_patch', {
+      files: { path: 'src/extra.ts', edits: [{ startLine: 1, endLine: 0, replacement: 'export const extra = 1;' }] },
+    }, approveAll);
+    expect(singleObjectFiles.status).toBe('success');
+
+    const coerced = await runTool('apply_patch', {
+      path: 'src/main.ts',
+      baseContentHash: sha256(MAIN_TS),
+      edits: { startLine: '1', endLine: '1', replacement: 'export const answer = 43;' },
+    }, approveAll);
+    expect(coerced.status).toBe('success');
+
+    const empty = await runTool('apply_patch', { path: 'src/main.ts', edits: [] }, approveAll);
+    expect(empty.status).toBe('error');
+    expect(empty.error?.code).toBe('invalid-input');
+    expect(empty.error?.message).toContain('non-empty array');
+  });
+
   it('records the pre-change state through the checkpoint hook before writing', async () => {
     const recorded: RecordedFileChange[] = [];
     const recordingContext: WorkspaceToolContext = {
