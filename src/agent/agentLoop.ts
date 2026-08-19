@@ -31,6 +31,8 @@ const CODE_DUMP_MIN_LINES = 12;
 const MAX_CODE_DUMP_STEERS = 2;
 /** How many times the loop re-prompts after a tool call was cut off by the output limit. */
 const MAX_TRUNCATED_TOOL_STEERS = 2;
+/** How many times the loop re-prompts when the model announces edits without issuing tool calls. */
+const MAX_INTENT_STEERS = 2;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
@@ -168,6 +170,26 @@ const TRUNCATED_TOOL_STEERING_MESSAGE = [
   'Never paste replacement code into the answer.',
 ].join(' ');
 
+const WRITE_INTENT_PATTERN = /(apply_patch|替换|更新|修改|写入|创建|replac|updat|writ|creat)/i;
+const FILE_PATH_PATTERN = /`[^`\n]*\.[A-Za-z0-9]+`|[\w./\\-]+\.(?:vue|tsx?|jsx?|html|css|json|md|py|go|rs)/;
+
+/**
+ * Detects replies that announce file edits (typically ending on a colon before
+ * pasted code) but contain no tool call, so nothing would actually change.
+ */
+export function looksLikeUnfulfilledWriteIntent(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 800) return false;
+  if (!/[:：]\s*$/.test(trimmed)) return false;
+  return WRITE_INTENT_PATTERN.test(trimmed) && FILE_PATH_PATTERN.test(trimmed);
+}
+
+const UNFULFILLED_INTENT_STEERING_MESSAGE = [
+  'You announced file changes but your reply contained no ```tool call, so nothing was changed.',
+  'Do not narrate—act: reply now with ```tool apply_patch calls (a "files" array when several files change); call read_file first when you lack a fresh contentHash.',
+  'Never paste replacement code into the answer.',
+].join(' ');
+
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
   return text
@@ -216,6 +238,7 @@ export function buildAgentSystemPrompt(
       '- After modifying files, verify with a matching test or typecheck command when the project provides one.',
       '- When several files change together, prefer one apply_patch with a "files" array so the user reviews a single changeset.',
       '- Keep every reply within the output limit: for large rewrites, split the work into several apply_patch edits with replacements of at most ~120 lines instead of one huge edit.',
+      '- Promising changes is not acting: a reply that says it will replace or update files but contains no ```tool call changes nothing; either issue the ```tool calls or answer directly.',
       'Never paste full file contents or complete replacement code into the answer; apply changes with apply_patch instead.',
       'This holds even for very large rewrites: send the complete replacement text inside apply_patch edits; the answer must only describe what changed.',
     );
@@ -243,6 +266,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let toolCallsExecuted = 0;
   let codeDumpSteersUsed = 0;
   let truncatedToolSteersUsed = 0;
+  let intentSteersUsed = 0;
   let lastMetrics: ModelRunMetrics | undefined;
 
   const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
@@ -283,6 +307,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         codeDumpSteersUsed += 1;
         messages.push({ role: 'assistant', content: text });
         messages.push({ role: 'user', content: CODE_DUMP_STEERING_MESSAGE });
+        continue;
+      }
+      if (
+        options.toolContext.trustLevel !== 'read-only' &&
+        intentSteersUsed < MAX_INTENT_STEERS &&
+        looksLikeUnfulfilledWriteIntent(answer)
+      ) {
+        // The model narrated edits without issuing tool calls; force it to act.
+        intentSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: UNFULFILLED_INTENT_STEERING_MESSAGE });
         continue;
       }
       if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });

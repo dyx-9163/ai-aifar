@@ -8,6 +8,7 @@ import {
   buildAgentSystemPrompt,
   looksLikeManualCodeDump,
   looksLikeTruncatedToolCall,
+  looksLikeUnfulfilledWriteIntent,
   parseToolCall,
   runAgentLoop,
   stripToolFences,
@@ -184,6 +185,14 @@ describe('tool call parsing', () => {
     const truncated = 'Let me apply the rewrite.\n```tool\n{"tool": "apply_patch", "input": {"path": "src/App.vue", "edits": [';
     expect(looksLikeTruncatedToolCall(truncated)).toBe(true);
   });
+
+  it('detects announced edits that contain no tool call', () => {
+    expect(looksLikeUnfulfilledWriteIntent('好的，现在用完整代码替换 `src/App.vue`，同时更新 `index.html`：')).toBe(true);
+    expect(looksLikeUnfulfilledWriteIntent('Okay, now replacing src/App.vue:')).toBe(true);
+    expect(looksLikeUnfulfilledWriteIntent('已更新 src/App.vue。')).toBe(false);
+    expect(looksLikeUnfulfilledWriteIntent('Here is the plan:')).toBe(false);
+    expect(looksLikeUnfulfilledWriteIntent('The answer is 42.')).toBe(false);
+  });
 });
 
 describe('runAgentLoop', () => {
@@ -274,6 +283,27 @@ describe('runAgentLoop', () => {
     expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
     expect(String(modelCalls[1].at(-1)?.content)).toContain('cut off by the output limit');
     expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+  });
+
+  it('steers announced-but-missing tool calls into real apply_patch calls', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const { emitted, outcome, modelCalls } = await runLoop(
+      [
+        '好的，现在用完整代码替换 `src/main.ts`：',
+        fencedToolCall('{"tool": "read_file", "input": {"path": "src/main.ts"}}'),
+        'Updated the file.',
+      ],
+      readWrite,
+    );
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('contained no ```tool call');
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+  });
+
+  it('emits announced edits untouched in read-only workspaces', async () => {
+    const { emitted, outcome } = await runLoop(['Okay, now replacing src/main.ts:'], context);
+    expect(outcome).toMatchObject({ iterations: 1, toolCallsExecuted: 0 });
+    expect(emitted).toEqual([{ type: 'answer.delta', text: 'Okay, now replacing src/main.ts:' }]);
   });
 
   it('reports the last model run metrics', async () => {
