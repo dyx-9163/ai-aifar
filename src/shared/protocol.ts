@@ -1,5 +1,6 @@
 import type {
   AppSnapshot,
+  FileChangePreview,
   LanguagePreference,
   MetricSource,
   ModelCapabilitiesInput,
@@ -57,7 +58,7 @@ export type SequencedAgentEvent =
   | ({ type: 'tool.started'; toolId: string; title: string } & SequencedTurnEnvelope)
   | ({ type: 'tool.output'; toolId: string; output: string } & SequencedTurnEnvelope)
   | ({ type: 'model.metrics'; metrics: ModelRunMetrics } & SequencedTurnEnvelope)
-  | ({ type: 'approval.required'; approvalId: string; title: string; description: string } & SequencedTurnEnvelope)
+  | ({ type: 'approval.required'; approvalId: string; title: string; description: string; fileChange?: FileChangePreview } & SequencedTurnEnvelope)
   | ({ type: 'turn.cancelling' } & SequencedTurnEnvelope)
   | ({ type: 'turn.completed' } & SequencedTurnEnvelope)
   | ({ type: 'turn.failed'; error: string } & SequencedTurnEnvelope)
@@ -81,6 +82,23 @@ function hasBoolean(record: UnknownRecord, key: string): boolean {
 
 function hasOptionalString(record: UnknownRecord, key: string): boolean {
   return record[key] === undefined || typeof record[key] === 'string';
+}
+
+function hasOptionalFileChange(record: UnknownRecord): boolean {
+  const value = record.fileChange;
+  if (value === undefined) return true;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const preview = value as UnknownRecord;
+  if (typeof preview.relativePath !== 'string' || preview.relativePath.length === 0) return false;
+  if (preview.action !== 'created' && preview.action !== 'modified') return false;
+  if (!Array.isArray(preview.lines)) return false;
+  // Diff lines may legitimately be empty strings, so only check the type here.
+  return preview.lines.every((line) => {
+    if (typeof line !== 'object' || line === null || Array.isArray(line)) return false;
+    const entry = line as UnknownRecord;
+    return (entry.kind === 'context' || entry.kind === 'added' || entry.kind === 'removed')
+      && typeof entry.text === 'string';
+  });
 }
 
 function isTurnAttachment(value: unknown): value is TurnAttachment {
@@ -359,7 +377,7 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
         isMetricSource(value.metrics.usageSource)
       );
     case 'approval.required':
-      return hasString(value, 'approvalId') && hasString(value, 'title') && hasString(value, 'description');
+      return hasString(value, 'approvalId') && hasString(value, 'title') && hasString(value, 'description') && hasOptionalFileChange(value);
     case 'turn.cancelling':
     case 'turn.completed':
       return true;

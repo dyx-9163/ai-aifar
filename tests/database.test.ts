@@ -108,7 +108,7 @@ describe('sqlite app database', () => {
     const migrated = new DatabaseSync(path);
     try {
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 },
       ]);
     } finally {
       migrated.close();
@@ -312,7 +312,7 @@ describe('sqlite app database', () => {
         },
       ]);
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 },
       ]);
     } finally {
       migrated.close();
@@ -861,6 +861,43 @@ describe('sqlite app database', () => {
       expect(db.getSnapshot().approvals).toEqual([]);
     } finally {
       db.close();
+    }
+  });
+
+  it('round-trips the approval file-change diff across reopen', () => {
+    const dbPath = createDbPath();
+    const fileChange = {
+      relativePath: 'src/new.ts',
+      action: 'created' as const,
+      lines: [{ kind: 'added' as const, text: 'export const fresh = true;' }],
+    };
+    const first = openDatabase(dbPath);
+    let threadId = '';
+    try {
+      const thread = first.createThread('Diff approval');
+      threadId = thread.id;
+      first.createTurn(turnRecord('turn-diff', thread.id, 'model-1', 'running'));
+      first.upsertApproval({
+        id: 'approval-diff',
+        threadId: thread.id,
+        turnId: 'turn-diff',
+        title: 'Edit file: src/new.ts',
+        description: 'Preview must survive a restart.',
+        fileChange,
+        status: 'pending',
+        createdAt: '2026-08-17T00:00:01.000Z',
+      });
+    } finally {
+      first.close();
+    }
+
+    const second = openDatabase(dbPath);
+    try {
+      const approval = second.getSnapshot().approvals.find((candidate) => candidate.id === 'approval-diff');
+      expect(approval?.fileChange).toEqual(fileChange);
+      expect(approval?.threadId).toBe(threadId);
+    } finally {
+      second.close();
     }
   });
 

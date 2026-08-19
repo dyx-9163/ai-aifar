@@ -195,7 +195,7 @@ describe('runAgentLoop', () => {
     expect(outcome.metrics?.durationMs).toBe(12);
   });
 
-  it('applies patches in a read-write workspace without approval', async () => {
+  it('applies patches in a read-write workspace after approval', async () => {
     const readWrite = { ...context, trustLevel: 'read-write' as const };
     const baseHash = createHash('sha256').update('export const answer = 42;\n').digest('hex');
     const patchCall = JSON.stringify({
@@ -206,7 +206,14 @@ describe('runAgentLoop', () => {
         edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
       },
     });
-    const { modelCalls } = await runLoop([fencedToolCall(patchCall), 'Updated the constant.'], readWrite);
+    const approvals: string[] = [];
+    const { modelCalls } = await runLoop([fencedToolCall(patchCall), 'Updated the constant.'], readWrite, {
+      requestApproval: async (request) => {
+        approvals.push(request.title);
+        return true;
+      },
+    });
+    expect(approvals).toEqual(['Edit file: src/main.ts']);
     expect(readFileSync(join(context.canonicalRootPath, 'src', 'main.ts'), 'utf-8')).toBe(
       'export const answer = 43;\n',
     );

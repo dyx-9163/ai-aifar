@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { AppSettings, Approval, ModelRunMetrics, TurnRecord } from '../../shared/domain';
+import type { AppSettings, Approval, ModelRunMetrics, PatchDiffLineKind, TurnRecord } from '../../shared/domain';
 import type { AgentEvent } from '../../shared/protocol';
 import type { Translator } from '../i18n';
 
@@ -54,6 +54,12 @@ function speedValue(metrics: ModelRunMetrics): string {
     ? `${metrics.tokensPerSecond.toFixed(1)} tok/s · ${metrics.speedSource}`
     : metrics.speedSource;
 }
+
+function diffPrefix(kind: PatchDiffLineKind): string {
+  if (kind === 'added') return '+ ';
+  if (kind === 'removed') return '- ';
+  return '  ';
+}
 </script>
 
 <template>
@@ -105,9 +111,22 @@ function speedValue(metrics: ModelRunMetrics): string {
         <p class="pane-label">{{ t('approval') }}</p>
         <h2>{{ pendingApproval.title }}</h2>
         <p>{{ pendingApproval.description }}</p>
+        <div v-if="pendingApproval.fileChange" class="file-change-preview" data-testid="approval-file-change">
+          <p class="file-change-path" data-testid="approval-file-change-path">
+            {{ pendingApproval.fileChange.relativePath }}
+            <small>{{ pendingApproval.fileChange.action }}</small>
+          </p>
+          <pre class="file-change-diff"><code><span
+            v-for="(line, index) in pendingApproval.fileChange.lines"
+            :key="index"
+            class="diff-line"
+            :class="`diff-line-${line.kind}`"
+          >{{ diffPrefix(line.kind) }}{{ line.text }}
+</span></code></pre>
+        </div>
         <div class="approval-actions">
-          <button type="button" class="secondary-button" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('reject', pendingApproval.id)">{{ t('reject') }}</button>
-          <button type="button" class="primary-action compact" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('approve', pendingApproval.id)">{{ t('approve') }}</button>
+          <button type="button" class="secondary-button" data-testid="approval-reject-button" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('reject', pendingApproval.id)">{{ t('reject') }}</button>
+          <button type="button" class="primary-action compact" data-testid="approval-approve-button" :disabled="pendingApproval.status !== 'pending' || approvalResponseInFlight" @click="$emit('approve', pendingApproval.id)">{{ t('approve') }}</button>
         </div>
       </template>
       <p v-if="approvalError" class="runtime-control-error" data-testid="approval-response-error" role="status">

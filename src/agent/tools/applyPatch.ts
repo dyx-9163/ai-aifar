@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { FileChangePreview, PatchDiffLine } from '../../shared/domain.js';
 import { isExcludedPath, resolveWithinRoot } from '../workspace/pathSecurity.js';
 import type { WorkspaceToolContext } from './toolRouter.js';
 import { requireToolString, toolInputError } from './toolInput.js';
@@ -25,11 +26,30 @@ export interface ApplyPatchOutput {
 
 const PATCH_MAX_FILE_BYTES = 1024 * 1024;
 const PATCH_MAX_EDITS = 50;
+const PREVIEW_CONTEXT_RADIUS = 3;
+const PREVIEW_MAX_LINES = 200;
 
-export async function runApplyPatch(
+export interface PreparedPatch {
+  absolute: string;
+  normalizedRelativePath: string;
+  existed: boolean;
+  originalText: string;
+  /** SHA-256 of the current on-disk content; empty when the file is new. */
+  previousContentHash: string;
+  edits: PatchEdit[];
+  patched: { text: string; totalLines: number; linesChanged: number };
+  newContentHash: string;
+}
+
+/**
+ * Validates the patch input and applies it in memory without touching the
+ * disk. Shared by the executor and the approval preview so both always agree
+ * on what the write will produce.
+ */
+export function prepareApplyPatch(
   rawInput: Record<string, unknown>,
   context: WorkspaceToolContext,
-): Promise<{ output: ApplyPatchOutput; truncated: boolean }> {
+): PreparedPatch {
   const relativePath = requireToolString(rawInput, 'path');
   const baseContentHash = requireToolString(rawInput, 'baseContentHash', { optional: true }) ?? '';
   const edits = parseEdits(rawInput.edits);
@@ -48,10 +68,10 @@ export async function runApplyPatch(
   }
 
   const originalText = stat ? readFileSync(absolute, 'utf-8').replace(/\r\n/g, '\n') : '';
-  let actualHash = '';
+  let previousContentHash = '';
   if (stat) {
-    actualHash = createHash('sha256').update(readFileSync(absolute)).digest('hex');
-    if (baseContentHash.toLowerCase() !== actualHash) {
+    previousContentHash = createHash('sha256').update(readFileSync(absolute)).digest('hex');
+    if (baseContentHash.toLowerCase() !== previousContentHash) {
       throw toolInputError(
         'stale-content',
         'File content changed since the recorded baseline. Re-read the file and retry with the new contentHash.',
@@ -63,33 +83,114 @@ export async function runApplyPatch(
 
   const patched = applyEdits(originalText, edits);
   const newContentHash = createHash('sha256').update(Buffer.from(patched.text, 'utf-8')).digest('hex');
-  const normalizedRelativePath = path.relative(context.canonicalRootPath, absolute).split(path.sep).join('/');
+  return {
+    absolute,
+    normalizedRelativePath: path.relative(context.canonicalRootPath, absolute).split(path.sep).join('/'),
+    existed: Boolean(stat),
+    originalText,
+    previousContentHash,
+    edits,
+    patched,
+    newContentHash,
+  };
+}
+
+/** Dry-run used by the approval gate; never writes and never records checkpoints. */
+export function previewApplyPatch(
+  rawInput: Record<string, unknown>,
+  context: WorkspaceToolContext,
+): FileChangePreview {
+  const prepared = prepareApplyPatch(rawInput, context);
+  return {
+    relativePath: prepared.normalizedRelativePath,
+    action: prepared.existed ? 'modified' : 'created',
+    lines: buildPatchDiffLines(prepared.originalText, prepared.edits),
+  };
+}
+
+export async function runApplyPatch(
+  rawInput: Record<string, unknown>,
+  context: WorkspaceToolContext,
+): Promise<{ output: ApplyPatchOutput; truncated: boolean }> {
+  const prepared = prepareApplyPatch(rawInput, context);
 
   // Snapshot the pre-change state before touching the disk so the turn stays
   // rollable even when a later patch targets the same file again.
   context.recordFileChange?.({
-    relativePath: normalizedRelativePath,
-    previousAction: stat ? 'existed' : 'absent',
-    previousContent: stat ? originalText : null,
-    previousContentHash: actualHash,
-    newContentHash,
+    relativePath: prepared.normalizedRelativePath,
+    previousAction: prepared.existed ? 'existed' : 'absent',
+    previousContent: prepared.existed ? prepared.originalText : null,
+    previousContentHash: prepared.previousContentHash,
+    newContentHash: prepared.newContentHash,
   });
 
-  if (!stat) {
-    mkdirSync(path.dirname(absolute), { recursive: true });
+  if (!prepared.existed) {
+    mkdirSync(path.dirname(prepared.absolute), { recursive: true });
   }
-  writeFileSync(absolute, patched.text, 'utf-8');
+  writeFileSync(prepared.absolute, prepared.patched.text, 'utf-8');
 
   return {
     output: {
-      path: normalizedRelativePath,
-      action: stat ? 'modified' : 'created',
-      totalLines: patched.totalLines,
-      linesChanged: patched.linesChanged,
-      contentHash: newContentHash,
+      path: prepared.normalizedRelativePath,
+      action: prepared.existed ? 'modified' : 'created',
+      totalLines: prepared.patched.totalLines,
+      linesChanged: prepared.patched.linesChanged,
+      contentHash: prepared.newContentHash,
     },
     truncated: false,
   };
+}
+
+/**
+ * Renders the edits as hunked diff lines with bounded context. The edits are
+ * line-anchored, so the diff is exact without a general diff algorithm.
+ */
+export function buildPatchDiffLines(originalText: string, edits: PatchEdit[]): PatchDiffLine[] {
+  const originalLines = splitLogicalLines(originalText);
+  const totalLines = originalLines.length;
+  const sorted = [...edits].sort((left, right) => left.startLine - right.startLine);
+  const lines: PatchDiffLine[] = [];
+  let cursor = 1;
+
+  for (const edit of sorted) {
+    const contextFrom = Math.max(cursor, edit.startLine - PREVIEW_CONTEXT_RADIUS);
+    if (contextFrom > cursor) {
+      if (lines.length > 0) lines.push({ kind: 'context', text: '…' });
+      cursor = contextFrom;
+    }
+    while (cursor < edit.startLine) {
+      lines.push({ kind: 'context', text: originalLines[cursor - 1] ?? '' });
+      cursor += 1;
+    }
+    for (let removed = edit.startLine; removed <= edit.endLine; removed += 1) {
+      lines.push({ kind: 'removed', text: originalLines[removed - 1] ?? '' });
+    }
+    const replacementLines = edit.replacement === '' ? [] : edit.replacement.split('\n');
+    for (const added of replacementLines) {
+      lines.push({ kind: 'added', text: added });
+    }
+    cursor = edit.endLine + 1;
+  }
+
+  const tailEnd = Math.min(totalLines, cursor + PREVIEW_CONTEXT_RADIUS - 1);
+  while (cursor <= tailEnd) {
+    lines.push({ kind: 'context', text: originalLines[cursor - 1] });
+    cursor += 1;
+  }
+  if (cursor <= totalLines) lines.push({ kind: 'context', text: '…' });
+
+  if (lines.length > PREVIEW_MAX_LINES) {
+    lines.length = PREVIEW_MAX_LINES - 1;
+    lines.push({ kind: 'context', text: '…' });
+  }
+  return lines;
+}
+
+function splitLogicalLines(text: string): string[] {
+  const lines = text === '' ? [] : text.split('\n');
+  // A trailing newline produces one empty split element that is not a line.
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
 }
 
 function parseEdits(value: unknown): PatchEdit[] {
@@ -133,11 +234,8 @@ function applyEdits(
   originalText: string,
   edits: PatchEdit[],
 ): { text: string; totalLines: number; linesChanged: number } {
-  const lines = originalText === '' ? [] : originalText.split('\n');
-  // A trailing newline produces one empty split element that is not a line.
-  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
   const hadTrailingNewline = originalText.endsWith('\n') && originalText.length > 0;
-  const normalized = lines;
+  const normalized = splitLogicalLines(originalText);
   const totalBefore = normalized.length;
 
   const sorted = [...edits].sort((left, right) => right.startLine - left.startLine);

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,6 +14,7 @@ import {
   classifyToolCall,
   executeAgentToolCall,
   type RecordedFileChange,
+  type ToolApprovalRequest,
   type WorkspaceToolContext,
 } from '../src/agent/tools/toolRouter';
 
@@ -40,6 +41,8 @@ async function runTool(toolName: string, input: unknown, options: Parameters<typ
   return executeAgentToolCall(buildCall(toolName, input), context, options);
 }
 
+const approveAll = { requestApproval: async () => true };
+
 beforeEach(() => {
   workspaceRoot = mkdtempSync(join(tmpdir(), 'private-ai-writetools-'));
   tempDirectories.push(workspaceRoot);
@@ -60,7 +63,7 @@ describe('apply_patch', () => {
     const result = await runTool('apply_patch', {
       path: 'src/helper.ts',
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }],
-    });
+    }, approveAll);
     expect(result.status).toBe('success');
     const output = result.output as ApplyPatchOutput;
     expect(output).toMatchObject({ path: 'src/helper.ts', action: 'created', totalLines: 1 });
@@ -71,10 +74,53 @@ describe('apply_patch', () => {
     const result = await runTool('apply_patch', {
       path: 'src/zero.ts',
       edits: [{ startLine: 0, endLine: 0, replacement: 'export const zero = true;' }],
-    });
+    }, approveAll);
     expect(result.status).toBe('success');
     expect(result.output).toMatchObject({ path: 'src/zero.ts', action: 'created' });
     expect(readFileSync(join(workspaceRoot, 'src', 'zero.ts'), 'utf-8')).toBe('export const zero = true;');
+  });
+
+  it('reports approval-required and writes nothing when no responder is available', async () => {
+    const result = await runTool('apply_patch', {
+      path: 'src/gated.ts',
+      edits: [{ startLine: 1, endLine: 0, replacement: 'export const gated = true;' }],
+    });
+    expect(result.status).toBe('approval-required');
+    expect(existsSync(join(workspaceRoot, 'src', 'gated.ts'))).toBe(false);
+  });
+
+  it('hands the approval request a diff preview and cancels on rejection', async () => {
+    const requests: ToolApprovalRequest[] = [];
+    const result = await runTool('apply_patch', {
+      path: 'src/main.ts',
+      baseContentHash: sha256(MAIN_TS),
+      edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
+    }, { requestApproval: async (request) => { requests.push(request); return false; } });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].title).toBe('Edit file: src/main.ts');
+    expect(requests[0].fileChange).toMatchObject({ relativePath: 'src/main.ts', action: 'modified' });
+    expect(requests[0].fileChange?.lines).toEqual([
+      { kind: 'removed', text: 'export const answer = 41;' },
+      { kind: 'added', text: 'export const answer = 42;' },
+      { kind: 'context', text: 'export const label = "answer";' },
+    ]);
+
+    expect(result.status).toBe('cancelled');
+    expect(result.error?.code).toBe('approval-rejected');
+    expect(readFileSync(join(workspaceRoot, 'src', 'main.ts'), 'utf-8')).toBe(MAIN_TS);
+  });
+
+  it('classifies apply_patch as an approval with a created-file preview', () => {
+    const policy = classifyToolCall(buildCall('apply_patch', {
+      path: 'src/new.ts',
+      edits: [{ startLine: 1, endLine: 0, replacement: 'export const fresh = true;' }],
+    }), context);
+    expect(policy.kind).toBe('approval');
+    if (policy.kind !== 'approval') return;
+    expect(policy.title).toBe('Edit file: src/new.ts');
+    expect(policy.fileChange).toMatchObject({ relativePath: 'src/new.ts', action: 'created' });
+    expect(policy.fileChange?.lines).toEqual([{ kind: 'added', text: 'export const fresh = true;' }]);
   });
 
   it('modifies a file when the baseline hash matches', async () => {
@@ -82,7 +128,7 @@ describe('apply_patch', () => {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
-    });
+    }, approveAll);
     expect(result.status).toBe('success');
     const output = result.output as ApplyPatchOutput;
     expect(output.action).toBe('modified');
@@ -97,13 +143,13 @@ describe('apply_patch', () => {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 2, endLine: 2, replacement: 'export const label = "updated";' }],
-    });
+    }, approveAll);
     expect(first.status).toBe('success');
     const second = await runTool('apply_patch', {
       path: 'src/main.ts',
       baseContentHash: (first.output as ApplyPatchOutput).contentHash,
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 43;' }],
-    });
+    }, approveAll);
     expect(second.status).toBe('success');
   });
 
@@ -118,13 +164,13 @@ describe('apply_patch', () => {
       path: 'src/main.ts',
       baseContentHash: sha256(MAIN_TS),
       edits: [{ startLine: 1, endLine: 1, replacement: 'export const answer = 42;' }],
-    }), recordingContext);
+    }), recordingContext, approveAll);
     expect(modified.status).toBe('success');
 
     const created = await executeAgentToolCall(buildCall('apply_patch', {
       path: 'src/helper.ts',
       edits: [{ startLine: 1, endLine: 0, replacement: 'export const helper = true;' }],
-    }), recordingContext);
+    }), recordingContext, approveAll);
     expect(created.status).toBe('success');
 
     expect(recorded).toHaveLength(2);

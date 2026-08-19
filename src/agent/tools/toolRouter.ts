@@ -11,7 +11,7 @@
  * - Measure and attach `durationMs` on every result.
  */
 
-import type { WorkspaceTrustLevel } from '../../shared/domain.js';
+import type { FileChangePreview, WorkspaceTrustLevel } from '../../shared/domain.js';
 import {
   agentToolApprovalRequiredResult,
   agentToolCancelledResult,
@@ -23,7 +23,7 @@ import {
   type AgentToolResult,
 } from '../../shared/toolProtocol.js';
 import { toToolError } from './toolInput.js';
-import { runApplyPatch } from './applyPatch.js';
+import { previewApplyPatch, runApplyPatch } from './applyPatch.js';
 import { classifyCommand, parseCommandInput, runRunCommand } from './runCommand.js';
 import { runReadFile } from './readFile.js';
 import { runSearchCode } from './searchCode.js';
@@ -72,10 +72,17 @@ export const READ_ONLY_TOOL_NAMES: readonly AgentToolName[] = ['workspace_tree',
 /** Tools that mutate the workspace or run processes; gated by trust level. */
 export const WRITE_TOOL_NAMES: readonly AgentToolName[] = ['apply_patch', 'run_command'];
 
+export interface ToolApprovalRequest {
+  title: string;
+  description: string;
+  /** Computed diff for file writes, so the user can review before approving. */
+  fileChange?: FileChangePreview;
+}
+
 export type ToolPolicy =
   | { kind: 'allow' }
   | { kind: 'deny'; error: AgentToolError }
-  | { kind: 'approval'; title: string; description: string };
+  | ({ kind: 'approval'; title: string; description: string } & Pick<ToolApprovalRequest, 'fileChange'>);
 
 /**
  * Decides whether a call may run, must be approved, or is rejected outright.
@@ -96,7 +103,20 @@ export function classifyToolCall(call: AgentToolCall, context: WorkspaceToolCont
     };
   }
   if (call.toolName === 'apply_patch') {
-    return { kind: 'allow' };
+    let preview;
+    try {
+      preview = previewApplyPatch(call.input as Record<string, unknown>, context);
+    } catch (error) {
+      return { kind: 'deny', error: toToolError(error) };
+    }
+    return {
+      kind: 'approval',
+      title: `Edit file: ${preview.relativePath}`,
+      description: preview.action === 'created'
+        ? `The agent wants to create "${preview.relativePath}" in the workspace.`
+        : `The agent wants to modify "${preview.relativePath}" in the workspace.`,
+      fileChange: preview,
+    };
   }
   if (call.toolName === 'run_command') {
     let parsed;
@@ -134,7 +154,7 @@ export interface ToolExecutionOptions {
   now?: () => number;
   signal?: AbortSignal;
   /** Resolves user approval for gated calls; absent means approval blocks. */
-  requestApproval?: (request: { title: string; description: string }) => Promise<boolean>;
+  requestApproval?: (request: ToolApprovalRequest) => Promise<boolean>;
 }
 
 export async function executeAgentToolCall(
@@ -170,7 +190,11 @@ export async function executeAgentToolCall(
     if (!options.requestApproval) {
       return agentToolApprovalRequiredResult(call.callId, durationMs());
     }
-    const approved = await options.requestApproval({ title: policy.title, description: policy.description });
+    const approved = await options.requestApproval({
+      title: policy.title,
+      description: policy.description,
+      ...(policy.fileChange ? { fileChange: policy.fileChange } : {}),
+    });
     if (!approved) {
       return agentToolCancelledResult(
         call.callId,

@@ -971,6 +971,13 @@ describe('workspace agent turns', () => {
       workspaceId: workspace.id,
     });
 
+    await eventually(() => expect(typesFor(harness.events, turnId)).toContain('approval.required'));
+    const approvalEvent = harness.events.find(
+      (event) => event.turnId === turnId && event.type === 'approval.required',
+    ) as Extract<AgentEvent, { type: 'approval.required' }>;
+    expect(approvalEvent.fileChange).toMatchObject({ relativePath: 'hello.ts', action: 'created' });
+    expect(harness.runtime.respondApproval(approvalEvent.approvalId, true)).toBe(true);
+
     await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
     const createdFile = join(workspace.canonicalRootPath, 'hello.ts');
     expect(readFileSync(createdFile, 'utf-8')).toBe('export const hello = true;');

@@ -1413,6 +1413,55 @@ textarea:disabled {
   gap: 8px;
 }
 
+.file-change-preview {
+  display: grid;
+  gap: 6px;
+}
+
+.file-change-path {
+  margin: 0;
+  font-size: 13px;
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+  color: var(--text);
+}
+
+.file-change-path small {
+  margin-left: 6px;
+  color: var(--muted);
+}
+
+.file-change-diff {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--panel);
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.diff-line {
+  display: block;
+}
+
+.diff-line-added {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.diff-line-removed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.diff-line-context {
+  color: var(--muted);
+}
+
 .activity-list {
   display: grid;
   gap: 8px;

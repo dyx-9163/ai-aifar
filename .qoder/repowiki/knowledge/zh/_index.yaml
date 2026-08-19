@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-08-19T08:00:29Z"
+exported_at: "2026-08-19T12:28:27Z"
 modules:
     "":
-        dir_name: Private AI Desktop 桌面应用根工程
-        title: Private AI Desktop 桌面应用根工程
+        dir_name: Private AI Desktop 应用根工程
+        title: Private AI Desktop 应用根工程
         scope:
             - README.md
             - .gitignore
@@ -25,39 +25,27 @@ modules:
             - vite.renderer.config.ts
         source_files: []
         children:
-            - docs
             - model_runtime
-            - tests
-        depends_on: []
-        related_to: []
-    docs:
-        dir_name: Private AI Desktop 架构设计与代码 Agent 路线图文档
-        title: Private AI Desktop 架构设计与代码 Agent 路线图文档
-        scope:
-            - docs/
-            - .superpowers/
-        source_files: []
-        children: []
+            - scripts_and_docs
         depends_on: []
         related_to: []
     model_runtime:
-        dir_name: Qwen3.5-9B 独立模型运行时（llama.cpp Docker 编排）
-        title: Qwen3.5-9B 独立模型运行时（llama.cpp Docker 编排）
+        dir_name: Qwen3.5-9B 独立模型运行时（llama.cpp Docker Compose）
+        title: Qwen3.5-9B 独立模型运行时（llama.cpp Docker Compose）
         scope:
             - model-runtime/
             - models/
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: tests
-    tests:
-        dir_name: 桌面应用测试套件（单元测试与端到端）
-        title: 桌面应用测试套件（单元测试与端到端）
+        related_to: []
+    scripts_and_docs:
+        dir_name: 打包验证脚本与项目文档
+        title: 打包验证脚本与项目文档
         scope:
-            - tests/
+            - scripts/
+            - docs/
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: model_runtime
+        related_to: []

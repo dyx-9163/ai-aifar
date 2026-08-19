@@ -5,6 +5,7 @@ import type {
   Approval,
   ChatGroup,
   AppSettings,
+  FileChangePreview,
   Item,
   LanguagePreference,
   MessageItem,
@@ -133,6 +134,7 @@ type ApprovalRow = {
   status: Approval['status'];
   created_at: string;
   responded_at: string | null;
+  file_change: string | null;
 };
 
 type SettingRow = {
@@ -234,7 +236,7 @@ class SqliteAppDatabase implements AppDatabase {
 
     const approvals = this.db
       .prepare(
-        `SELECT a.id, a.thread_id, a.turn_id, a.title, a.description, a.status, a.created_at, a.responded_at
+        `SELECT a.id, a.thread_id, a.turn_id, a.title, a.description, a.status, a.created_at, a.responded_at, a.file_change
          FROM approvals a
          INNER JOIN threads t ON t.id = a.thread_id
          WHERE t.deleted_at IS NULL
@@ -581,13 +583,14 @@ class SqliteAppDatabase implements AppDatabase {
     this.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO approvals (id, thread_id, turn_id, title, description, status, created_at, responded_at)
-           VALUES (:id, :threadId, :turnId, :title, :description, :status, :createdAt, :respondedAt)
+          `INSERT INTO approvals (id, thread_id, turn_id, title, description, status, created_at, responded_at, file_change)
+           VALUES (:id, :threadId, :turnId, :title, :description, :status, :createdAt, :respondedAt, :fileChange)
            ON CONFLICT(id) DO UPDATE SET
              title = excluded.title,
              description = excluded.description,
              status = excluded.status,
-             responded_at = excluded.responded_at`,
+             responded_at = excluded.responded_at,
+             file_change = excluded.file_change`,
         )
         .run({
           id: approval.id,
@@ -598,6 +601,7 @@ class SqliteAppDatabase implements AppDatabase {
           status: approval.status,
           createdAt: approval.createdAt,
           respondedAt: approval.respondedAt ?? null,
+          fileChange: approval.fileChange ? JSON.stringify(approval.fileChange) : null,
         });
     });
   }
@@ -919,7 +923,8 @@ class SqliteAppDatabase implements AppDatabase {
         description TEXT NOT NULL,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        responded_at TEXT
+        responded_at TEXT,
+        file_change TEXT
       );
 
       CREATE TABLE IF NOT EXISTS settings (
@@ -1009,6 +1014,7 @@ class SqliteAppDatabase implements AppDatabase {
       'max_output_tokens',
       'ALTER TABLE model_profiles ADD COLUMN max_output_tokens INTEGER NOT NULL DEFAULT 2048',
     ));
+    this.applyMigration(8, () => this.ensureColumn('approvals', 'file_change', 'ALTER TABLE approvals ADD COLUMN file_change TEXT'));
     this.applyMigration(7, () => this.repairOrSeedLocalQwenProfile());
     this.interruptUnfinishedTurns();
   }
@@ -1493,6 +1499,7 @@ function mapApproval(row: ApprovalRow): Approval {
     turnId: row.turn_id,
     title: row.title,
     description: row.description,
+    ...(row.file_change ? { fileChange: JSON.parse(row.file_change) as FileChangePreview } : {}),
     status: row.status,
     createdAt: row.created_at,
     respondedAt: row.responded_at ?? undefined,

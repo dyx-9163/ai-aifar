@@ -85,6 +85,36 @@ function Invoke-ModelCompose {
     }
 }
 
+function Invoke-ModelDocker {
+    param(
+        [Parameter(Mandatory, Position=0)]
+        [string[]]$DockerArguments
+    )
+
+    # Docker CLI emits UTF-8; capture bytes ourselves because the console
+    # output code page on Windows defaults to the system ANSI code page and
+    # corrupts non-ASCII payload into invalid JSON.
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo.FileName = 'docker'
+    $quoted = @($DockerArguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    })
+    $process.StartInfo.Arguments = ($quoted -join ' ')
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $process.StartInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $process.StartInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $null = $process.Start()
+    $output = $process.StandardOutput.ReadToEnd()
+    $errors = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw "Docker CLI failed with exit code $($process.ExitCode): $($errors.Trim())"
+    }
+    $output
+}
+
 function Get-ModelPropertyValue {
     param(
         [AllowNull()]$InputObject,
@@ -101,18 +131,61 @@ function Get-ModelPropertyValue {
     $property.Value
 }
 
-function Get-ModelRuntimeOwnership {
-    $raw = @(Invoke-ModelCompose -ComposeArguments @('--profile', '*', 'ps', '--all', '--format', 'json'))
-    $serialized = ($raw -join [Environment]::NewLine).Trim()
-    if ([string]::IsNullOrWhiteSpace($serialized)) {
-        return $null
-    }
-    try {
-        $containers = @(($serialized | ConvertFrom-Json) | Where-Object { $null -ne $_ })
-    } catch {
-        throw 'Unable to determine fixed-project model runtime ownership from Docker Compose.'
+function Get-ModelProjectContainerStates {
+    # Uses docker ps/inspect instead of 'compose ps --format json' because the
+    # compose JSON renderer truncates long fields into syntactically invalid JSON.
+    $raw = Invoke-ModelDocker -DockerArguments @(
+        'ps', '--all', '--quiet',
+        '--filter', "label=com.docker.compose.project=$script:ModelComposeProject"
+    )
+    $containerIds = @($raw -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($containerIds.Count -eq 0) {
+        return @()
     }
 
+    $inspectRaw = Invoke-ModelDocker -DockerArguments (@('inspect') + $containerIds)
+    # Windows PowerShell 5.1 emits a top-level JSON array from ConvertFrom-Json
+    # as a single pipeline item, so unwrap one nested array layer explicitly.
+    $containers = @($inspectRaw | ConvertFrom-Json)
+    if ($containers.Count -eq 1 -and $containers[0] -is [System.Array]) {
+        $containers = @($containers[0])
+    }
+    $records = @()
+    foreach ($container in $containers) {
+        $labels = Get-ModelPropertyValue -InputObject $container -Name 'Config' |
+            ForEach-Object { Get-ModelPropertyValue -InputObject $_ -Name 'Labels' }
+        $state = Get-ModelPropertyValue -InputObject $container -Name 'State'
+        $health = Get-ModelPropertyValue -InputObject $state -Name 'Health' |
+            ForEach-Object { Get-ModelPropertyValue -InputObject $_ -Name 'Status' }
+        $publishers = @()
+        $ports = Get-ModelPropertyValue -InputObject (Get-ModelPropertyValue -InputObject $container -Name 'NetworkSettings') -Name 'Ports'
+        if ($null -ne $ports) {
+            foreach ($property in $ports.PSObject.Properties) {
+                $parts = @([string]$property.Name -split '/')
+                foreach ($binding in @($property.Value)) {
+                    if ($null -eq $binding) { continue }
+                    $publishers += [pscustomobject]@{
+                        URL = [string](Get-ModelPropertyValue -InputObject $binding -Name 'HostIp')
+                        PublishedPort = [int][string](Get-ModelPropertyValue -InputObject $binding -Name 'HostPort')
+                        TargetPort = [int]$parts[0]
+                        Protocol = [string]$parts[1]
+                    }
+                }
+            }
+        }
+        $records += [pscustomobject]@{
+            Project = [string](Get-ModelPropertyValue -InputObject $labels -Name 'com.docker.compose.project')
+            Service = [string](Get-ModelPropertyValue -InputObject $labels -Name 'com.docker.compose.service')
+            State = [string](Get-ModelPropertyValue -InputObject $state -Name 'Status')
+            Health = [string]$health
+            Publishers = $publishers
+        }
+    }
+    $records
+}
+
+function Get-ModelRuntimeOwnership {
+    $containers = @(Get-ModelProjectContainerStates)
     $allowedServices = @('llama-gpu', 'llama-hybrid', 'llama-cpu')
     $activeContainers = @($containers | Where-Object {
         $project = [string](Get-ModelPropertyValue -InputObject $_ -Name 'Project')

@@ -72,6 +72,15 @@ test('a real agent turn writes into a read-write workspace and undo restores it'
     );
     await page.getByTestId('composer-send').click();
 
+    // apply_patch is gated by approval; the panel must show the diff first.
+    const approveButton = page.getByTestId('approval-approve-button');
+    await expect(approveButton).toBeVisible({ timeout: 240_000 });
+    const fileChange = page.getByTestId('approval-file-change');
+    await expect(fileChange).toBeVisible();
+    await expect(page.getByTestId('approval-file-change-path')).toContainText('hello.ts');
+    await expect(fileChange).toContainText('export const hello');
+    await approveButton.click();
+
     const runtime = page.getByTestId(`thread-row-${thread.id}`).getByTestId('thread-runtime-status');
     await expect.poll(
       () => runtime.getAttribute('data-runtime-status'),

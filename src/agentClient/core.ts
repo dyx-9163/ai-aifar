@@ -134,6 +134,7 @@ export function reduceAgentEvent(state: AgentClientState, event: AgentEvent): Ag
       turnId: event.turnId,
       title: event.title,
       description: event.description,
+      ...(event.fileChange ? { fileChange: event.fileChange } : {}),
       status: 'pending',
       createdAt: new Date().toISOString(),
     };

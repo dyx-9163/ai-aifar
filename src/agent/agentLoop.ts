@@ -17,6 +17,7 @@ import {
   executeAgentToolCall,
   READ_ONLY_TOOL_NAMES,
   WRITE_TOOL_NAMES,
+  type ToolApprovalRequest,
   type WorkspaceToolContext,
 } from './tools/toolRouter.js';
 
@@ -50,7 +51,7 @@ export interface AgentLoopOptions {
   /** Stamped into every `AgentToolCall` for traceability. */
   turnId?: string;
   /** Pauses gated tool calls for user approval; absent means they block. */
-  requestApproval?: (request: { title: string; description: string }) => Promise<boolean>;
+  requestApproval?: (request: ToolApprovalRequest) => Promise<boolean>;
   /** Forwards reasoning/progress events live during every iteration. */
   reasoningHandlers?: Pick<ModelStreamHandlers, 'onRawReasoningDelta' | 'onReasoningSummaryDelta' | 'onPhase'>;
 }

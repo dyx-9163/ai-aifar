@@ -58,16 +58,7 @@ function Get-ModelUtcNow {
 }
 
 function Get-ModelGpuState {
-    $raw = @(Invoke-ModelCompose -ComposeArguments @('--profile', '*', 'ps', '--all', '--format', 'json'))
-    try {
-        $containers = @((($raw -join [Environment]::NewLine) | ConvertFrom-Json) | Where-Object { $null -ne $_ })
-    } catch {
-        return $null
-    }
-
-    $projectContainers = @($containers | Where-Object {
-        [string](Get-ModelPropertyValue -InputObject $_ -Name 'Project') -ceq $script:ModelComposeProject
-    })
+    $projectContainers = @(Get-ModelProjectContainerStates)
     if (
         $projectContainers.Count -ne 1 -or
         [string](Get-ModelPropertyValue -InputObject $projectContainers[0] -Name 'Service') -cne 'llama-gpu'

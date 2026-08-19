@@ -132,6 +132,33 @@ describe('runtime script behavior', () => {
     expectPowerShellSuccess(result);
   });
 
+  it('parses docker ps and inspect output into exact container records', () => {
+    const result = runPowerShell(`
+      . './model-runtime/runtime-common.ps1'
+      function global:Invoke-ModelDocker {
+        param([string[]]$DockerArguments)
+        if ($DockerArguments[0] -eq 'ps') {
+          if (($DockerArguments -join ' ') -notmatch 'label=com\\.docker\\.compose\\.project=ai-aifar-model') { throw 'ps filter was not scoped to the fixed project' }
+          return 'id-1'
+        }
+        return '[{"Config":{"Labels":{"com.docker.compose.project":"ai-aifar-model","com.docker.compose.service":"llama-gpu"}},"State":{"Status":"running","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}}}]'
+      }
+      $records = @(Get-ModelProjectContainerStates)
+      if ($records.Count -ne 1) { throw "Expected exactly one record, got $($records.Count)" }
+      $record = $records[0]
+      if ($record.Project -ceq 'ai-aifar-model' -and $record.Service -ceq 'llama-gpu' -and $record.State -ceq 'running' -and $record.Health -ceq 'healthy') {
+      } else { throw 'Container identity fields were not parsed exactly' }
+      $publishers = @($record.Publishers)
+      if ($publishers.Count -ne 1 -or $publishers[0].URL -cne '127.0.0.1' -or $publishers[0].PublishedPort -ne 8080 -or $publishers[0].TargetPort -ne 8080) {
+        throw 'Loopback publisher was not parsed exactly'
+      }
+      function global:Invoke-ModelDocker { return '' }
+      if (@(Get-ModelProjectContainerStates).Count -ne 0) { throw 'Empty ps output must yield zero records' }
+    `);
+
+    expectPowerShellSuccess(result);
+  });
+
   it('stops only all profiles in the fixed project without volumes', () => {
     const result = runPowerShell(`
       . './model-runtime/stop-model.ps1'
@@ -179,12 +206,12 @@ describe('runtime script behavior', () => {
         if ($SelectedProfile -eq 'gpu') { throw 'GPU health failed' }
       }
       $script:ComposeCalls = [System.Collections.Generic.List[string]]::new()
+      function Get-ModelProjectContainerStates {
+        [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-gpu'; State='running'; Health='unhealthy'; Publishers=@() }
+      }
       function global:Invoke-ModelCompose {
         param([string[]]$ComposeArguments, [switch]$AllowFailure)
         $script:ComposeCalls.Add(($ComposeArguments -join '|'))
-        if ($ComposeArguments -contains 'ps') {
-          return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"running","Health":"unhealthy","Publishers":[]}]'
-        }
         if ($ComposeArguments -contains 'logs') { return 'CUDA error while loading current attempt' }
       }
       Invoke-StartModel -Profile gpu
@@ -212,11 +239,11 @@ describe('runtime script behavior', () => {
         $script:Profiles.Add($SelectedProfile)
         throw 'synthetic health failure'
       }
+      function Get-ModelProjectContainerStates {
+        [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-gpu'; State='running'; Health='healthy'; Publishers=@() }
+      }
       function global:Invoke-ModelCompose {
         param([string[]]$ComposeArguments, [switch]$AllowFailure)
-        if ($ComposeArguments -contains 'ps') {
-          return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"running","Health":"healthy","Publishers":[]}]'
-        }
         if ($ComposeArguments -contains 'logs') { return 'CUDA error from retained history' }
       }
       try { Invoke-StartModel -Profile gpu; throw 'Expected original GPU failure' }
@@ -239,15 +266,15 @@ describe('runtime script behavior', () => {
       function global:Get-ModelUtcNow { [DateTimeOffset]::Parse('2026-08-18T01:02:03Z') }
       function global:Start-ModelProfile { throw 'synthetic GPU health failure' }
       $script:ComposeCalls = [System.Collections.Generic.List[string]]::new()
+      function Get-ModelProjectContainerStates {
+        @(
+          [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-gpu'; State='running'; Health='unhealthy'; Publishers=@([pscustomobject]@{ URL='127.0.0.1'; PublishedPort=8080; TargetPort=8080 }) },
+          [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-hybrid'; State='running'; Health='unhealthy'; Publishers=@([pscustomobject]@{ URL='127.0.0.1'; PublishedPort=8080; TargetPort=8080 }) }
+        )
+      }
       function global:Invoke-ModelCompose {
         param([string[]]$ComposeArguments, [switch]$AllowFailure)
         $script:ComposeCalls.Add(($ComposeArguments -join '|'))
-        if ($ComposeArguments -contains 'ps') {
-          if ($ComposeArguments[-1] -eq 'llama-gpu') {
-            return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"running","Health":"unhealthy","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]}]'
-          }
-          return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"running","Health":"unhealthy","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]},{"Project":"ai-aifar-model","Service":"llama-hybrid","State":"running","Health":"unhealthy","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]}]'
-        }
         if ($ComposeArguments -contains 'logs') { return 'CUDA error while loading current attempt' }
       }
       try { Invoke-StartModel -Profile gpu; throw 'Expected original GPU failure' }
@@ -263,16 +290,19 @@ describe('runtime script behavior', () => {
   it('rejects absent and ambiguous fixed-project ownership', () => {
     const result = runPowerShell(`
       . './model-runtime/runtime-common.ps1'
-      function global:Invoke-ModelCompose { return '[]' }
+      function Get-ModelProjectContainerStates { @() }
       try { Assert-ModelRuntimeOwnership; throw 'Expected absent ownership failure' }
       catch { if ($_.Exception.Message -notmatch 'exactly one') { throw } }
-      function global:Invoke-ModelCompose {
-        return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"exited"}]'
+      function Get-ModelProjectContainerStates {
+        [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-gpu'; State='exited'; Health=''; Publishers=@() }
       }
       try { Assert-ModelRuntimeOwnership; throw 'Expected non-owner failure' }
       catch { if ($_.Exception.Message -notmatch 'exactly one') { throw } }
-      function global:Invoke-ModelCompose {
-        return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"running","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]},{"Project":"ai-aifar-model","Service":"llama-cpu","State":"running","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]}]'
+      function Get-ModelProjectContainerStates {
+        @(
+          [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-gpu'; State='running'; Health=''; Publishers=@([pscustomobject]@{ URL='127.0.0.1'; PublishedPort=8080; TargetPort=8080 }) },
+          [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-cpu'; State='running'; Health=''; Publishers=@([pscustomobject]@{ URL='127.0.0.1'; PublishedPort=8080; TargetPort=8080 }) }
+        )
       }
       try { Assert-ModelRuntimeOwnership; throw 'Expected ambiguous ownership failure' }
       catch { if ($_.Exception.Message -notmatch 'ambiguous') { throw } }
@@ -284,8 +314,8 @@ describe('runtime script behavior', () => {
   it('accepts exactly one fixed-project loopback owner', () => {
     const result = runPowerShell(`
       . './model-runtime/runtime-common.ps1'
-      function global:Invoke-ModelCompose {
-        return '[{"Project":"ai-aifar-model","Service":"llama-hybrid","State":"running","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]}]'
+      function Get-ModelProjectContainerStates {
+        [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-hybrid'; State='running'; Health=''; Publishers=@([pscustomobject]@{ URL='127.0.0.1'; PublishedPort=8080; TargetPort=8080 }) }
       }
       Assert-ModelRuntimeOwnership
     `);
@@ -364,13 +394,13 @@ describe('runtime script behavior', () => {
   it('rejects active fixed-project containers unless ownership is exact', () => {
     const result = runPowerShell(`
       . './model-runtime/runtime-common.ps1'
-      function global:Invoke-ModelCompose {
-        return '[{"Project":"ai-aifar-model","Service":"llama-gpu","State":"running","Publishers":[]}]'
+      function Get-ModelProjectContainerStates {
+        [pscustomobject]@{ Project='ai-aifar-model'; Service='llama-gpu'; State='running'; Health=''; Publishers=@() }
       }
       try { Get-ModelRuntimeOwnership; throw 'Expected publisher rejection' }
       catch { if ($_.Exception.Message -notmatch 'ambiguous') { throw } }
-      function global:Invoke-ModelCompose {
-        return '[{"Project":"ai-aifar-model","Service":"unexpected","State":"running","Publishers":[{"URL":"127.0.0.1","PublishedPort":8080,"TargetPort":8080}]}]'
+      function Get-ModelProjectContainerStates {
+        [pscustomobject]@{ Project='ai-aifar-model'; Service='unexpected'; State='running'; Health=''; Publishers=@([pscustomobject]@{ URL='127.0.0.1'; PublishedPort=8080; TargetPort=8080 }) }
       }
       try { Get-ModelRuntimeOwnership; throw 'Expected service rejection' }
       catch { if ($_.Exception.Message -notmatch 'ambiguous') { throw } }

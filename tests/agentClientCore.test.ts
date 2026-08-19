@@ -174,6 +174,27 @@ describe('Agent Client Core', () => {
     }));
   });
 
+  it('carries the file-change diff from approval events into the pending approval', () => {
+    let state = { ...emptyAgentClientState(), activeThreadId: 'thread-1' };
+    state = reduceAgentEvent(state, started('thread-1', 'turn-1', 1));
+    const fileChange = {
+      relativePath: 'src/new.ts',
+      action: 'created' as const,
+      lines: [{ kind: 'added' as const, text: 'export const fresh = true;' }],
+    };
+    state = reduceAgentEvent(state, {
+      type: 'approval.required', ...envelope('thread-1', 'turn-1', 2), approvalId: 'approval-diff',
+      title: 'Edit file: src/new.ts', description: 'The agent wants to create "src/new.ts" in the workspace.',
+      fileChange,
+    });
+
+    expect(state.pendingApproval?.id).toBe('approval-diff');
+    expect(state.pendingApproval?.fileChange).toEqual(fileChange);
+    expect(state.snapshot.approvals).toContainEqual(expect.objectContaining({
+      id: 'approval-diff', fileChange, status: 'pending',
+    }));
+  });
+
   it('tracks two running chats independently', () => {
     let state = reduceAgentEvent(emptyAgentClientState(), started('thread-1', 'turn-1', 1));
     state = reduceAgentEvent(state, started('thread-2', 'turn-2', 1));

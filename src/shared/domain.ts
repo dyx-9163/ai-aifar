@@ -73,12 +73,30 @@ export interface ChangeItem extends BaseItem {
 
 export type Item = MessageItem | ReasoningItem | ToolItem | ChangeItem;
 
+export type PatchDiffLineKind = 'context' | 'added' | 'removed';
+
+export interface PatchDiffLine {
+  kind: PatchDiffLineKind;
+  text: string;
+}
+
+/** A dry-run preview of a single file change, shown before the user approves it. */
+export interface FileChangePreview {
+  /** Workspace-relative path using forward slashes. */
+  relativePath: string;
+  action: 'created' | 'modified';
+  /** Hunked diff lines; `context` lines with text "…" mark skipped ranges. */
+  lines: PatchDiffLine[];
+}
+
 export interface Approval {
   id: string;
   threadId: string;
   turnId: string;
   title: string;
   description: string;
+  /** Present when the approval gates a file write with a computed diff. */
+  fileChange?: FileChangePreview;
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
   respondedAt?: string;
