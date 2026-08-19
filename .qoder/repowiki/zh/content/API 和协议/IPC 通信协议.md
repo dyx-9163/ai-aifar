@@ -1,3 +1,7 @@
+</think>
+
+现在我已经收集了足够的信息来更新 IPC 通信协议文档。根据分析，主要的变更是添加了新的 `workspace.setTrust` IPC 协议消息类型，用于动态切换工作区的信任级别。让我更新文档：
+
 # IPC 通信协议
 
 <cite>
@@ -15,10 +19,11 @@
 
 ## 更新摘要
 **变更内容**
-- 移除了 `group.create` 和 `group.delete` 消息类型
-- 新增了 `thread.pin` 消息用于线程置顶功能
-- `thread.create` 消息现在接受 `workspaceId` 而不是 `groupId`
-- 更新了相关的方法签名和参数验证逻辑
+- 新增了 `workspace.setTrust` IPC 协议消息类型，支持动态切换工作区信任级别
+- 添加了严格的信任级别验证机制，仅接受 'read-only' 或 'read-write' 两种有效值
+- 在 preload 层暴露了 `setWorkspaceTrust` 方法供渲染进程调用
+- 在主进程路由中集成了新的信任级别设置功能
+- 更新了相关测试用例以验证新功能的正确性
 
 ## 目录
 1. [简介](#简介)
@@ -45,7 +50,7 @@
 ## 项目结构
 IPC 协议由共享类型定义、预加载桥接、主进程路由与代理、以及 Agent 工作进程共同实现。关键文件职责如下：
 - src/shared/protocol.ts：定义 DesktopRequest、SequencedAgentEvent、AgentEvent 及校验守卫
-- src/shared/domain.ts：定义领域模型（如 ModelProfileInput、ModelRunMetrics、TurnAttachment 等）
+- src/shared/domain.ts：定义领域模型（如 ModelProfileInput、ModelRunMetrics、TurnAttachment、WorkspaceTrustLevel 等）
 - src/preload.ts：在渲染进程暴露 desktop API，封装 ipcRenderer.invoke/on
 - src/renderer/types.d.ts：声明 Window.desktop 的类型，供渲染端使用
 - src/main.ts：注册 IPC 处理器，转发请求到 AgentRequestBroker，并将事件回推至渲染进程
@@ -127,29 +132,30 @@ P-->>R : "listener(event)"
 ## 详细组件分析
 
 ### 请求类型 DesktopRequest
-**已更新** 移除了群组相关的操作，新增了线程置顶功能，并更新了线程创建的工作区关联方式
+**已更新** 新增了 workspace.setTrust 消息类型用于动态信任级别切换，包含严格的输入验证
 
 - 支持的操作包括：
   - snapshot.get：获取应用快照
-  - thread.create / thread.delete / thread.setModel / **thread.pin**：会话创建/删除/设置模型配置/**线程置顶**
-  - turn.start / turn.cancel / **turn.undo**：开始/取消一轮对话/**撤销轮次**
+  - thread.create / thread.delete / thread.pin / thread.setModel：会话创建/删除/置顶/设置模型配置
+  - turn.start / turn.cancel / turn.undo：开始/取消一轮对话/撤销轮次
   - approval.respond：审批响应
   - modelProfile.save / modelProfile.delete / modelProfile.test：模型配置保存/删除/测试连接
   - settings.update：运行时设置更新
-  - workspace.register / workspace.delete：工作区注册/删除
+  - workspace.register / workspace.delete / **workspace.setTrust**：工作区注册/删除/**动态信任级别切换**
   - language.set / theme.set：语言/主题设置
 - 字段校验规则由 isDesktopRequest 严格限定，例如：
-  - turn.start 必须包含 threadId 与 text，可选 modelProfileId、**workspaceId** 与 attachments
-  - **thread.create 现在接受 workspaceId 而不是 groupId**
-  - **新增 thread.pin 需要 threadId 和 pinned 布尔值**
+  - turn.start 必须包含 threadId 与 text，可选 modelProfileId、workspaceId 与 attachments
+  - thread.create 现在接受 workspaceId 而不是 groupId
+  - thread.pin 需要 threadId 和 pinned 布尔值
+  - **workspace.setTrust 需要 workspaceId 和 trustLevel，trustLevel 必须是 'read-only' 或 'read-write'**
   - modelProfile.save/test 的 profile 需满足 ModelProfileInput 约束（名称、provider、baseUrl、model 等）
   - settings.update 的 settings 需满足 RuntimeSettingsInput 约束（上下文消息上限、显示模式等）
 
 **章节来源**
-- [src/shared/protocol.ts:22-39](file://src/shared/protocol.ts#L22-L39)
-- [src/shared/protocol.ts:274-316](file://src/shared/protocol.ts#L274-L316)
-- [src/shared/domain.ts:124-192](file://src/shared/domain.ts#L124-L192)
-- [tests/protocol.test.ts:4-89](file://tests/protocol.test.ts#L4-L89)
+- [src/shared/protocol.ts:22-41](file://src/shared/protocol.ts#L22-L41)
+- [src/shared/protocol.ts:293-337](file://src/shared/protocol.ts#L293-L337)
+- [src/shared/domain.ts:272-287](file://src/shared/domain.ts#L272-L287)
+- [tests/protocol.test.ts:282-297](file://tests/protocol.test.ts#L282-L297)
 
 ### 事件类型 SequencedAgentEvent
 - 所有与"轮次"相关的事件都携带 threadId、turnId、modelProfileId、sequence，用于跨进程排序与关联
@@ -166,8 +172,8 @@ P-->>R : "listener(event)"
 
 **章节来源**
 - [src/shared/protocol.ts:41-65](file://src/shared/protocol.ts#L41-L65)
-- [src/shared/protocol.ts:318-370](file://src/shared/protocol.ts#L318-L370)
-- [tests/protocol.test.ts:275-352](file://tests/protocol.test.ts#L275-L352)
+- [src/shared/protocol.ts:339-391](file://src/shared/protocol.ts#L339-L391)
+- [tests/protocol.test.ts:299-377](file://tests/protocol.test.ts#L299-L377)
 
 ### 序列号机制与事件顺序性
 - 每个轮次内的事件通过 sequence 递增编号，从 1 开始
@@ -232,19 +238,34 @@ class AgentRequestBroker {
 - [src/main.ts:135-143](file://src/main.ts#L135-L143)
 
 ### 预加载桥接与渲染端类型
-**已更新** 新增了 setThreadPinned 方法，更新了 createThread 方法的参数
+**已更新** 新增了 setWorkspaceTrust 方法用于动态信任级别切换
 
 - preload 暴露 desktop API，封装所有请求方法与事件订阅
 - renderer/types.d.ts 声明 Window.desktop 的方法签名，便于 TS 类型检查与 IDE 提示
-- **新增了 setThreadPinned(threadId, pinned) 方法用于线程置顶**
-- **createThread 方法现在接受 workspaceId 参数而不是 groupId**
+- **新增了 setWorkspaceTrust(workspaceId, trustLevel) 方法用于动态切换工作区信任级别**
+- createThread 方法现在接受 workspaceId 参数而不是 groupId
 
 **章节来源**
-- [src/preload.ts:5-31](file://src/preload.ts#L5-L31)
-- [src/renderer/types.d.ts:17-39](file://src/renderer/types.d.ts#L17-L39)
+- [src/preload.ts:5-32](file://src/preload.ts#L5-L32)
+- [src/renderer/types.d.ts:17-41](file://src/renderer/types.d.ts#L17-L41)
+
+### 工作区信任级别管理机制
+**新增** 实现了完整的工作区信任级别动态切换功能
+
+- WorkspaceTrustLevel 类型定义为 'read-only' | 'read-write'，提供细粒度的访问控制
+- workspace.setTrust 请求通过 isDesktopRequest 进行严格验证，防止恶意输入
+- 数据库层提供 setWorkspaceTrust 方法，支持实时更新工作区信任级别
+- 信任级别变更会影响工作区的文件操作权限和网络访问策略
+- 支持在同一工作区内动态提升或降级信任级别，无需重新注册
+
+**章节来源**
+- [src/shared/domain.ts:272-287](file://src/shared/domain.ts#L272-L287)
+- [src/shared/protocol.ts:37-39](file://src/shared/protocol.ts#L37-L39)
+- [src/shared/protocol.ts:324-329](file://src/shared/protocol.ts#L324-L329)
+- [src/agent/database.ts:738-749](file://src/agent/database.ts#L738-L749)
 
 ## 依赖关系分析
-- protocol.ts 依赖 domain.ts 中的领域类型（如 ModelProfileInput、ModelRunMetrics、TurnAttachment 等）
+- protocol.ts 依赖 domain.ts 中的领域类型（如 ModelProfileInput、ModelRunMetrics、TurnAttachment、WorkspaceTrustLevel 等）
 - main.ts 依赖 agentRequestBroker.ts 进行请求调度
 - worker.ts 依赖 protocol.ts 的事件类型与 domain.ts 的数据模型
 - tests/* 验证协议守卫与 Broker 行为
@@ -278,6 +299,7 @@ T2["agentRequestBroker.test.ts"] --> B
 - Broker 使用 Map 存储待处理请求，O(1) 查找与清理
 - 超时保护防止内存泄漏与悬挂 Promise
 - 模型运行指标事件提供吞吐与时延信息，可用于前端节流与展示优化
+- 工作区信任级别变更采用即时更新策略，避免不必要的重启开销
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -286,32 +308,35 @@ T2["agentRequestBroker.test.ts"] --> B
 - 事件丢失：确认 createTurnEventEmitter 的 sink 是否成功持久化与推送；检查主进程是否收到并转发 'agent:event'
 - 断连处理：当端口关闭或替换，Broker.disconnect 会拒绝所有待处理请求，渲染端应捕获错误并提示重试
 - 非法请求：isDesktopRequest/isAgentEvent 会拒绝不符合类型的消息，检查字段与取值
-- **线程置顶问题：确认 thread.pin 请求包含正确的 threadId 和 pinned 布尔值**
-- **工作区关联问题：确认 thread.create 使用 workspaceId 而不是 groupId**
+- 线程置顶问题：确认 thread.pin 请求包含正确的 threadId 和 pinned 布尔值
+- 工作区关联问题：确认 thread.create 使用 workspaceId 而不是 groupId
+- **信任级别设置问题：确认 workspace.setTrust 请求包含有效的 workspaceId 和 trustLevel（'read-only' 或 'read-write'）**
+- **恶意输入防护：系统会自动拒绝无效的信任级别值，如 'full-access' 等非标准值**
 
 **章节来源**
 - [src/main/agentRequestBroker.ts:33-71](file://src/main/agentRequestBroker.ts#L33-L71)
 - [src/main.ts:135-143](file://src/main.ts#L135-L143)
 - [tests/agentRequestBroker.test.ts:8-37](file://tests/agentRequestBroker.test.ts#L8-L37)
+- [tests/protocol.test.ts:290-297](file://tests/protocol.test.ts#L290-L297)
 
 ## 结论
-该 IPC 协议通过严格的类型守卫、有序事件序列与可靠的请求代理，实现了渲染进程与 Agent 工作进程之间的高内聚、低耦合通信。**最新的变更简化了数据结构，移除了群组概念，引入了更直接的线程置顶功能和工作区关联机制**。遵循本文档的类型与流程约定，可确保系统稳定性与可观测性。
+该 IPC 协议通过严格的类型守卫、有序事件序列与可靠的请求代理，实现了渲染进程与 Agent 工作进程之间的高内聚、低耦合通信。**最新的变更增强了工作区安全控制能力，通过新增的 workspace.setTrust 功能实现了动态信任级别切换，同时提供了完善的输入验证机制防止恶意攻击**。遵循本文档的类型与流程约定，可确保系统稳定性与可观测性。
 
 [本节为总结，不直接分析具体文件]
 
 ## 附录：类型与使用示例
 
 ### DesktopRequest 方法清单与参数/返回值
-**已更新** 移除了群组相关方法，新增了线程置顶方法，更新了线程创建参数
+**已更新** 新增了 workspace.setTrust 方法用于动态信任级别切换
 
 - snapshot.get：无参；返回 AppSnapshot
-- **thread.create(title, workspaceId?)**：**title 字符串，workspaceId 可选（替代原来的 groupId）**；返回 ThreadSummary
+- thread.create(title, workspaceId?)：title 字符串，workspaceId 可选；返回 ThreadSummary
 - thread.delete(threadId)：threadId 字符串；返回 void
-- **thread.pin(threadId, pinned)**：**新增方法，threadId 字符串，pinned 布尔值**；返回 void
+- thread.pin(threadId, pinned)：threadId 字符串，pinned 布尔值；返回 void
 - thread.setModel(threadId, modelProfileId?)：threadId 字符串，modelProfileId 可选；返回 void
-- turn.start(threadId, text, modelProfileId?, **workspaceId?**, attachments?)：text 必填，attachments 为 TurnAttachment[]；返回 { turnId }
+- turn.start(threadId, text, modelProfileId?, workspaceId?, attachments?)：text 必填，attachments 为 TurnAttachment[]；返回 { turnId }
 - turn.cancel(threadId, turnId)：返回 boolean
-- **turn.undo(turnId)**：**新增方法，用于撤销轮次**；返回 TurnRollbackReport
+- turn.undo(turnId)：用于撤销轮次；返回 TurnRollbackReport
 - approval.respond(approvalId, approved)：返回 boolean | void
 - modelProfile.save(profile)：profile 为 ModelProfileInput；返回 ModelProfile
 - modelProfile.delete(id)：id 字符串；返回 void
@@ -319,15 +344,16 @@ T2["agentRequestBroker.test.ts"] --> B
 - settings.update(settings)：settings 为 RuntimeSettingsInput；返回 AppSettings
 - workspace.register(path, trustLevel)：返回 WorkspaceRecord
 - workspace.delete(workspaceId)：返回 void
+- **workspace.setTrust(workspaceId, trustLevel)**：**新增方法，workspaceId 字符串，trustLevel 为 'read-only' 或 'read-write'；返回 WorkspaceRecord**
 - language.set(language)：language 为 LanguagePreference；返回 void
 - theme.set(theme)：theme 为 ThemePreference；返回 void
 
 **章节来源**
-- [src/preload.ts:5-31](file://src/preload.ts#L5-L31)
-- [src/renderer/types.d.ts:17-39](file://src/renderer/types.d.ts#L17-L39)
+- [src/preload.ts:5-32](file://src/preload.ts#L5-L32)
+- [src/renderer/types.d.ts:17-41](file://src/renderer/types.d.ts#L17-L41)
 - [src/shared/domain.ts:7-22](file://src/shared/domain.ts#L7-L22)
-- [src/shared/domain.ts:160-192](file://src/shared/domain.ts#L160-L192)
-- [src/shared/domain.ts:238-257](file://src/shared/domain.ts#L238-L257)
+- [src/shared/domain.ts:272-287](file://src/shared/domain.ts#L272-L287)
+- [src/shared/domain.ts:302-305](file://src/shared/domain.ts#L302-L305)
 
 ### SequencedAgentEvent 事件清单与触发时机
 - turn.queued：进入队列时触发，queuePosition 为正整数
@@ -341,17 +367,40 @@ T2["agentRequestBroker.test.ts"] --> B
 
 **章节来源**
 - [src/shared/protocol.ts:41-65](file://src/shared/protocol.ts#L41-L65)
-- [src/shared/protocol.ts:318-370](file://src/shared/protocol.ts#L318-L370)
+- [src/shared/protocol.ts:339-391](file://src/shared/protocol.ts#L339-L391)
 
 ### TypeScript 类型定义示例（路径引用）
 - DesktopRequest 与 SequencedAgentEvent 定义：[src/shared/protocol.ts:22-65](file://src/shared/protocol.ts#L22-L65)
-- 领域类型（ModelProfileInput、ModelRunMetrics、TurnAttachment 等）：[src/shared/domain.ts:124-192](file://src/shared/domain.ts#L124-L192), [src/shared/domain.ts:238-257](file://src/shared/domain.ts#L238-L257), [src/shared/domain.ts:43-49](file://src/shared/domain.ts#L43-L49)
-- 渲染端 Window.desktop 类型声明：[src/renderer/types.d.ts:17-39](file://src/renderer/types.d.ts#L17-L39)
+- 领域类型（ModelProfileInput、ModelRunMetrics、TurnAttachment、WorkspaceTrustLevel 等）：[src/shared/domain.ts:124-192](file://src/shared/domain.ts#L124-L192), [src/shared/domain.ts:272-287](file://src/shared/domain.ts#L272-L287), [src/shared/domain.ts:302-305](file://src/shared/domain.ts#L302-L305)
+- 渲染端 Window.desktop 类型声明：[src/renderer/types.d.ts:17-41](file://src/renderer/types.d.ts#L17-L41)
 
 ### 实际使用场景代码片段（路径引用）
-- 渲染端调用 startTurn 与订阅事件：[src/preload.ts:15-16](file://src/preload.ts#L15-L16), [src/preload.ts:26-30](file://src/preload.ts#L26-L30)
-- **线程置顶功能使用**：[src/preload.ts:11](file://src/preload.ts#L11), [src/renderer/types.d.ts:27](file://src/renderer/types.d.ts#L27)
-- **工作区关联的线程创建**：[src/preload.ts:9](file://src/preload.ts#L9), [src/renderer/types.d.ts:25](file://src/renderer/types.d.ts#L25)
+- 渲染端调用 startTurn 与订阅事件：[src/preload.ts:15-16](file://src/preload.ts#L15-L16), [src/preload.ts:33-37](file://src/preload.ts#L33-L37)
+- 线程置顶功能使用：[src/preload.ts:11](file://src/preload.ts#L11), [src/renderer/types.d.ts:27](file://src/renderer/types.d.ts#L27)
+- 工作区关联的线程创建：[src/preload.ts:9](file://src/preload.ts#L9), [src/renderer/types.d.ts:25](file://src/renderer/types.d.ts#L25)
+- **工作区信任级别动态切换**：[src/preload.ts:31-32](file://src/preload.ts#L31-L32), [src/renderer/types.d.ts:40](file://src/renderer/types.d.ts#L40)
 - 主进程路由与事件推送：[src/main.ts:103-108](file://src/main.ts#L103-L108), [src/main.ts:135-143](file://src/main.ts#L135-L143)
 - Broker 超时与断连处理：[src/main/agentRequestBroker.ts:33-71](file://src/main/agentRequestBroker.ts#L33-L71)
 - 事件序列号与顺序保证：[src/agent/worker.ts:128-153](file://src/agent/worker.ts#L128-L153)
+- **信任级别验证与数据库更新**：[src/shared/protocol.ts:324-329](file://src/shared/protocol.ts#L324-L329), [src/agent/database.ts:738-749](file://src/agent/database.ts#L738-L749)
+
+### 工作区信任级别使用示例
+```typescript
+// 动态提升工作区信任级别
+await window.desktop.setWorkspaceTrust('workspace-id', 'read-write');
+
+// 降级为只读模式
+await window.desktop.setWorkspaceTrust('workspace-id', 'read-only');
+
+// 错误处理示例
+try {
+  await window.desktop.setWorkspaceTrust('invalid-workspace', 'read-write');
+} catch (error) {
+  console.error('信任级别设置失败:', error);
+}
+```
+
+**章节来源**
+- [src/preload.ts:31-32](file://src/preload.ts#L31-L32)
+- [src/renderer/types.d.ts:40](file://src/renderer/types.d.ts#L40)
+- [tests/protocol.test.ts:286-297](file://tests/protocol.test.ts#L286-L297)

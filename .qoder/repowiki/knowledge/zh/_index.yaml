@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: main
 nodes_managed: true
-exported_at: "2026-08-19T16:28:39Z"
+exported_at: "2026-08-19T19:05:17Z"
 modules:
     "":
-        dir_name: Private AI Desktop 根工程（Electron + Vite + Forge）
-        title: Private AI Desktop 根工程（Electron + Vite + Forge）
+        dir_name: Electron + Vite 多进程桌面应用根工程
+        title: Electron + Vite 多进程桌面应用根工程
         scope:
             - README.md
             - .gitignore

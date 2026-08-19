@@ -33,6 +33,8 @@ const MAX_CODE_DUMP_STEERS = 2;
 const MAX_TRUNCATED_TOOL_STEERS = 3;
 /** How many times the loop re-prompts when the model announces edits without issuing tool calls. */
 const MAX_INTENT_STEERS = 2;
+/** How many times the loop re-prompts when a fenced tool call was not valid JSON. */
+const MAX_MALFORMED_TOOL_STEERS = 2;
 const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/g;
 const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/g;
 
@@ -104,12 +106,48 @@ export function parseToolCall(text: string): ParsedToolCall | undefined {
   return parseToolCalls(text)[0];
 }
 
+/** True when the reply contains a fenced tool block that could not be parsed even after repair. */
+export function hasUnparsedToolFence(text: string): boolean {
+  for (const match of text.matchAll(TOOL_FENCE_GLOBAL_PATTERN)) {
+    if (!match[1] || !parseFencedToolCall(match[1])) return true;
+  }
+  return false;
+}
+
+/** Closes unterminated strings and appends missing ]/} closers so truncated JSON can re-parse. */
+function repairToolJson(body: string): string {
+  let repaired = body.replace(/,(\s*[}\]])/g, '$1');
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of repaired) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{') stack.push('}');
+    else if (char === '[') stack.push(']');
+    else if (char === '}' || char === ']') stack.pop();
+  }
+  if (inString) repaired += '"';
+  return repaired + stack.reverse().join('');
+}
+
 function parseFencedToolCall(body: string): ParsedToolCall | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body.trim());
   } catch {
-    return undefined;
+    // Models frequently drop closing braces or leave trailing commas when the
+    // output limit bites; repair the shape before giving up on the call.
+    try {
+      parsed = JSON.parse(repairToolJson(body.trim()));
+    } catch {
+      return undefined;
+    }
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
@@ -193,6 +231,12 @@ const UNFULFILLED_INTENT_STEERING_MESSAGE = [
   'Never paste replacement code into the answer.',
 ].join(' ');
 
+const MALFORMED_TOOL_STEERING_MESSAGE = [
+  'A ```tool block in your previous reply was not valid JSON, so it was ignored and nothing ran.',
+  'Resend the call now as one strict-JSON ```tool block: close every { and [, quote every string, keep numbers unquoted, and keep each "replacement" at most ~120 lines.',
+  'Never paste code into the answer.',
+].join(' ');
+
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
   return text
@@ -270,6 +314,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let codeDumpSteersUsed = 0;
   let truncatedToolSteersUsed = 0;
   let intentSteersUsed = 0;
+  let malformedToolSteersUsed = 0;
   let lastMetrics: ModelRunMetrics | undefined;
 
   const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
@@ -299,6 +344,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         truncatedToolSteersUsed += 1;
         messages.push({ role: 'assistant', content: text });
         messages.push({ role: 'user', content: TRUNCATED_TOOL_STEERING_MESSAGE });
+        continue;
+      }
+      if (malformedToolSteersUsed < MAX_MALFORMED_TOOL_STEERS && hasUnparsedToolFence(text)) {
+        // A fenced call survived neither raw parsing nor repair; ask for a strict resend.
+        malformedToolSteersUsed += 1;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: MALFORMED_TOOL_STEERING_MESSAGE });
         continue;
       }
       if (

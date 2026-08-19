@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -633,6 +634,80 @@ describe('worker turn runtime', () => {
     const failed = harness.database.getSnapshot().turns.find((turn) => turn.id === turnId);
     expect(failed).toMatchObject({ status: 'failed', incomplete: true });
     expect(failed?.error).toContain('Iteration budget exhausted before the task finished and no files were changed');
+    harness.database.close();
+  });
+
+  it('completes a rewrite by recovering from the observed cloud-model failure sequence', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-recoverws-'));
+    tempDirectories.push(workspaceDirectory);
+    mkdirSync(join(workspaceDirectory, 'src'), { recursive: true });
+    const originalApp = '<template>\n  <div>old</div>\n</template>\n';
+    const originalHtml = '<html><body>old</body></html>\n';
+    writeFileSync(join(workspaceDirectory, 'src', 'App.vue'), originalApp);
+    writeFileSync(join(workspaceDirectory, 'index.html'), originalHtml);
+    const hashOf = (text: string) => createHash('sha256').update(text).digest('hex');
+    const newApp = '<template>\n  <div>game</div>\n</template>\n';
+    const newHtml = '<html><body>game</body></html>\n';
+
+    // Replays the failure shapes observed against the cloud model, in order:
+    // announced read without a tool call, empty batch, single-object/quoted/
+    // overshooting patch input, and a tool call cut off by the output limit.
+    const replies = [
+      'Let me first read the current state of both files:',
+      `\`\`\`tool
+${JSON.stringify({ tool: 'read_file', input: { path: 'src/App.vue' } })}
+\`\`\`
+\`\`\`tool
+${JSON.stringify({ tool: 'read_file', input: { path: 'index.html' } })}
+\`\`\``,
+      `\`\`\`tool\n${JSON.stringify({ tool: 'apply_patch', input: { files: [] } })}\n\`\`\``,
+      `\`\`\`tool\n${JSON.stringify({ tool: 'apply_patch', input: { files: { path: 'src/App.vue', baseContentHash: hashOf(originalApp), edits: { startLine: '1', endLine: '999', replacement: newApp } } } })}\n\`\`\``,
+      'Now updating index.html:\n```tool\n{"tool": "apply_patch", "input": {"path": "index.html", "baseContentHash": "cut',
+      `\`\`\`tool\n${JSON.stringify({ tool: 'apply_patch', input: { path: 'index.html', baseContentHash: hashOf(originalHtml), edits: [{ startLine: 1, endLine: 1, replacement: newHtml }] } })}\n\`\`\``,
+      'Done: replaced src/App.vue and index.html with the game build.',
+    ];
+    let call = 0;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      const reply = replies[Math.min(call, replies.length - 1)];
+      call += 1;
+      await handlers.onAnswerDelta(reply);
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Recovery sequence');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Replace the app with the game build',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    const approver = (async () => {
+      for (let index = 0; index < 2; index += 1) {
+        await eventually(() => {
+          if (!harness.database.getSnapshot().approvals.some((approval) => approval.status === 'pending')) {
+            const turn = harness.database.getSnapshot().turns.find((candidate) => candidate.id === turnId);
+            const detail = harness.events.map((event) => {
+              const record = event as Record<string, unknown>;
+              return `${event.type}:${String(record.title ?? '').slice(0, 20)}:${String(record.output ?? '').slice(0, 60)}`;
+            }).join(' | ');
+            throw new Error(`no pending approval; status=${turn?.status}; detail=${detail}`);
+          }
+        });
+        const pending = harness.database.getSnapshot().approvals.find((approval) => approval.status === 'pending');
+        expect(harness.runtime.respondApproval(pending!.id, true)).toBe(true);
+      }
+    })();
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    await approver;
+    expect(typesFor(harness.events, turnId)).not.toContain('turn.failed');
+    expect(readFileSync(join(workspaceDirectory, 'src', 'App.vue'), 'utf-8')).toBe(newApp);
+    expect(readFileSync(join(workspaceDirectory, 'index.html'), 'utf-8')).toBe(newHtml);
+    const turn = harness.database.getSnapshot().turns.find((candidate) => candidate.id === turnId);
+    expect(turn).toMatchObject({ status: 'completed', incomplete: false });
     harness.database.close();
   });
 

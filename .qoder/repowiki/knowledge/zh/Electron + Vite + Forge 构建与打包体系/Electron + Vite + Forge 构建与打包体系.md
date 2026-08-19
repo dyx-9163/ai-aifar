@@ -12,8 +12,6 @@ source_files:
     - vite.agent.config.ts
     - vite.renderer.config.ts
     - scripts/verify-package-contents.mjs
-    - pnpm-workspace.yaml
-    - tsconfig.json
     - model-runtime/compose.yaml
     - model-runtime/start-model.ps1
     - model-runtime/runtime-common.ps1
@@ -21,49 +19,54 @@ source_files:
 
 ## 1. 构建系统概览
 
-本项目采用 **Electron + Vite + Electron Forge** 的三件套构建方案：Vite 负责各进程源码编译，Electron Forge 编排构建、打包与分发，最终产出跨平台安装包。版本管理集中在 `package.json`（`version: "0.1.0"`），通过 pnpm 工作区管理依赖。
+本项目采用 **Electron 43** + **Vite 8** + **@electron-forge 7** 的三件套作为统一的构建、打包与分发方案。应用由四个独立的 Vite 构建目标组成：主进程 (`src/main.ts`)、预加载脚本 (`src/preload.ts`)、Agent Worker (`src/agent/worker.ts`) 以及渲染进程 (Vue 单文件组件，入口 `index.html`)。Forge 通过 `VitePlugin` 将这四个目标编排进一次 `pnpm package` / `make` 流程中。
 
-## 2. 核心构建流程
+版本管理集中在根 `package.json`：`name: private-ai-desktop`、`productName: Private AI Desktop`、`version: 0.1.0`，所有产物目录遵循 `out/Private AI Desktop-{platform}-{arch}` 命名约定（见 `scripts/verify-package-contents.mjs` 第 90–94 行）。
 
-### 2.1 多入口构建（Forge + Vite）
-`forge.config.ts` 通过 `@electron-forge/plugin-vite` 声明四个独立构建产物：
-- **主进程**：`src/main.ts` → `.vite/build/main.js`
-- **预加载脚本**：`src/preload.ts` → `.vite/build/preload.js`
-- **Agent 工作线程**：`src/agent/worker.ts` → `.vite/build/worker.js`
-- **渲染进程**：`main_window` 页面 → `.vite/renderer/main_window/index.html`
+## 2. 关键文件与角色
 
-每个入口对应独立的 Vite 配置文件（`vite.main.config.ts`、`vite.preload.config.ts`、`vite.agent.config.ts`、`vite.renderer.config.ts`），分别控制 Rollup external 模块（如 `electron`、`node:path`、`node:sqlite`）和 Vue 插件。
+| 文件 | 作用 |
+|---|---|
+| `package.json` | 定义 `start` / `build` / `package` / `make` / `test` / `typecheck` 等 npm scripts；声明 Electron、Vite、Playwright、Vitest 等依赖 |
+| `forge.config.ts` | Forge 配置：ASAR 打包、忽略规则、镜像源 (`npmmirror.com/mirrors/electron/`)、MakerZIP 多平台产出、VitePlugin 四目标编排 |
+| `vite.main.config.ts` | 主进程构建：将 `electron`、`node:path` 标记为 external |
+| `vite.preload.config.ts` | 预加载构建：将 `electron` 标记为 external |
+| `vite.agent.config.ts` | Agent Worker 构建：将 `electron`、`node:sqlite` 标记为 external |
+| `vite.renderer.config.ts` | 渲染进程构建：启用 `@vitejs/plugin-vue` |
+| `scripts/verify-package-contents.mjs` | 打包后校验：限制 ASAR 大小 ≤ 2 MiB、白名单仅允许 `package.json` 和 `.vite/*`、强制包含 `main.js`/`preload.js`/`worker.js`/`renderer/main_window/index.html`、禁止外层目录泄露 `.git`/`docs`/`model-runtime`/`models`/`node_modules`/`.env`/`.gguf` 等 |
+| `model-runtime/compose.yaml` | 模型运行时 Docker Compose：`cpu` / `hybrid` / `gpu` 三个 profile，均暴露 OpenAI 兼容接口于 `127.0.0.1:8080` |
+| `model-runtime/start-model.ps1` / `runtime-common.ps1` | PowerShell 启动器：校验模型工件 SHA-256、端口占用、Docker 守护进程，支持 GPU 失败自动回退到 hybrid profile |
 
-### 2.2 打包策略
-`forge.config.ts` 中启用 `asar: true`，并通过 `ignore: [/^\/(?!\.vite(?:\/|$)|package\.json$)/]` 仅将 `.vite/build` 和根 `package.json` 打入 ASAR，其余源码被排除。下载源配置为国内镜像 `https://npmmirror.com/mirrors/electron/`，缓存目录位于 `os.tmpdir()/private-ai-desktop-electron-cache`。
+## 3. 架构与约定
 
-### 2.3 目标平台
-使用 `MakerZIP` 同时生成 `darwin`、`linux`、`win32` 三个平台的 ZIP 包，由 `pnpm package`（即 `electron-forge package && node scripts/verify-package-contents.mjs`）触发。
+### 3.1 多目标 Vite 构建
+每个 Electron 子进程都有独立 Vite 配置，通过 `rollupOptions.external` 避免将 Node/Electron 原生模块打入 bundle，确保产物可直接被 Node 运行。
 
-## 3. 产物校验（scripts/verify-package-contents.mjs）
-该脚本是构建流水线中的强制质量门控，在 `pnpm package` 后自动执行，包含两类约束：
+### 3.2 Forge 打包管线
+`pnpm package` → `electron-forge package` → 调用 `scripts/verify-package-contents.mjs` 对 `out/` 下的产物做内容审计。`pnpm make` 直接生成可分发的 ZIP 包（`MakerZIP` 同时产出 `darwin`、`linux`、`win32` 三平台）。
 
-- **ASAR 内校验**：限制最大 2MB；仅允许 `package.json` 和 `.vite/*` 路径；必须包含 `main.js`、`preload.js`、`worker.js`、`renderer/main_window/index.html`。
-- **外层目录校验**：禁止 `.electron-cache`、`.git`、`.github`、`.superpowers`、`app.asar.unpacked`、`coverage`、`docs`、`model-runtime`、`models`、`node_modules`、`playwright-report`、`src`、`test-results`、`tests` 等目录出现在输出包顶层；禁止 `.env*` 文件和 `.gguf` 模型文件被打包进应用；必须存在 `resources/app.asar`。
+### 3.3 ASAR 白名单策略
+`verify-package-contents.mjs` 使用正则 `^(?:package\.json|\.vite(?:\/|$))` 严格限制 ASAR 内仅允许应用源码与 Vite 构建产物，任何额外文件都会导致构建失败。这保证了最终安装包体积可控且不含源码树。
 
-## 4. TypeScript 与类型检查
-根 `tsconfig.json` 针对渲染端（`src/renderer/**`、`src/shared/**`）启用严格模式、ES2022 target、Bundler 模块解析；另有 `tsconfig.node.json` 和 `tsconfig.type-tests.json` 分别用于 Node 端与类型测试。`pnpm typecheck` 依次运行 `vue-tsc` 与两个 `tsc --noEmit` 任务。
+### 3.4 模型运行时生命周期
+- 通过 `docker compose --profile <cpu|hybrid|gpu>` 启动 llama.cpp 服务，挂载 `../models/*.gguf` 只读卷。
+- `start-model.ps1` 在 Windows 上提供统一入口：先校验模型文件大小与 SHA-256，再尝试 GPU profile，若检测到 OOM/CUDA 错误则自动降级到 hybrid profile。
+- 健康检查通过 `/health`、`/v1/models`、`/props`、`/slots` 多个端点验证槽位数量一致性。
 
-## 5. 测试构建集成
-- 单元测试：`pnpm test` 显式列出 22 个 Vitest 测试文件（覆盖 agent、protocol、database、modelRuntime 等），不依赖 glob 扫描。
-- E2E 测试：`pnpm test:e2e` 先执行 `pnpm package` 打包完整应用，再运行 Playwright `tests/e2e/app.spec.ts`。
-- 测试产物输出到 `test-results/`，由 `verify-package-contents.mjs` 明确禁止其进入发布包。
+### 3.5 测试与类型检查
+- 单元测试：`vitest run tests/*.test.ts`（`package.json` 中硬编码了完整测试清单）。
+- E2E：`pnpm test:e2e` 先执行 `pnpm package` 打包，再用 Playwright 跑 `tests/e2e/app.spec.ts`。
+- 类型检查：`vue-tsc --noEmit && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.type-tests.json`。
 
-## 6. 本地模型运行时构建（Docker Compose）
-`model-runtime/compose.yaml` 定义三个 profile（`cpu`、`hybrid`、`gpu`），均基于 `ghcr.io/ggml-org/llama.cpp:server` 镜像，挂载 `../models/*.gguf` 并以 OpenAI 兼容接口暴露于 `127.0.0.1:8080`。PowerShell 脚本 `start-model.ps1`、`status-model.ps1`、`stop-model.ps1`、`verify-model.ps1` 封装了 Docker Compose 调用、端口占用检测、GPU 失败回退（从 gpu 自动降级到 hybrid）、健康检查（`/health`、`/v1/models`、`/props`、`/slots`）及模型工件 SHA-256 校验。
+## 4. 约定与约束
 
-## 7. 依赖与重建策略
-`pnpm-workspace.yaml` 中 `nodeLinker: hoisted` 扁平化依赖；`allowBuilds` 放行 `better-sqlite3` 和 `electron` 的原生构建；通过 `overrides` 将 `@electron/rebuild` 固定到 4.0.4，以绕过 Forge 7 默认 rebuild 3.x 对 Git 依赖的不可达问题（适配私有网络环境）。
+- **构建命令约定**：开发用 `pnpm start`，生产打包用 `pnpm package`（等价于 `electron-forge package && node scripts/verify-package-contents.mjs`），跨平台分发用 `pnpm make`。
+- **ASAR 大小上限**：`MAX_ASAR_BYTES = 2 * 1024 * 1024`（2 MiB），超出即抛错终止构建。
+- **外层包禁止项**：`.electron-cache`、`.git`、`.github`、`.superpowers`、`app.asar.unpacked`、`coverage`、`docs`、`model-runtime`、`models`、`node_modules`、`playwright-report`、`src`、`test-results`、`.env*`、`*.gguf` 不得出现在 `resources/` 外层。
+- **必须存在的 ASAR 条目**：`package.json`、`.vite/build/main.js`、`.vite/build/preload.js`、`.vite/build/worker.js`、`.vite/renderer/main_window/index.html`。
+- **Electron 下载镜像**：默认使用 `https://npmmirror.com/mirrors/electron/` 以加速国内网络环境。
+- **模型工件完整性**：`Qwen_Qwen3.5-9B-Q4_K_M.gguf` 与 `mmproj-Qwen_Qwen3.5-9B-bf16.gguf` 必须存在且长度、SHA-256 与 `runtime-common.ps1` 中硬编码值完全一致。
+- **端口独占**：127.0.0.1:8080 同一时刻只能由一个 `ai-aifar-model` 项目容器持有，启动前会检测并清理已有所有权。
+- **GPU 自动回退**：当 GPU profile 启动失败且日志中出现 `out of memory`、`cuda.*error/fail`、`failed to load`、`model.*load.*fail` 时，脚本会自动 down 掉 GPU 容器并以 hybrid profile 重试一次。
 
-## 8. 关键约定与约束
-- 所有进程源码必须经 Vite 构建，产物统一输出至 `.vite/build/`，由 Forge 读取。
-- ASAR 体积上限 2MB，超出或包含 forbidden 条目会直接中断构建。
-- 发布包不得包含任何开发辅助目录（`.git`、`docs`、`tests`、`model-runtime`、`models` 等）。
-- 模型运行时必须通过 Docker Compose 启动，且只能有一个项目名为 `ai-aifar-model` 的容器独占 `127.0.0.1:8080`。
-- Electron 二进制下载强制走 npmmirror 镜像，缓存落临时目录以避免污染仓库。
-- 版本号仅在 `package.json` 维护，无 CI 自动 bump 逻辑可见。
+该体系将 Electron 桌面应用的编译、打包、校验与本地模型运行时启动整合在同一套 npm scripts 之下，通过 Forge 插件化扩展 Vite，并通过独立的 PowerShell 脚本管理 Docker Compose 驱动的推理服务。

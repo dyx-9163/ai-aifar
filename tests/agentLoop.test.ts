@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ModelRunMetrics } from '../src/shared/domain';
 import {
   buildAgentSystemPrompt,
+  hasUnparsedToolFence,
   looksLikeManualCodeDump,
   looksLikeTruncatedToolCall,
   looksLikeUnfulfilledToolIntent,
@@ -194,6 +195,18 @@ describe('tool call parsing', () => {
     expect(looksLikeUnfulfilledToolIntent('Here is the plan:')).toBe(false);
     expect(looksLikeUnfulfilledToolIntent('The answer is 42.')).toBe(false);
   });
+
+  it('repairs fenced tool JSON with missing closers or trailing commas', () => {
+    const missingCloser = parseToolCall('```tool\n{"tool": "read_file", "input": {"path": "a.ts"}\n```');
+    expect(missingCloser?.tool).toBe('read_file');
+    expect(missingCloser?.input).toEqual({ path: 'a.ts' });
+
+    const trailingComma = parseToolCall('```tool\n{"tool": "read_file", "input": {"path": "a.ts",}}\n```');
+    expect(trailingComma?.input).toEqual({ path: 'a.ts' });
+
+    expect(hasUnparsedToolFence('```tool\n{"tool": "read_file", "input": @@@\n```')).toBe(true);
+    expect(hasUnparsedToolFence('```tool\n{"tool": "read_file", "input": {"path": "a.ts"}}\n```')).toBe(false);
+  });
 });
 
 describe('runAgentLoop', () => {
@@ -283,6 +296,20 @@ describe('runAgentLoop', () => {
     );
     expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
     expect(String(modelCalls[1].at(-1)?.content)).toContain('cut off by the output limit');
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+  });
+
+  it('re-prompts when a fenced tool call is not valid JSON even after repair', async () => {
+    const { emitted, outcome, modelCalls } = await runLoop(
+      [
+        '```tool\n{"tool": "read_file", "input": @@@\n```',
+        fencedToolCall('{"tool": "read_file", "input": {"path": "src/main.ts"}}'),
+        'It exports answer = 42.',
+      ],
+      context,
+    );
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
+    expect(String(modelCalls[1].at(-1)?.content)).toContain('was not valid JSON');
     expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
   });
 
