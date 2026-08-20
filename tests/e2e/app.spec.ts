@@ -14,6 +14,11 @@ import {
 } from '../../src/agent/localQwenProfile';
 import type { ReasoningDisplayMode, ReasoningOutputMode, ThreadSummary, TurnRecord } from '../../src/shared/domain';
 import type { AgentEvent } from '../../src/shared/protocol';
+import {
+  assertNoLifecycleLeaks,
+  formatLifecycleFailure,
+  launchOwnedApplication,
+} from './agentScopeLifecycleHarness';
 import { startFakeModelServer, type FakeModelServer } from './fakeModelServer';
 
 const packagedExecutable = join(process.cwd(), 'out', 'Private AI Desktop-win32-x64', 'Private AI Desktop.exe');
@@ -820,7 +825,7 @@ test('embedded AgentScope runtime starts cleanly and stops without owning the mo
   try {
     await expectFakeModelReady(server);
     milestone = 'external-model-sentinel-before-launch';
-    app = await bounded('electron.launch', launchPackagedApp(userData, {
+    app = await launchOwnedApplication('electron.launch', launchPackagedApp(userData, {
       PRIVATE_AI_E2E_AGENTSCOPE_PORT_FILE: portFile,
       PRIVATE_AI_E2E_KNOWN_SECRET: knownSecret,
     }, ['PYTHONHOME', 'PYTHONPATH', 'VIRTUAL_ENV', 'CONDA_PREFIX']), 15_000);
@@ -909,8 +914,7 @@ test('embedded AgentScope runtime starts cleanly and stops without owning the mo
     milestone = `${milestone};external-model-sentinel-after-close`;
     if (!primaryFailure) {
       const captured = `${output.join('')}\n${readUserDataTree(userData)}`;
-      expect(captured).not.toContain(knownSecret);
-      expect(captured.match(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g) ?? []).toHaveLength(0);
+      assertNoLifecycleLeaks(captured, knownSecret);
       milestone = `${milestone};leak-scan-clean`;
     }
   } catch (error) {
@@ -934,13 +938,14 @@ test('embedded AgentScope runtime starts cleanly and stops without owning the mo
   }
 
   if (primaryFailure || secondaryFailures.length > 0) {
-    throw new Error([
-      `Task 9 lifecycle diagnostic failed at milestone: ${milestone}`,
-      `Health transitions: ${JSON.stringify(healthTransitions)}`,
-      `Application output: ${output.join('').trim() || '<empty>'}`,
-      `Primary failure: ${primaryFailure?.stack ?? '<none>'}`,
-      `Secondary failures: ${secondaryFailures.map((error) => error.stack ?? error.message).join('\n---\n') || '<none>'}`,
-    ].join('\n'));
+    throw new Error(formatLifecycleFailure({
+      milestone,
+      healthTransitions,
+      applicationOutput: output.join(''),
+      primaryFailure,
+      secondaryFailures,
+      knownSecret,
+    }));
   }
 });
 

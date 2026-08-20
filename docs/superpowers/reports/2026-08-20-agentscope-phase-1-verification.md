@@ -19,8 +19,10 @@ manifest pins CPython 3.11.16, AgentScope 2.0.6, and the Private AI AgentScope r
 
 The end-user package does not require a separately installed Python or Docker. The Supervisor
 selects the manifest-owned absolute interpreter and creates the AgentScope child with an exact
-environment that has no `PATH`, `PYTHONHOME`, `PYTHONPATH`, virtualenv, or Conda inheritance.
-The package E2E starts no Docker command or Docker process.
+environment that has no inherited `PATH`, `PYTHONHOME`, virtualenv, Conda, or host
+`PYTHONPATH`. The exact child environment deliberately sets a packaged `PYTHONPATH` containing
+only the manifest-owned application and site-packages directories. The package E2E starts no
+Docker command or Docker process.
 
 ## 2. Desktop lifecycle and public contract
 
@@ -57,7 +59,23 @@ The lifecycle test removes inherited Python/virtual-environment variables from E
 external model sentinel demonstrates that desktop shutdown is ownership-scoped and does not stop
 an independently hosted model service.
 
-## 4. Verification matrix
+The review hardening adds two further ownership and disclosure contracts:
+
+- a synthetic known secret and a 43-character bootstrap-token-shaped value are injected into
+  captured output, health diagnostics, and error stacks; composed failure text contains only fixed
+  redaction placeholders, while leak-scan failures expose counts rather than captured values;
+- if Electron launch resolves only after the launch timeout, the late application is closed, or its
+  owned process is killed if close cannot complete, so the timed-out launch cannot become an orphan.
+
+## 4. Phase 1 routing boundary
+
+Phase 1 still reports `agentBackend: legacy`. AgentScope is packaged, authenticated, supervised,
+health-checked, and lifecycle-owned by the desktop application, but **no model request is routed
+through AgentScope in Phase 1**. Existing model/provider requests continue through the legacy
+TypeScript routing path. Moving all model traffic to AgentScope is a later phase and is not claimed
+by this verification.
+
+## 5. Verification matrix
 
 The Task 9 source and focused lifecycle gates are green:
 
@@ -65,17 +83,44 @@ The Task 9 source and focused lifecycle gates are green:
 | --- | --- |
 | `pnpm agentscope:test` | PASS, 10 tests |
 | `pnpm agentscope:verify` | PASS, 11,662-file verified runtime |
-| AgentScope TypeScript contract suites | PASS, 6 files / 129 tests; 1 environment skip |
+| AgentScope TypeScript contract suites | PASS, 6 files / 131 tests; 1 environment skip |
 | `pnpm test` | PASS, 33 files / 676 tests |
 | `pnpm typecheck` | PASS |
 | fresh `pnpm package` | PASS, package inventory above |
-| focused packaged AgentScope E2E | PASS, 1 test in 2.7 seconds |
+| focused packaged AgentScope E2E | PASS, review-hardened test in 3.0 seconds |
 | `git diff --check` | PASS |
 
 The first complete packaged `tests/e2e/app.spec.ts` run finished 10/12. The AgentScope lifecycle
 test passed; two pre-dispatch Qoder/provider tests remained red: a strict multi-row locator and an
-obsolete failed-turn UI expectation. Those unrelated regressions are being repaired separately
-and must be green before Phase 1 receives final completion status.
+obsolete failed-turn UI expectation. On the Qoder dirty baseline, both were repaired as minimal,
+unstaged test-only changes. Their focused tests passed, and the complete packaged file then passed
+12/12 in 16.4 seconds.
+
+### Review-fix RED/GREEN evidence
+
+The review contracts were exercised with repository-local Vitest:
+
+| Stage | Command | Result |
+| --- | --- | --- |
+| Initial RED | `node node_modules/vitest/vitest.mjs run tests/agentScopeRuntimePackaging.test.ts` | FAIL: lifecycle harness module absent after tests were added |
+| Mutation RED | `node node_modules/vitest/vitest.mjs run tests/agentScopeRuntimePackaging.test.ts -t "redacts lifecycle secrets\|closes an application"` | FAIL, 2/2: raw known secret/token appeared in the composed diagnostic; late application remained open |
+| Focused GREEN | same targeted command | PASS, 2/2 |
+| Contract GREEN | `node node_modules/vitest/vitest.mjs run tests/agentScopeRuntimePackaging.test.ts tests/packageContents.test.ts` | PASS, 2 files / 38 tests; 1 environment skip |
+| Type GREEN | `pnpm typecheck` | PASS |
+
+## 6. Rollback
+
+Phase 1 introduced no database migration and performs no user-data conversion. Rollback therefore
+does not delete or rewrite a user's data directory. Revert the review-fix commit first, then revert
+these Phase 1 commits in this exact newest-to-oldest order:
+
+```text
+7612ff7 edb2d67 df07863 2db8321 06b299f 837187b 994bfcc 5748f6d 4bcbe6b 21b2856
+5776095 90e982e 8a64ec8 b71c0e1 4981e59 83dd0fe e741f44 482ea0c a2d473e 244e117
+```
+
+Then rebuild the desktop artifact with the normal verified package command. No database down
+migration, user-data export/import, or format conversion is required.
 
 ## Host test boundary
 

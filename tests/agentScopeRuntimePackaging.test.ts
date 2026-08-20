@@ -10,8 +10,13 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import forgeConfig from '../forge.config';
+import {
+  assertNoLifecycleLeaks,
+  formatLifecycleFailure,
+  launchOwnedApplication,
+} from './e2e/agentScopeLifecycleHarness';
 import {
   enumerateOuterFiles,
   validateOuterInventory,
@@ -93,6 +98,53 @@ afterEach(async () => {
 });
 
 describe('embedded AgentScope package contract', () => {
+  it('redacts lifecycle secrets before composing diagnostic failures', () => {
+    const knownSecret = 'task9-known-secret';
+    const shapedToken = 'A'.repeat(43);
+    const captured = `${knownSecret} ${knownSecret} ${shapedToken}`;
+
+    expect(() => assertNoLifecycleLeaks(captured, knownSecret)).toThrow(
+      'known-secret-count=2; bootstrap-token-shaped-count=1',
+    );
+
+    const failure = formatLifecycleFailure({
+      milestone: `health-${knownSecret}`,
+      healthTransitions: [{ detail: shapedToken }],
+      applicationOutput: `stderr ${knownSecret} ${shapedToken}`,
+      primaryFailure: new Error(`primary ${knownSecret} ${shapedToken}`),
+      secondaryFailures: [new Error(`secondary ${knownSecret} ${shapedToken}`)],
+      knownSecret,
+    });
+
+    expect(failure).not.toContain(knownSecret);
+    expect(failure).not.toContain(shapedToken);
+    expect(failure).toContain('<redacted-known-secret>');
+    expect(failure).toContain('<redacted-bootstrap-token>');
+  });
+
+  it('closes an application that resolves only after the launch timeout', async () => {
+    let resolveLaunch: ((app: {
+      close: () => Promise<void>;
+      process: () => { kill: () => void };
+    }) => void) | undefined;
+    let closed = false;
+    let killed = false;
+    const delayedLaunch = new Promise<{
+      close: () => Promise<void>;
+      process: () => { kill: () => void };
+    }>((resolve) => { resolveLaunch = resolve; });
+
+    const ownedLaunch = launchOwnedApplication('electron.launch', delayedLaunch, 5, 20);
+    await expect(ownedLaunch).rejects.toThrow('electron.launch timed out after 5ms');
+    resolveLaunch?.({
+      close: async () => { closed = true; },
+      process: () => ({ kill: () => { killed = true; } }),
+    });
+
+    await vi.waitFor(() => expect(closed).toBe(true));
+    expect(killed).toBe(false);
+  });
+
   it('makes package, build, E2E, and make use the verified runtime pipeline', async () => {
     const packageJson = JSON.parse(await readFile(path.resolve('package.json'), 'utf8'));
     expect(packageJson.scripts.package).toBe(
