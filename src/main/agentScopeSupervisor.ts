@@ -49,6 +49,7 @@ export interface AgentScopeChildProcess extends AgentScopeEventSource {
 }
 
 export interface AgentScopeSpawnOptions {
+  cwd: string;
   shell: false;
   windowsHide: true;
   stdio: ['pipe', 'pipe', 'ignore'];
@@ -295,8 +296,9 @@ export class AgentScopeSupervisor {
     try {
       child = this.dependencies.spawn(
         this.runtimePaths.pythonPath,
-        ['-m', 'private_ai_agentscope.bootstrap'],
+        ['-P', '-m', 'private_ai_agentscope.bootstrap'],
         {
+          cwd: this.runtimePaths.root,
           shell: false,
           windowsHide: true,
           stdio: ['pipe', 'pipe', 'ignore'],

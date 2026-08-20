@@ -116,9 +116,11 @@ function sanitizeSpawnCall(
   return {
     commandMatches: call?.command === runtimePaths.pythonPath,
     argsMatch:
-      call?.args.length === 2 &&
-      call.args[0] === '-m' &&
-      call.args[1] === 'private_ai_agentscope.bootstrap',
+      call?.args.length === 3 &&
+      call.args[0] === '-P' &&
+      call.args[1] === '-m' &&
+      call.args[2] === 'private_ai_agentscope.bootstrap',
+    trustedWorkingDirectory: call?.options.cwd === runtimePaths.root,
     shellDisabled: call?.options.shell === false,
     windowHidden: call?.options.windowsHide === true,
     stdioMatches:
@@ -316,6 +318,35 @@ afterEach(() => {
 });
 
 describe('AgentScopeSupervisor secure startup', () => {
+  it('prevents a hostile host working directory from participating in bootstrap imports', async () => {
+    const { children, spawnCalls, supervisor } = makeHarness();
+
+    const state = await finishReadyStart(supervisor, children[0]);
+    const call = spawnCalls[0];
+    const env = call?.options.env as Record<string, string> | undefined;
+
+    expect({
+      ready: state.state === 'ready',
+      safePathFlag: call?.args[0] === '-P',
+      moduleInvocation:
+        call?.args.length === 3 &&
+        call.args[1] === '-m' &&
+        call.args[2] === 'private_ai_agentscope.bootstrap',
+      trustedWorkingDirectory: call?.options.cwd === runtimePaths.root,
+      exactPackagedPythonPath:
+        env?.PYTHONPATH ===
+        `${runtimePaths.applicationPath}${path.delimiter}${runtimePaths.sitePackagesPath}`,
+      hostSearchPathExcluded: env !== undefined && !Object.hasOwn(env, 'PATH'),
+    }).toEqual({
+      ready: true,
+      safePathFlag: true,
+      moduleInvocation: true,
+      trustedWorkingDirectory: true,
+      exactPackagedPythonPath: true,
+      hostSearchPathExcluded: true,
+    });
+  });
+
   it('uses constant sanitized diagnostics when bootstrap inspection cannot parse', () => {
     const inspected = inspectBootstrapLine('{');
 
@@ -373,6 +404,7 @@ describe('AgentScopeSupervisor secure startup', () => {
     expect(sanitizedSpawn).toEqual({
       commandMatches: true,
       argsMatch: true,
+      trustedWorkingDirectory: true,
       shellDisabled: true,
       windowHidden: true,
       stdioMatches: true,
