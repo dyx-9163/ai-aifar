@@ -4,6 +4,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 from collections.abc import Callable, Generator
 
 import uvicorn
@@ -51,8 +52,22 @@ def _restore_shutdown_handlers(previous_handlers: list[tuple[signal.Signals, Cal
         signal.signal(handled_signal, previous_handler)
 
 
-async def _wait_for_stdin_eof() -> None:
-    await asyncio.to_thread(sys.stdin.buffer.read)
+def _start_stdin_eof_watcher(
+    loop: asyncio.AbstractEventLoop,
+    request_shutdown: Callable[[], None],
+) -> None:
+    def watch_stdin() -> None:
+        try:
+            while os.read(sys.stdin.fileno(), 8192):
+                pass
+        except (AttributeError, OSError):
+            return
+        try:
+            loop.call_soon_threadsafe(request_shutdown)
+        except RuntimeError:
+            return
+
+    threading.Thread(target=watch_stdin, daemon=True).start()
 
 
 async def main() -> int:
@@ -70,10 +85,6 @@ async def main() -> int:
     sock.listen(128)
     port = int(sock.getsockname()[1])
 
-    ready = BootstrapReady(port=port, pid=os.getpid())
-    sys.stdout.write(ready.model_dump_json() + "\n")
-    sys.stdout.flush()
-
     server = _BootstrapServer(uvicorn.Config(
         create_app(config),
         host=None,
@@ -81,36 +92,25 @@ async def main() -> int:
         log_config=None,
         access_log=False,
     ))
-    sock_closed = False
+    listener_transferred = False
 
     def request_shutdown() -> None:
-        nonlocal sock_closed
         server.should_exit = True
-        if not sock_closed:
-            sock_closed = True
-            sock.close()
 
     loop = asyncio.get_running_loop()
     previous_handlers = _install_shutdown_handlers(loop, request_shutdown)
-    server_task = asyncio.create_task(server.serve(sockets=[sock]))
-    eof_task = asyncio.create_task(_wait_for_stdin_eof())
     try:
-        done, _ = await asyncio.wait(
-            {server_task, eof_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if eof_task in done:
-            request_shutdown()
-        if not server_task.done():
-            await server_task
+        ready = BootstrapReady(port=port, pid=os.getpid())
+        sys.stdout.write(ready.model_dump_json() + "\n")
+        sys.stdout.flush()
+
+        _start_stdin_eof_watcher(loop, request_shutdown)
+        listener_transferred = True
+        await server.serve(sockets=[sock])
         return 0
     finally:
         _restore_shutdown_handlers(previous_handlers)
-        if not eof_task.done():
-            eof_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await eof_task
-        if not sock_closed:
+        if not listener_transferred:
             sock.close()
 
 
