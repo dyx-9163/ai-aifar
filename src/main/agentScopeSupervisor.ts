@@ -507,7 +507,14 @@ export class AgentScopeSupervisor {
       return;
     }
 
-    if (!this.isActiveContext(context) || context.failureInProgress) return;
+    if (
+      !this.isActiveContext(context) ||
+      context.failureInProgress ||
+      context.exited ||
+      context.reaped
+    ) {
+      return;
+    }
     context.token = '';
     context.ready = true;
     this.clearTimer(context.startupTimer);

@@ -776,6 +776,74 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     await supervisor.stop();
   });
 
+  it('cannot publish ready when resolved health races with exit before success publication', async () => {
+    const exitedChild = new FakeChild(READY_PID, true, true, false);
+    const replacement = new FakeChild();
+    replacement.stdin.onEnd = () => replacement.exit(0);
+    let resolveHealth!: (value: unknown) => void;
+    let jsonRequested = false;
+    const healthBody = new Promise<unknown>((resolve) => {
+      resolveHealth = resolve;
+    });
+    const { spawnCalls, supervisor } = makeHarness({
+      children: [exitedChild, replacement],
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        url: `http://127.0.0.1:${READY_PORT}/v1/health`,
+        json: () => {
+          jsonRequested = true;
+          return healthBody;
+        },
+      }),
+    });
+    const observed: string[] = [];
+    supervisor.subscribe((state) => observed.push(safeStateKind(state)));
+    const starting = supervisor.start();
+    const coalescedStart = supervisor.start();
+    const queuedStart = starting.then(() => supervisor.start());
+    exitedChild.stdout.emit('data', Buffer.from(readyLine()));
+    await flushPromises();
+    expect(jsonRequested).toBe(true);
+
+    resolveHealth(validHealth());
+    exitedChild.exit(9);
+    const [state, coalescedState, queuedState] = await Promise.all([
+      starting,
+      coalescedStart,
+      queuedStart,
+    ]);
+    await flushPromises();
+
+    for (const result of [state, coalescedState, queuedState]) {
+      expect(stateMatches(result, {
+        state: 'degraded',
+        reason: 'exited',
+        detail: 'AgentScope runtime exited unexpectedly.',
+      })).toBe(true);
+    }
+    expect(observed.includes('ready')).toBe(false);
+    expect(stateIncludes(supervisor.status(), { state: 'degraded', reason: 'exited' })).toBe(
+      true,
+    );
+    expect(exitedChild.listenerCount('close')).toBe(1);
+    expect(exitedChild.listenerCount('error')).toBe(1);
+    expect(exitedChild.stdin.listenerCount('error')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(spawnCalls.length).toBe(1);
+
+    exitedChild.close(9);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(spawnCalls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnCalls.length).toBe(2);
+    replacement.stdout.emit('data', Buffer.from(readyLine()));
+    await flushPromises();
+    expect(stateIncludes(supervisor.status(), { state: 'ready' })).toBe(true);
+    await supervisor.stop();
+  });
+
   it('retains error listeners and stop ownership between asynchronous exit and close', async () => {
     const child = new FakeChild(READY_PID, true, true, false);
     const { supervisor } = makeHarness({ children: [child] });
