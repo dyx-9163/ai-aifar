@@ -12,7 +12,7 @@ manifest pins CPython 3.11.16, AgentScope 2.0.6, and the Private AI AgentScope r
 - Manifest SHA-256:
   `fdbab0a4b1dfd64cadf0256ad6d9bad96a9602c8ac32623f22be16bcb87daa10`.
 - Outer package inventory: 11,738 files.
-- ASAR inventory: 12 entries, 405,346 bytes.
+- ASAR inventory: 12 entries, 405,378 bytes.
 - The independent package scanner recalculated the packaged runtime inventory and rejected
   unlisted files, links/reparse traversal, forbidden secrets, developer trees, models, installers,
   and caches.
@@ -21,8 +21,10 @@ The end-user package does not require a separately installed Python or Docker. T
 selects the manifest-owned absolute interpreter and creates the AgentScope child with an exact
 environment that has no inherited `PATH`, `PYTHONHOME`, virtualenv, Conda, or host
 `PYTHONPATH`. The exact child environment deliberately sets a packaged `PYTHONPATH` containing
-only the manifest-owned application and site-packages directories. The package E2E starts no
-Docker command or Docker process.
+only the manifest-owned application and site-packages directories. Python starts with `-P`, and
+the child working directory is fixed to the manifest-owned runtime root, so the host launch
+directory cannot participate in bootstrap imports. The package E2E starts no Docker command or
+Docker process.
 
 ## 2. Desktop lifecycle and public contract
 
@@ -94,7 +96,7 @@ The first complete packaged `tests/e2e/app.spec.ts` run finished 10/12. The Agen
 test passed; two pre-dispatch Qoder/provider tests remained red: a strict multi-row locator and an
 obsolete failed-turn UI expectation. On the Qoder dirty baseline, both were repaired as minimal,
 unstaged test-only changes. Their focused tests passed, and the complete packaged file then passed
-12/12 in 16.4 seconds.
+12/12 in 16.9 seconds on the final hostile-CWD-hardened package.
 
 ### Review-fix RED/GREEN evidence
 
@@ -107,6 +109,8 @@ The review contracts were exercised with repository-local Vitest:
 | Focused GREEN | same targeted command | PASS, 2/2 |
 | Contract GREEN | `node node_modules/vitest/vitest.mjs run tests/agentScopeRuntimePackaging.test.ts tests/packageContents.test.ts` | PASS, 2 files / 38 tests; 1 environment skip |
 | Type GREEN | `pnpm typecheck` | PASS |
+| Hostile-CWD RED | Supervisor focused test before the safe-path fix | FAIL, 1/1: no `-P` and no trusted `cwd` |
+| Hostile-CWD GREEN | same focused test after the safe-path fix | PASS, 1/1; Supervisor suite PASS, 48/48 |
 
 ## 6. Rollback
 
