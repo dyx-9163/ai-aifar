@@ -4,6 +4,11 @@ import path from 'node:path';
 import { AgentRequestBroker, type AgentReply } from './main/agentRequestBroker.js';
 import { buildAppHealth } from './main/appHealth.js';
 import {
+  AgentScopeLifecycle,
+  completeQuitAfterShutdown,
+  type AgentScopeManagedRuntime,
+} from './main/agentScopeLifecycle.js';
+import {
   parseRuntimeManifest,
   type AgentScopeRuntimeState,
 } from './main/agentScopeProtocol.js';
@@ -27,12 +32,9 @@ let agentProcess: Electron.UtilityProcess | null = null;
 let agentPort: Electron.MessagePortMain | null = null;
 const agentRequests = new AgentRequestBroker(30_000);
 let agentScopeState: AgentScopeRuntimeState = { state: 'stopped' };
-let agentScopeSupervisor: AgentScopeSupervisor | null = null;
-let agentScopeStartup: Promise<void> | null = null;
-let agentScopeShutdown: Promise<void> | null = null;
-let agentScopeStopping = false;
+const agentScopeLifecycle = new AgentScopeLifecycle();
 let allowFinalQuit = false;
-let unsubscribeAgentScope: (() => void) | null = null;
+let finalQuitPending = false;
 
 const AGENTSCOPE_DEGRADED_DETAILS = {
   'missing-runtime': 'AgentScope runtime is unavailable.',
@@ -130,7 +132,15 @@ ipcMain.handle('desktop:request', async (_event, request: unknown) => {
 });
 
 app.whenReady().then(async () => {
-  agentScopeStartup = initializeAgentScopeRuntime();
+  void agentScopeLifecycle.start(loadAgentScopeRuntime).catch(() => {
+    if (agentScopeState.state !== 'stopped') {
+      agentScopeState = {
+        state: 'degraded',
+        reason: 'exited',
+        detail: 'AgentScope runtime exited unexpectedly.',
+      };
+    }
+  });
   await createWindow();
 
   app.on('activate', () => {
@@ -154,13 +164,17 @@ app.on('before-quit', (event) => {
   }
 
   event.preventDefault();
-  void stopAgentScopeRuntime().finally(() => {
+  if (finalQuitPending) {
+    return;
+  }
+  finalQuitPending = true;
+  void completeQuitAfterShutdown(agentScopeLifecycle.stop(), () => {
     allowFinalQuit = true;
     app.quit();
   });
 });
 
-async function initializeAgentScopeRuntime(): Promise<void> {
+async function loadAgentScopeRuntime(): Promise<AgentScopeManagedRuntime | null> {
   const runtimeRoot = resolveAgentScopeRuntimeRoot({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -173,7 +187,7 @@ async function initializeAgentScopeRuntime(): Promise<void> {
     manifestText = await readFile(manifestPath, 'utf8');
   } catch (error) {
     setAgentScopeUnavailable(isMissingFileError(error) ? 'missing-runtime' : 'invalid-manifest');
-    return;
+    return null;
   }
 
   let runtimePaths;
@@ -186,50 +200,31 @@ async function initializeAgentScopeRuntime(): Promise<void> {
     }, manifest);
   } catch {
     setAgentScopeUnavailable('invalid-manifest');
-    return;
+    return null;
   }
 
-  try {
-    const supervisor = new AgentScopeSupervisor({
-      runtimePaths,
-      userDataDir: app.getPath('userData'),
-      logDir: path.join(app.getPath('userData'), 'agentscope-logs'),
-    });
-    agentScopeSupervisor = supervisor;
-    agentScopeState = supervisor.status();
-    unsubscribeAgentScope = supervisor.subscribe((state) => {
-      agentScopeState = state;
-    });
+  const supervisor = new AgentScopeSupervisor({
+    runtimePaths,
+    userDataDir: app.getPath('userData'),
+    logDir: path.join(app.getPath('userData'), 'agentscope-logs'),
+  });
+  agentScopeState = supervisor.status();
+  const unsubscribe = supervisor.subscribe((state) => {
+    agentScopeState = state;
+  });
 
-    if (agentScopeStopping) {
-      await supervisor.stop();
-      return;
-    }
-    agentScopeState = await supervisor.start();
-  } catch {
-    agentScopeState = {
-      state: 'degraded',
-      reason: 'exited',
-      detail: 'AgentScope runtime exited unexpectedly.',
-    };
-  }
-}
-
-function stopAgentScopeRuntime(): Promise<void> {
-  if (agentScopeShutdown) {
-    return agentScopeShutdown;
-  }
-
-  agentScopeStopping = true;
-  agentScopeShutdown = (async () => {
-    if (!agentScopeSupervisor && agentScopeStartup) {
-      await agentScopeStartup;
-    }
-    await agentScopeSupervisor?.stop();
-    unsubscribeAgentScope?.();
-    unsubscribeAgentScope = null;
-  })();
-  return agentScopeShutdown;
+  return {
+    start: async () => {
+      agentScopeState = await supervisor.start();
+    },
+    stop: async () => {
+      try {
+        await supervisor.stop();
+      } finally {
+        unsubscribe();
+      }
+    },
+  };
 }
 
 function setAgentScopeUnavailable(
