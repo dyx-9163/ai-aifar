@@ -10,7 +10,7 @@
     "test": "vitest run tests/pathSecurity.test.ts tests/protocol.test.ts tests/database.test.ts tests/modelCapabilities.test.ts tests/localQwenProfile.test.ts tests/turnScheduler.test.ts tests/demoAgent.test.ts tests/worker.test.ts tests/modelConnection.test.ts tests/streamTextNormalizer.test.ts tests/modelProvider.test.ts tests/redaction.test.ts tests/agentRequestBroker.test.ts tests/agentClientCore.test.ts tests/renderer-state.test.ts tests/deleteFeedback.test.ts tests/modelRuntimePackaging.test.ts tests/packageContents.test.ts tests/modelRuntimeConfig.test.ts tests/modelRuntimeScripts.test.ts tests/modelRuntimeScriptsBehavior.test.ts tests/workspaceTools.test.ts tests/agentLoop.test.ts tests/replyClassifier.test.ts tests/writeTools.test.ts tests/gitTools.test.ts tests/fileCheckpoints.test.ts tests/chatContext.test.ts tests/toolSchemas.test.ts",
     "test:e2e": "pnpm package && playwright test tests/e2e/app.spec.ts",
     "agentscope:lock": "uv lock --project agentscope-runtime",
-    "agentscope:test": "uv run --project agentscope-runtime pytest -q",
+    "agentscope:test": "uv run --project agentscope-runtime pytest agentscope-runtime/tests -q",
     "agentscope:bundle": "node scripts/agentscope-runtime/build.mjs",
     "agentscope:verify": "node scripts/agentscope-runtime/verify.mjs",
     "build": "pnpm package",

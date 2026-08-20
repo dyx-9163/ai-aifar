@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -677,14 +678,22 @@ function seedWorkspace(
   return { apiKey, databasePath, profileId: profile.id, threads };
 }
 
-async function launchPackagedApp(userData: string): Promise<ElectronApplication> {
+async function launchPackagedApp(
+  userData: string,
+  overrides: Record<string, string> = {},
+  removedEnvironmentKeys: string[] = [],
+  args: string[] = [],
+): Promise<ElectronApplication> {
+  const env = { ...process.env, ...overrides, PRIVATE_AI_DESKTOP_USER_DATA: userData };
+  for (const candidate of Object.keys(env)) {
+    if (removedEnvironmentKeys.some((key) => key.toLowerCase() === candidate.toLowerCase())) {
+      delete env[candidate];
+    }
+  }
   return electron.launch({
     executablePath: packagedExecutable,
-    args: [],
-    env: {
-      ...process.env,
-      PRIVATE_AI_DESKTOP_USER_DATA: userData,
-    },
+    args,
+    env,
   });
 }
 
@@ -692,6 +701,248 @@ async function closeElectron(app: ElectronApplication | undefined): Promise<void
   if (!app) return;
   await app.close().catch(() => undefined);
 }
+
+async function bounded<T>(label: string, promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms.`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+async function pollBounded<T>(
+  label: string,
+  timeoutMs: number,
+  sample: () => Promise<T> | T,
+  accepted: (value: T) => boolean,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue: T | undefined;
+  while (Date.now() < deadline) {
+    lastValue = await bounded(`${label} sample`, Promise.resolve().then(sample), 3_000);
+    if (accepted(lastValue)) return lastValue;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`${label} timed out after ${timeoutMs}ms; last value: ${JSON.stringify(lastValue)}`);
+}
+
+async function closeElectronBounded(app: ElectronApplication | undefined): Promise<void> {
+  if (!app) return;
+  try {
+    await bounded('closeElectron', app.close(), 15_000);
+  } catch (error) {
+    app.process().kill();
+    throw error;
+  }
+}
+
+async function expectFakeModelReady(server: FakeModelServer): Promise<void> {
+  const response = await fetch(`${server.baseUrl}/models`);
+  expect(response.ok).toBe(true);
+  const body = await response.json() as { data?: Array<{ id?: string }> };
+  expect(body.data?.some((model) => model.id === 'task-9-fake')).toBe(true);
+}
+
+function readDiagnosticPort(path: string): number | null {
+  try {
+    const value = readFileSync(path, 'utf8');
+    if (!/^[1-9]\d{0,4}\n?$/.test(value)) return null;
+    const port = Number.parseInt(value, 10);
+    return port <= 65_535 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+async function canConnectToLoopback(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = connect({ host: '127.0.0.1', port });
+    const settle = (connected: boolean) => {
+      socket.destroy();
+      resolve(connected);
+    };
+    socket.setTimeout(500, () => settle(false));
+    socket.once('connect', () => settle(true));
+    socket.once('error', () => settle(false));
+  });
+}
+
+function readUserDataTree(root: string): string {
+  const contents: string[] = [];
+  const visit = (directory: string) => {
+    for (const name of readdirSync(directory)) {
+      const candidate = join(directory, name);
+      let stat;
+      try {
+        stat = lstatSync(candidate);
+      } catch {
+        continue;
+      }
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        visit(candidate);
+      } else if (stat.isFile()) {
+        try {
+          contents.push(readFileSync(candidate).toString('latin1'));
+        } catch {
+          // Files that disappear during Chromium shutdown cannot contain durable leaked state.
+        }
+      }
+    }
+  };
+  visit(root);
+  return contents.join('\n');
+}
+
+test('embedded AgentScope runtime starts cleanly and stops without owning the model service', async () => {
+  test.setTimeout(100_000);
+  // Keep the deterministic temp basename from being exactly 43 base64url
+  // characters, which is the shape of the 32-byte bootstrap token under test.
+  const userData = createUserData('as');
+  const diagnosticsDirectory = mkdtempSync(join(tmpdir(), 'private-ai-agentscope-diagnostics-'));
+  const portFile = join(diagnosticsDirectory, 'port.txt');
+  const knownSecret = 'task9-e2e-known-secret-never-persist';
+  const server = await startFakeModelServer();
+  const output: string[] = [];
+  const healthTransitions: unknown[] = [];
+  let app: ElectronApplication | undefined;
+  let agentScopePort: number | undefined;
+  let milestone = 'created-fixtures';
+  let primaryFailure: Error | undefined;
+  const secondaryFailures: Error[] = [];
+
+  try {
+    await expectFakeModelReady(server);
+    milestone = 'external-model-sentinel-before-launch';
+    app = await bounded('electron.launch', launchPackagedApp(userData, {
+      PRIVATE_AI_E2E_AGENTSCOPE_PORT_FILE: portFile,
+      PRIVATE_AI_E2E_KNOWN_SECRET: knownSecret,
+    }, ['PYTHONHOME', 'PYTHONPATH', 'VIRTUAL_ENV', 'CONDA_PREFIX']), 15_000);
+    milestone = 'electron-launched';
+    app.process().stdout?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
+    app.process().stderr?.on('data', (chunk: Buffer) => output.push(chunk.toString('utf8')));
+
+    const page = await bounded('firstWindow', app.firstWindow(), 15_000);
+    milestone = 'first-window';
+    const immediateHealth = await bounded(
+      'initial window.desktop.health',
+      page.evaluate(() => window.desktop.health()),
+      5_000,
+    );
+    healthTransitions.push(immediateHealth);
+    milestone = 'initial-health';
+    const health = await pollBounded(
+      'AgentScope ready health',
+      20_000,
+      async () => {
+        const current = await page.evaluate(() => window.desktop.health());
+        if (JSON.stringify(healthTransitions.at(-1)) !== JSON.stringify(current)) {
+          healthTransitions.push(current);
+        }
+        return current;
+      },
+      (current) => current.agentScope.state === 'ready',
+    );
+    milestone = 'agentscope-ready-health';
+    expect(health).toMatchObject({
+      ok: true,
+      agentBackend: 'legacy',
+      agentScope: {
+        state: 'ready',
+        runtimeVersion: '1.0.0',
+        agentScopeVersion: '2.0.6',
+      },
+    });
+    expect(Object.keys(health).sort()).toEqual(['agentBackend', 'agentScope', 'ok', 'version']);
+    expect(Object.keys(health.agentScope).sort()).toEqual([
+      'agentScopeVersion',
+      'runtimeVersion',
+      'state',
+    ]);
+    expect(JSON.stringify(health)).not.toMatch(/token|port|pid|python|interpreter|user.?data|path/i);
+
+    const diagnosticPort = await pollBounded(
+      'AgentScope diagnostic port file',
+      10_000,
+      () => readDiagnosticPort(portFile),
+      (port) => port !== null,
+    );
+    agentScopePort = diagnosticPort ?? undefined;
+    milestone = 'diagnostic-port';
+    expect(agentScopePort).toBeDefined();
+    const unauthorizedHealth = await fetch(`http://127.0.0.1:${agentScopePort}/v1/health`);
+    expect(unauthorizedHealth.status).toBe(401);
+    milestone = 'private-health-rejected';
+  } catch (error) {
+    primaryFailure = error instanceof Error ? error : new Error(String(error));
+  }
+
+  if (app) {
+    try {
+      await closeElectronBounded(app);
+      milestone = `${milestone};electron-closed`;
+    } catch (error) {
+      secondaryFailures.push(error instanceof Error ? error : new Error(String(error)));
+      milestone = `${milestone};electron-close-failed`;
+    }
+  } else {
+    milestone = `${milestone};no-electron-handle`;
+  }
+
+  try {
+    if (!primaryFailure && agentScopePort !== undefined) {
+      await pollBounded(
+        'AgentScope port refusal after Electron close',
+        15_000,
+        () => canConnectToLoopback(agentScopePort as number),
+        (connected) => !connected,
+      );
+      milestone = `${milestone};agentscope-port-refused`;
+    }
+    await expectFakeModelReady(server);
+    milestone = `${milestone};external-model-sentinel-after-close`;
+    if (!primaryFailure) {
+      const captured = `${output.join('')}\n${readUserDataTree(userData)}`;
+      expect(captured).not.toContain(knownSecret);
+      expect(captured.match(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g) ?? []).toHaveLength(0);
+      milestone = `${milestone};leak-scan-clean`;
+    }
+  } catch (error) {
+    secondaryFailures.push(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  try {
+    await server.close();
+  } catch (error) {
+    secondaryFailures.push(error instanceof Error ? error : new Error(String(error)));
+  }
+  try {
+    removeUserData(userData);
+  } catch (error) {
+    secondaryFailures.push(error instanceof Error ? error : new Error(String(error)));
+  }
+  try {
+    rmSync(diagnosticsDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    secondaryFailures.push(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  if (primaryFailure || secondaryFailures.length > 0) {
+    throw new Error([
+      `Task 9 lifecycle diagnostic failed at milestone: ${milestone}`,
+      `Health transitions: ${JSON.stringify(healthTransitions)}`,
+      `Application output: ${output.join('').trim() || '<empty>'}`,
+      `Primary failure: ${primaryFailure?.stack ?? '<none>'}`,
+      `Secondary failures: ${secondaryFailures.map((error) => error.stack ?? error.message).join('\n---\n') || '<none>'}`,
+    ].join('\n'));
+  }
+});
 
 function threadRow(page: Page, threadId: string) {
   return page.getByTestId(`thread-row-${threadId}`);

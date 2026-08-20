@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, MessageChannelMain, shell, utilityProcess } from 'electron';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AgentRequestBroker, type AgentReply } from './main/agentRequestBroker.js';
 import { buildAppHealth } from './main/appHealth.js';
@@ -26,6 +26,10 @@ const customUserDataPath = process.env.PRIVATE_AI_DESKTOP_USER_DATA;
 if (customUserDataPath) {
   app.setPath('userData', customUserDataPath);
 }
+
+const agentScopeE2ePortFile = process.env.PRIVATE_AI_E2E_AGENTSCOPE_PORT_FILE;
+const agentScopeE2eDiagnosticsEnabled =
+  typeof agentScopeE2ePortFile === 'string' && path.isAbsolute(agentScopeE2ePortFile);
 
 let mainWindow: BrowserWindow | null = null;
 let agentProcess: Electron.UtilityProcess | null = null;
@@ -211,6 +215,9 @@ async function loadAgentScopeRuntime(): Promise<AgentScopeManagedRuntime | null>
   agentScopeState = supervisor.status();
   const unsubscribe = supervisor.subscribe((state) => {
     agentScopeState = state;
+    if (state.state === 'ready') {
+      publishAgentScopeE2ePort(state.port);
+    }
   });
 
   return {
@@ -225,6 +232,14 @@ async function loadAgentScopeRuntime(): Promise<AgentScopeManagedRuntime | null>
       }
     },
   };
+}
+
+function publishAgentScopeE2ePort(port: number): void {
+  if (!agentScopeE2eDiagnosticsEnabled || !agentScopeE2ePortFile) return;
+  void writeFile(agentScopeE2ePortFile, `${port}\n`, {
+    encoding: 'ascii',
+    flag: 'wx',
+  }).catch(() => undefined);
 }
 
 function setAgentScopeUnavailable(

@@ -98,6 +98,9 @@ describe('embedded AgentScope package contract', () => {
     expect(packageJson.scripts.package).toBe(
       'pnpm agentscope:bundle && electron-forge package && node scripts/verify-package-contents.mjs',
     );
+    expect(packageJson.scripts['agentscope:test']).toBe(
+      'uv run --project agentscope-runtime pytest agentscope-runtime/tests -q',
+    );
     expect(packageJson.scripts.build).toBe('pnpm package');
     expect(packageJson.scripts['test:e2e']).toMatch(/^pnpm package && /);
     expect(packageJson.scripts.make).toBe('pnpm package && electron-forge make --skip-package');
