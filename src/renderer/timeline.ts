@@ -24,8 +24,12 @@ export type TimelineEntry =
   | {
       id: string;
       kind: 'tool';
+      turnId?: string;
+      toolId?: string;
+      title?: string;
       text: string;
-      status?: 'running' | 'completed' | 'failed';
+      status: 'running' | 'completed' | 'failed';
+      sequence?: number;
     }
   | {
       id: string;
@@ -38,6 +42,25 @@ export type TimelineEntry =
       kind: 'progress';
       phase: ModelRunPhase;
     };
+
+export type MessageTimelineEntry = Extract<TimelineEntry, { kind: 'message' }>;
+export type ReasoningTimelineEntry = Extract<TimelineEntry, { kind: 'reasoning' }>;
+export type OperationTimelineEntry = Extract<TimelineEntry, { kind: 'tool' }>;
+export type MetricsTimelineEntry = Extract<TimelineEntry, { kind: 'metrics' }>;
+export type ProgressTimelineEntry = Extract<TimelineEntry, { kind: 'progress' }>;
+
+export interface TurnTimelineGroup {
+  id: string;
+  turnId?: string;
+  running: boolean;
+  userMessages: MessageTimelineEntry[];
+  reasoning: ReasoningTimelineEntry[];
+  operations: OperationTimelineEntry[];
+  finalAnswers: MessageTimelineEntry[];
+  otherMessages: MessageTimelineEntry[];
+  metrics: MetricsTimelineEntry[];
+  progress: ProgressTimelineEntry[];
+}
 
 export function createTimelineEntries(
   items: Item[],
@@ -128,24 +151,42 @@ export function createTimelineEntries(
       continue;
     }
 
-    entries.push({
-      id: item.id,
-      kind: 'message',
-      role: item.kind,
-      text: item.kind === 'change' ? item.summary : (item.output ?? item.title),
-      turnId: item.turnId,
-      live: false,
-    });
+    if (item.kind === 'tool') {
+      entries.push({
+        id: item.id,
+        kind: 'tool',
+        turnId: item.turnId,
+        toolId: item.toolId,
+        title: item.title,
+        text: item.output ?? item.title,
+        status: item.status,
+        sequence: item.sequence,
+      });
+    } else {
+      entries.push({
+        id: item.id,
+        kind: 'tool',
+        turnId: item.turnId,
+        title: `${item.action}: ${item.path}`,
+        text: item.summary,
+        status: 'completed',
+        sequence: item.sequence,
+      });
+    }
     appendMetricsIfTurnEnds(entries, metricsByTurn, item, items);
   }
 
-  // Tool activity is transient: one merged row per invocation while the turn
-  // is live, removed once the turn reaches a terminal state. The synthetic
-  // model-call row duplicates the progress indicator, so it is never shown.
+  // Merge live events with their durable ToolItems. Tool history remains
+  // visible after a turn settles; only the synthetic model-call row is hidden.
   const toolEntryByCall = new Map<string, Extract<TimelineEntry, { kind: 'tool' }>>();
+  for (const entry of entries) {
+    if (entry.kind !== 'tool' || !entry.turnId) continue;
+    const toolId = entry.toolId ?? persistedToolId(entry.id, entry.turnId);
+    if (toolId) toolEntryByCall.set(`${entry.turnId}:${toolId}`, entry);
+  }
   for (const event of events) {
     if (event.type === 'tool.started' || event.type === 'tool.output') {
-      if (terminalTurns.has(event.turnId) || event.toolId === `tool-${event.turnId}-model`) {
+      if (event.toolId === `tool-${event.turnId}-model`) {
         continue;
       }
       const toolKey = `${event.turnId}:${event.toolId}`;
@@ -155,20 +196,28 @@ export function createTimelineEntries(
         const entry: Extract<TimelineEntry, { kind: 'tool' }> = {
           id: `tool.started-${event.turnId}-${event.toolId}`,
           kind: 'tool',
+          turnId: event.turnId,
+          toolId: event.toolId,
+          title: event.title,
           text: event.title,
           status: 'running',
+          sequence: event.sequence,
         };
         toolEntryByCall.set(toolKey, entry);
         entries.push(entry);
       } else if (existing) {
         existing.text = event.output;
-        existing.status = 'completed';
+        existing.status = event.status ?? 'completed';
       } else {
         const entry: Extract<TimelineEntry, { kind: 'tool' }> = {
           id: `tool.output-${event.turnId}-${event.toolId}`,
           kind: 'tool',
+          turnId: event.turnId,
+          toolId: event.toolId,
+          title: event.toolId,
           text: event.output,
-          status: 'completed',
+          status: event.status ?? 'completed',
+          sequence: event.sequence,
         };
         toolEntryByCall.set(toolKey, entry);
         entries.push(entry);
@@ -196,6 +245,97 @@ export function createTimelineEntries(
   }
 
   return entries;
+}
+
+/** Build the stable three-layer presentation used by the conversation page. */
+export function createTurnTimelineGroups(
+  items: Item[],
+  events: AgentEvent[] = [],
+  turns: TurnRecord[] = [],
+  t: Translator = createTranslator('en-US'),
+): TurnTimelineGroup[] {
+  const entries = createTimelineEntries(items, events, turns, t);
+  const terminal = new Set(turns
+    .filter((turn) => turn.status === 'completed' || turn.status === 'failed' || turn.status === 'cancelled')
+    .map((turn) => turn.id));
+  for (const event of events) {
+    if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.cancelled') {
+      terminal.add(event.turnId);
+    }
+  }
+  const running = new Set(turns.filter((turn) => !terminal.has(turn.id)).map((turn) => turn.id));
+  for (const event of events) {
+    if (event.type === 'turn.started' && !terminal.has(event.turnId)) running.add(event.turnId);
+  }
+
+  const groups = new Map<string, TurnTimelineGroup>();
+  const ensureGroup = (turnId?: string): TurnTimelineGroup => {
+    const key = turnId ?? '__unassigned__';
+    const existing = groups.get(key);
+    if (existing) return existing;
+    const created: TurnTimelineGroup = {
+      id: `timeline-group-${key}`,
+      turnId,
+      running: Boolean(turnId && running.has(turnId)),
+      userMessages: [],
+      reasoning: [],
+      operations: [],
+      finalAnswers: [],
+      otherMessages: [],
+      metrics: [],
+      progress: [],
+    };
+    groups.set(key, created);
+    return created;
+  };
+
+  for (const turn of turns) ensureGroup(turn.id);
+  for (const entry of entries) {
+    const turnId = entry.kind === 'metrics' || entry.kind === 'progress'
+      ? turnIdFromGeneratedEntry(entry.id, turns)
+      : entry.turnId;
+    const group = ensureGroup(turnId);
+    if (entry.kind === 'message') {
+      if (entry.role === 'user') group.userMessages.push(entry);
+      else if (entry.role === 'assistant') group.finalAnswers.push(entry);
+      else group.otherMessages.push(entry);
+    } else if (entry.kind === 'reasoning') {
+      group.reasoning.push(entry);
+    } else if (entry.kind === 'tool') {
+      group.operations.push(entry);
+    } else if (entry.kind === 'metrics') {
+      group.metrics.push(entry);
+    } else {
+      group.progress.push(entry);
+    }
+  }
+
+  for (const group of groups.values()) {
+    group.operations.sort((left, right) =>
+      (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER));
+  }
+  return [...groups.values()].filter((group) =>
+    group.running || group.userMessages.length > 0 || group.reasoning.length > 0 ||
+    group.operations.length > 0 || group.finalAnswers.length > 0 || group.otherMessages.length > 0 ||
+    group.metrics.length > 0 || group.progress.length > 0);
+}
+
+export function operationPanelState(count: number, running: boolean, t: Translator): { open: boolean; summary: string } {
+  return {
+    open: running,
+    summary: t(running ? 'operationsRunning' : 'operationsCompleted').replace('{count}', String(count)),
+  };
+}
+
+function persistedToolId(id: string, turnId: string): string | undefined {
+  const prefix = `item-${turnId}-tool-`;
+  return id.startsWith(prefix) ? id.slice(prefix.length) : undefined;
+}
+
+function turnIdFromGeneratedEntry(id: string, turns: TurnRecord[]): string | undefined {
+  return [...turns]
+    .sort((left, right) => right.id.length - left.id.length)
+    .find((turn) => id.startsWith(`model.metrics-${turn.id}-`) || id === `model.progress-${turn.id}`)?.id;
 }
 
 function appendMetricsIfTurnEnds(

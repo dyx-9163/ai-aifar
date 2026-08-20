@@ -8,6 +8,8 @@ const profile: RuntimeModelProfile = {
   id: 'model-1',
   name: 'AIFAR Qwen',
   provider: 'openai-compatible',
+  deploymentType: 'private',
+  runtimeType: 'llama.cpp',
   baseUrl: 'http://127.0.0.1:8080/v1',
   model: 'Qwen3.5-9B',
   apiKey: 'local-not-used',
@@ -172,9 +174,9 @@ describe('OpenAI-compatible model provider', () => {
 
     await expect(testModelProfile(profile, fetchImpl, 100)).resolves.toMatchObject({
       ok: true,
-      status: 'concurrency-warning',
+      status: 'connected',
       model: 'Qwen3.5-9B',
-      clientConcurrency: 1,
+      clientConcurrency: 2,
       serviceSlots: 2,
     });
     expect(signalInputs).toHaveLength(2);

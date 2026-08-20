@@ -12,6 +12,7 @@ import type {
   ReasoningItem,
   TurnRecord,
   TurnAttachment,
+  ToolItem,
   WorkspaceRecord,
   WorkspaceTrustLevel,
 } from '../shared/domain.js';
@@ -612,9 +613,52 @@ function persistStreamEvent(database: AppDatabase, event: SequencedEvent, create
     database.appendItem(reasoningItem(event.threadId, event.turnId, 'summary', event.text, createdAt));
   } else if (event.type === 'loop.classified') {
     database.appendItem(loopItem(event.threadId, event.turnId, event.kind, event.iteration, createdAt));
+  } else if (event.type === 'tool.started') {
+    if (event.toolId !== `tool-${event.turnId}-model`) {
+      database.upsertToolItem(toolItemFromStartedEvent(event, createdAt));
+    }
+  } else if (event.type === 'tool.output') {
+    if (event.toolId !== `tool-${event.turnId}-model`) {
+      const id = toolItemId(event.turnId, event.toolId);
+      const existing = database.getSnapshot().items[event.threadId]
+        ?.find((item): item is ToolItem => item.kind === 'tool' && item.id === id);
+      database.upsertToolItem({
+        id,
+        threadId: event.threadId,
+        turnId: event.turnId,
+        kind: 'tool',
+        toolId: event.toolId,
+        title: existing?.title ?? event.toolId,
+        status: event.status ?? 'completed',
+        output: event.output,
+        sequence: existing?.sequence ?? event.sequence,
+        createdAt: existing?.createdAt ?? createdAt,
+      });
+    }
   } else if (event.type === 'approval.required') {
     database.upsertApproval(approvalFromEvent(event, createdAt));
   }
+}
+
+function toolItemFromStartedEvent(
+  event: Extract<SequencedEvent, { type: 'tool.started' }>,
+  createdAt: string,
+): ToolItem {
+  return {
+    id: toolItemId(event.turnId, event.toolId),
+    threadId: event.threadId,
+    turnId: event.turnId,
+    kind: 'tool',
+    toolId: event.toolId,
+    title: event.title,
+    status: 'running',
+    sequence: event.sequence,
+    createdAt,
+  };
+}
+
+function toolItemId(turnId: string, toolId: string): string {
+  return `item-${turnId}-tool-${toolId}`;
 }
 
 export function testRuntimeModelProfileConnection(
@@ -627,6 +671,11 @@ export function testRuntimeModelProfileConnection(
 
 function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): RuntimeModelProfile {
   const existing = input.id ? db.getModelProfileForRuntime(input.id) : undefined;
+  const normalizedBaseUrl = normalizeModelBaseUrl(input.baseUrl);
+  const deploymentType = input.deploymentType ?? existing?.deploymentType ?? deploymentTypeForBaseUrl(normalizedBaseUrl);
+  const runtimeType = deploymentType === 'cloud'
+    ? 'openai-compatible'
+    : input.runtimeType ?? existing?.runtimeType ?? 'openai-compatible';
   const reasoningInput = { ...existing?.reasoning, ...input.reasoning };
   const capabilities = normalizeProfileCapabilities(
     input.capabilities,
@@ -638,7 +687,9 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
     id: input.id ?? 'unsaved-test-profile',
     name: input.name.trim(),
     provider: input.provider,
-    baseUrl: normalizeModelBaseUrl(input.baseUrl),
+    deploymentType,
+    runtimeType,
+    baseUrl: normalizedBaseUrl,
     model: input.model.trim(),
     apiKey: input.apiKey?.trim() || existing?.apiKey,
     apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
@@ -654,6 +705,15 @@ function runtimeProfileFromInput(input: ModelProfileInput, db: AppDatabase): Run
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+}
+
+function deploymentTypeForBaseUrl(baseUrl: string): 'cloud' | 'private' {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' ? 'private' : 'cloud';
+  } catch {
+    return 'private';
+  }
 }
 
 function postReply(requestId: string, ok: boolean, data?: unknown, error?: string): void {

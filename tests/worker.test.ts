@@ -50,6 +50,8 @@ describe('worker turn runtime', () => {
     const result = await testRuntimeModelProfileConnection({
       name: 'Transient Qwen',
       provider: 'openai-compatible',
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
       baseUrl: 'http://127.0.0.1:8080/v1/',
       model: 'Qwen3.5-9B',
       maxConcurrency: 2,
@@ -62,6 +64,8 @@ describe('worker turn runtime', () => {
     expect(result).toBe(expected);
     expect(received).toMatchObject({
       baseUrl: 'http://127.0.0.1:8080/v1',
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
       model: 'Qwen3.5-9B',
       maxConcurrency: 2,
       maxOutputTokens: 4096,
@@ -76,6 +80,8 @@ describe('worker turn runtime', () => {
     await testRuntimeModelProfileConnection({
       name: 'DashScope DeepSeek',
       provider: 'openai-compatible',
+      deploymentType: 'cloud',
+      runtimeType: 'openai-compatible',
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode',
       model: 'deepseek-v4-pro',
     }, harness.database, async (profile) => {
@@ -89,7 +95,11 @@ describe('worker turn runtime', () => {
       };
     });
 
-    expect(received?.baseUrl).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1');
+    expect(received).toMatchObject({
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      deploymentType: 'cloud',
+      runtimeType: 'openai-compatible',
+    });
     harness.database.close();
   });
 
@@ -1074,6 +1084,15 @@ describe('workspace agent turns', () => {
       id: `item-${turnId}-assistant`,
       text: 'The file exports answer = 42.',
     }));
+    expect(harness.database.getSnapshot().items[thread.id].filter((item) => item.kind === 'tool')).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(new RegExp(`^item-${turnId}-tool-`)),
+        title: 'read_file',
+        status: 'completed',
+        output: expect.stringContaining('read_file completed'),
+        sequence: expect.any(Number),
+      }),
+    ]);
     harness.database.close();
   });
 

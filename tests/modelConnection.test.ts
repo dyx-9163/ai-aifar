@@ -7,6 +7,8 @@ const subject: RuntimeModelProfile = {
   id: 'local-qwen35',
   name: 'Local Qwen3.5-9B',
   provider: 'openai-compatible',
+  deploymentType: 'private',
+  runtimeType: 'llama.cpp',
   baseUrl: 'http://127.0.0.1:8080/v1',
   model: 'Qwen3.5-9B',
   apiKeyConfigured: false,
@@ -21,6 +23,80 @@ const subject: RuntimeModelProfile = {
 };
 
 describe('model connection inspection', () => {
+  it('treats cloud concurrency as provider-managed without probing llama.cpp slots', async () => {
+    const cloudProfile = {
+      ...subject,
+      deploymentType: 'cloud',
+      runtimeType: 'openai-compatible',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      model: 'qwen3.8-max',
+      maxConcurrency: 6,
+    } as RuntimeModelProfile;
+    const fetchImpl = vi.fn().mockResolvedValueOnce(Response.json({ data: [{ id: 'qwen3.8-max' }] }));
+
+    await expect(inspectModelConnection(cloudProfile, fetchImpl, new AbortController().signal)).resolves.toMatchObject({
+      ok: true,
+      status: 'provider-managed',
+      model: 'qwen3.8-max',
+      clientConcurrency: 6,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('adopts the detected llama.cpp slot count as client concurrency', async () => {
+    const privateLlamaProfile = {
+      ...subject,
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
+      maxConcurrency: 1,
+    } as RuntimeModelProfile;
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'Qwen3.5-9B' }] }))
+      .mockResolvedValueOnce(Response.json([{ id: 0 }, { id: 1 }]));
+
+    await expect(inspectModelConnection(privateLlamaProfile, fetchImpl, new AbortController().signal)).resolves.toMatchObject({
+      ok: true,
+      status: 'connected',
+      clientConcurrency: 2,
+      serviceSlots: 2,
+    });
+  });
+
+  it('uses safe concurrency one when llama.cpp slots cannot be inspected', async () => {
+    const privateLlamaProfile = {
+      ...subject,
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
+      maxConcurrency: 8,
+    } as RuntimeModelProfile;
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'Qwen3.5-9B' }] }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    await expect(inspectModelConnection(privateLlamaProfile, fetchImpl, new AbortController().signal)).resolves.toMatchObject({
+      ok: true,
+      status: 'slots-unverified',
+      clientConcurrency: 1,
+    });
+  });
+
+  it('uses safe concurrency one for private runtimes without a supported concurrency probe', async () => {
+    const privateCompatibleProfile = {
+      ...subject,
+      deploymentType: 'private',
+      runtimeType: 'openai-compatible',
+      maxConcurrency: 8,
+    } as RuntimeModelProfile;
+    const fetchImpl = vi.fn().mockResolvedValueOnce(Response.json({ data: [{ id: 'Qwen3.5-9B' }] }));
+
+    await expect(inspectModelConnection(privateCompatibleProfile, fetchImpl, new AbortController().signal)).resolves.toMatchObject({
+      ok: true,
+      status: 'slots-unverified',
+      clientConcurrency: 1,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('requires the exact configured model and verifies matching service slots', async () => {
     const signal = new AbortController().signal;
     const fetchImpl = vi.fn()
@@ -44,18 +120,18 @@ describe('model connection inspection', () => {
     });
   });
 
-  it('warns when the service slot count differs from client concurrency', async () => {
+  it('replaces stale client concurrency when the service slot count changes', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(Response.json({ data: [{ id: 'Qwen3.5-9B' }] }))
       .mockResolvedValueOnce(Response.json([{ id: 0 }, { id: 1 }]));
 
     await expect(inspectModelConnection(subject, fetchImpl, new AbortController().signal)).resolves.toMatchObject({
       ok: true,
-      status: 'concurrency-warning',
+      status: 'connected',
       model: 'Qwen3.5-9B',
-      clientConcurrency: 1,
+      clientConcurrency: 2,
       serviceSlots: 2,
-      message: expect.stringMatching(/service slots \(2\).*client concurrency \(1\)/i),
+      message: expect.stringMatching(/detected 2 llama\.cpp service slots/i),
     });
   });
 

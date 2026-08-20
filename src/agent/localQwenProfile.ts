@@ -15,6 +15,8 @@ export function localQwenProfileInput() {
     id: LOCAL_QWEN_PROFILE_ID,
     name: 'Local Qwen3.5-9B',
     provider: 'openai-compatible',
+    deploymentType: 'private',
+    runtimeType: 'llama.cpp',
     baseUrl: LOCAL_QWEN_BASE_URL,
     model: LOCAL_QWEN_MODEL,
     capabilities: qwenCapabilities(),

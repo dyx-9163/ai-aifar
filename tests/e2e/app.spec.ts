@@ -189,6 +189,8 @@ test('shows output bounds and read-only direct-service diagnostics in Settings',
     id: LOCAL_QWEN_PROFILE_ID,
     name: 'Local Qwen3.5-9B',
     provider: 'openai-compatible',
+    deploymentType: 'private',
+    runtimeType: 'llama.cpp',
     baseUrl: LOCAL_QWEN_BASE_URL,
     model: LOCAL_QWEN_MODEL,
     capabilities: qwenCapabilities(),
@@ -205,6 +207,12 @@ test('shows output bounds and read-only direct-service diagnostics in Settings',
     const page = await app.firstWindow();
     await page.getByTitle('Open settings').click();
     const maxOutputTokens = page.getByTestId('max-output-tokens-input');
+    const deploymentType = page.getByTestId('deployment-type-select');
+    const runtimeType = page.getByTestId('runtime-type-select');
+    const maxConcurrency = page.getByTestId('max-concurrency-input');
+    await expect(deploymentType).toHaveValue('private');
+    await expect(runtimeType).toHaveValue('llama.cpp');
+    await expect(maxConcurrency).toBeDisabled();
     await expect(maxOutputTokens).toHaveValue('2048', { timeout: 2_000 });
     for (const invalid of ['0', '1.5', '32769']) {
       await maxOutputTokens.fill(invalid);
@@ -224,13 +232,14 @@ test('shows output bounds and read-only direct-service diagnostics in Settings',
 
     server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slots: 3 });
     await testConnection.click();
-    await expect(status).toHaveAttribute('data-state', 'concurrency-warning');
+    await expect(status).toHaveAttribute('data-state', 'connected');
     await expect(diagnostic).toContainText('3');
-    await expect(diagnostic).toContainText('1');
+    await expect(maxConcurrency).toHaveValue('3');
 
     server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slotsStatus: 404 });
     await testConnection.click();
     await expect(status).toHaveAttribute('data-state', 'slots-unverified');
+    await expect(maxConcurrency).toHaveValue('1');
 
     server.setConnectionState({ modelIds: ['another-model'], slots: 1 });
     await testConnection.click();

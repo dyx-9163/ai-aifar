@@ -211,6 +211,27 @@ describe('desktop protocol guards', () => {
     })).toBe(true);
   });
 
+  it('accepts valid deployment metadata and rejects unsupported runtime values', () => {
+    const profile = {
+      name: 'Private llama.cpp',
+      provider: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      model: 'Qwen3.5-9B',
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
+    };
+
+    expect(isDesktopRequest({ type: 'modelProfile.save', profile })).toBe(true);
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: { ...profile, deploymentType: 'edge' },
+    })).toBe(false);
+    expect(isDesktopRequest({
+      type: 'modelProfile.save',
+      profile: { ...profile, runtimeType: 'unknown-engine' },
+    })).toBe(false);
+  });
+
   it('rejects enabled reasoning when no request control format is declared', () => {
     expect(isDesktopRequest({
       type: 'modelProfile.save',

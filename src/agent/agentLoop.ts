@@ -14,6 +14,14 @@ import type { AgentToolCall, AgentToolResult } from '../shared/toolProtocol.js';
 import { runAutoVerification } from './tools/autoVerify.js';
 import type { RuntimeModelProfile } from './database.js';
 import type { ChatMessage, ModelStreamHandlers, NativeStreamedToolCall } from './modelProvider.js';
+import {
+  hasUnparsedTextToolProtocol,
+  hasUnparsedToolFence as adapterHasUnparsedToolFence,
+  looksLikeTruncatedTextToolCall,
+  parseTextToolCalls,
+  stripTextToolProtocol,
+  type NormalizedToolCall,
+} from './providerAdapters/textToolCallAdapter.js';
 import { classifyReply, steerKindsFor, STEER_RULES, type SteerKind } from './replyClassifier.js';
 import { buildNativeToolSchemas, type NativeToolSchema } from './tools/toolSchemas.js';
 import {
@@ -26,31 +34,20 @@ import {
 
 export const AGENT_LOOP_MAX_ITERATIONS = Number.POSITIVE_INFINITY;
 
-const TOOL_FENCE_GLOBAL_PATTERN = /```tool\s*\n([\s\S]*?)```/g;
 const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
-/** Code fence with a captured language tag: group 1 = language, group 2 = body. */
-const FENCE_WITH_LANG_PATTERN = /```([^\n]*)\n([\s\S]*?)```/g;
 /** A fenced code block with at least this many non-empty lines counts as a manual code dump. */
 const CODE_DUMP_MIN_LINES = 12;
 /** How many times per turn the loop runs deterministic post-write verification. */
 const MAX_AUTO_VERIFICATIONS = 3;
 /** Reads of the same path without an intervening write that trigger a steering note. */
 const MAX_REPEAT_READS = 4;
-const TOOL_INVOKE_GLOBAL_PATTERN = /<invoke\s+[^>]*\bname="([^"]+)"[^>]*>((?:(?!<invoke\b)[\s\S])*?)<\/invoke>/g;
-const TOOL_PARAMETER_PATTERN = /<parameter\s+[^>]*\bname="([^"]+)"[^>]*>((?:(?!<parameter\b|<invoke\b|<\/invoke\b)[\s\S])*?)<\/parameter>/g;
-/** Lenient fallback for invoke blocks whose name attribute is single-quoted, unquoted, or not the first attribute. */
-const TOOL_INVOKE_LENIENT_PATTERN = /<invoke\b[^>]*>((?:(?!<invoke\b)[\s\S])*?)<\/invoke>/g;
-const TOOL_PARAMETER_LENIENT_PATTERN = /<parameter\b[^>]*>((?:(?!<parameter\b|<invoke\b|<\/invoke\b)[\s\S])*?)<\/parameter>/g;
-const TOOL_INVOKE_NAME_PATTERN = /\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/;
-/** Providers sometimes emit plain XML tool blocks this harness cannot parse; their leftovers mark a swallowed call. */
-const UNPARSED_XML_TOOL_PATTERN = /<tool_calls\b|<invoke\b|<parameter\b/i;
 const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES]);
 
 export type AgentLoopEmit = (
   payload:
     | { type: 'answer.delta'; text: string }
     | { type: 'tool.started'; toolId: string; title: string }
-    | { type: 'tool.output'; toolId: string; output: string }
+    | { type: 'tool.output'; toolId: string; output: string; status: 'completed' | 'failed' }
     | { type: 'loop.classified'; kind: string; iteration: number },
 ) => Promise<void> | void;
 
@@ -94,58 +91,11 @@ export interface AgentLoopOutcome {
   falseCompletion: boolean;
 }
 
-export interface ParsedToolCall {
-  tool: string;
-  input: Record<string, unknown>;
-}
+export type ParsedToolCall = NormalizedToolCall;
 
 /** Extracts every tool call from assistant text: fenced JSON blocks first, then provider-native XML. */
 export function parseToolCalls(text: string): ParsedToolCall[] {
-  const source = normalizeDsmlTags(text);
-  const fenced: ParsedToolCall[] = [];
-  for (const match of source.matchAll(FENCE_WITH_LANG_PATTERN)) {
-    const language = (match[1] ?? '').trim().toLowerCase();
-    const body = match[2] ?? '';
-    const parsed = parseFencedToolCall(body);
-    if (!parsed) continue;
-    // ```tool fences may name any tool; ordinary code fences (```json, ```...)
-    // are honored only when the JSON names a known tool, so pasted examples
-    // never execute by accident.
-    if (language === 'tool' || KNOWN_TOOL_NAMES.has(parsed.tool)) fenced.push(parsed);
-  }
-  if (fenced.length > 0) return fenced;
-  const xml: ParsedToolCall[] = [];
-  for (const match of source.matchAll(TOOL_INVOKE_GLOBAL_PATTERN)) {
-    const input: Record<string, unknown> = {};
-    for (const parameter of match[2].matchAll(TOOL_PARAMETER_PATTERN)) {
-      input[parameter[1]] = decodeToolParameter(parameter[2]);
-    }
-    xml.push({ tool: match[1], input });
-  }
-  if (xml.length > 0) return xml;
-  // Providers occasionally emit invoke blocks whose name attribute is
-  // single-quoted, unquoted, or not the first attribute; recover those instead
-  // of letting the strip step swallow the whole reply into silence.
-  for (const match of source.matchAll(TOOL_INVOKE_LENIENT_PATTERN)) {
-    const nameMatch = match[0].match(TOOL_INVOKE_NAME_PATTERN);
-    const tool = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
-    if (!tool) continue;
-    xml.push({ tool, input: parseLenientXmlParameters(match[1] ?? '') });
-  }
-  return xml;
-}
-
-/** Reads parameter name/value pairs tolerating single-quoted, unquoted, or reordered name attributes. */
-function parseLenientXmlParameters(body: string): Record<string, unknown> {
-  const input: Record<string, unknown> = {};
-  for (const parameter of body.matchAll(TOOL_PARAMETER_LENIENT_PATTERN)) {
-    const openTag = (parameter[0] ?? '').slice(0, (parameter[0] ?? '').indexOf('>') + 1);
-    const nameMatch = openTag.match(TOOL_INVOKE_NAME_PATTERN);
-    const name = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
-    if (!name) continue;
-    input[name] = decodeToolParameter(parameter[1] ?? '');
-  }
-  return input;
+  return parseTextToolCalls(text, KNOWN_TOOL_NAMES);
 }
 
 /** Extracts the first tool call from assistant text, if any. */
@@ -155,94 +105,12 @@ export function parseToolCall(text: string): ParsedToolCall | undefined {
 
 /** True when the reply contains a fenced tool block that could not be parsed even after repair. */
 export function hasUnparsedToolFence(text: string): boolean {
-  for (const match of text.matchAll(TOOL_FENCE_GLOBAL_PATTERN)) {
-    if (!match[1] || !parseFencedToolCall(match[1])) return true;
-  }
-  return false;
+  return adapterHasUnparsedToolFence(text);
 }
 
 /** True when the reply carries XML tool syntax that no parser turned into a call (checked where parsedCalls is empty). */
 export function hasUnparsedXmlToolBlock(text: string): boolean {
-  // The check runs on the original text: stripping removes closed blocks without
-  // a trace, so testing the stripped remainder would miss the swallowed-call case.
-  return UNPARSED_XML_TOOL_PATTERN.test(normalizeDsmlTags(text));
-}
-
-/** Closes unterminated strings, escapes raw control characters inside them and appends missing ]/} closers so truncated JSON can re-parse. */
-function repairToolJson(body: string): string {
-  const cleaned = body.replace(/,(\s*[}\]])/g, '$1');
-  let repaired = '';
-  const stack: string[] = [];
-  let inString = false;
-  let escaped = false;
-  for (const char of cleaned) {
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === '"') inString = false;
-      else if (char === '\n') { repaired += '\\n'; continue; }
-      else if (char === '\r') continue;
-      else if (char === '\t') { repaired += '\\t'; continue; }
-      repaired += char;
-      continue;
-    }
-    if (char === '"') inString = true;
-    else if (char === '{') stack.push('}');
-    else if (char === '[') stack.push(']');
-    else if (char === '}' || char === ']') stack.pop();
-    repaired += char;
-  }
-  if (inString) repaired += '"';
-  return repaired + stack.reverse().join('');
-}
-
-function parseFencedToolCall(body: string): ParsedToolCall | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body.trim());
-  } catch {
-    // Models frequently drop closing braces or leave trailing commas when the
-    // output limit bites; repair the shape before giving up on the call.
-    try {
-      parsed = JSON.parse(repairToolJson(body.trim()));
-    } catch {
-      return undefined;
-    }
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
-  const tool = typeof record.tool === 'string' ? record.tool : typeof record.name === 'string' ? record.name : undefined;
-  if (!tool) return undefined;
-  const rawInput = record.input ?? record.arguments ?? {};
-  const input = typeof rawInput === 'object' && rawInput !== null && !Array.isArray(rawInput)
-    ? (rawInput as Record<string, unknown>)
-    : {};
-  return { tool, input };
-}
-
-/**
- * DeepSeek-family models emit native tool calls with DSML special-token tags
- * (<｜DSML｜invoke ...>, <｜DSML｜parameter ...>); rewrite them to plain XML so
- * the shared invoke/parameter parsers understand both dialects.
- */
-function normalizeDsmlTags(text: string): string {
-  return text.replace(/<\/?｜DSML｜/g, (tag) => (tag.startsWith('</') ? '</' : '<'));
-}
-
-/** Parameter values may be plain text or embedded JSON (numbers, arrays, objects). */
-function decodeToolParameter(raw: string): unknown {
-  const trimmed = raw.trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // DSML parameters often carry JSON with trailing commas or raw newlines
-    // inside strings; repair before treating the value as plain text.
-    try {
-      return JSON.parse(repairToolJson(trimmed));
-    } catch {
-      return trimmed;
-    }
-  }
+  return hasUnparsedTextToolProtocol(text);
 }
 
 /**
@@ -264,12 +132,7 @@ export function looksLikeManualCodeDump(text: string): boolean {
  * XML block mid-way), which would otherwise be mistaken for a tool-free answer.
  */
 export function looksLikeTruncatedToolCall(text: string): boolean {
-  const withoutCompleteCalls = normalizeDsmlTags(text)
-    .replace(/```tool\s*\n[\s\S]*?```/g, '')
-    // Any closed invoke block is complete syntax (even one the parsers reject,
-    // which takes the dedicated XML steering path); only open blocks mean truncation.
-    .replace(TOOL_INVOKE_LENIENT_PATTERN, '');
-  return /```tool\b/.test(withoutCompleteCalls) || /<invoke\b/.test(withoutCompleteCalls);
+  return looksLikeTruncatedTextToolCall(text);
 }
 
 const TOOL_INTENT_PATTERN = /(apply_patch|read_file|workspace_tree|替换|更新|修改|写入|创建|读取|查看|检查|修复|replac|updat|writ|creat|read|check|inspect|fix|repair)/i;
@@ -308,17 +171,7 @@ export function looksLikeUnverifiedCompletionClaim(text: string): boolean {
 
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
-  return normalizeDsmlTags(text)
-    .replace(FENCE_WITH_LANG_PATTERN, (whole, language: string, body: string) => {
-      if (language.trim().toLowerCase() === 'tool') return '';
-      const parsed = parseFencedToolCall(body);
-      return parsed && KNOWN_TOOL_NAMES.has(parsed.tool) ? '' : whole;
-    })
-    .replace(/<tool_calls>[\s\S]*?<\/tool_calls>/g, '')
-    .replace(/<invoke\b[\s\S]*?<\/invoke>/g, '')
-    .replace(/<parameter\b[\s\S]*?<\/parameter>/g, '')
-    .replace(/<\/?(?:tool_calls|invoke|parameter)\b[^>]*>/g, '')
-    .trim();
+  return stripTextToolProtocol(text, KNOWN_TOOL_NAMES);
 }
 
 export function buildAgentSystemPrompt(
@@ -487,7 +340,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           feedback = `${feedback}\n${report}`;
         }
       }
-      await options.emit({ type: 'tool.output', toolId: parsed.callId, output: summary });
+      await options.emit({
+        type: 'tool.output',
+        toolId: parsed.callId,
+        output: summary,
+        status: result.status === 'success' ? 'completed' : 'failed',
+      });
       deliverResult(parsed.callId, feedback);
     }
   };
@@ -512,6 +370,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           nativeCalls.map((call) => ({ callId: call.id, tool: call.name, input: call.arguments })),
           (callId, feedback) => {
             messages.push({ role: 'tool', tool_call_id: callId, content: feedback });
+          },
+        );
+        continue;
+      }
+      // Some OpenAI-compatible and llama.cpp endpoints advertise native tool
+      // support but occasionally serialize calls into assistant text. Keep the
+      // native path first, then run the provider-adapter fallback before an
+      // assistant message can be accepted as the final answer.
+      const fallbackCalls = parseToolCalls(text);
+      if (fallbackCalls.length > 0) {
+        await options.emit({ type: 'loop.classified', kind: 'tool-calls', iteration });
+        messages.push({ role: 'assistant', content: text });
+        await executeToolCalls(
+          fallbackCalls.map((call) => ({ callId: createCallId(), tool: call.tool, input: call.input })),
+          (_callId, feedback) => {
+            messages.push({ role: 'user', content: feedback });
           },
         );
         continue;

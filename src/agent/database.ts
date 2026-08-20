@@ -21,6 +21,7 @@ import type {
   WorkspaceRecord,
   WorkspaceRegistrationInput,
   WorkspaceTrustLevel,
+  ToolItem,
 } from '../shared/domain.js';
 import { normalizeModelBaseUrl } from '../shared/modelProfileUrl.js';
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../shared/modelProfileLimits.js';
@@ -57,6 +58,7 @@ export interface AppDatabase {
   completeTurn(turnId: string, completedAt: string, metrics?: ModelRunMetrics): boolean;
   interruptUnfinishedTurns(): void;
   appendItem(item: Item): void;
+  upsertToolItem(item: ToolItem): void;
   upsertApproval(approval: Approval): void;
   saveModelProfile(profile: ModelProfileInput): ModelProfile;
   deleteModelProfile(id: string): void;
@@ -172,6 +174,8 @@ type ModelProfileRow = {
   id: string;
   name: string;
   provider: ModelProfile['provider'];
+  deployment_type: string | null;
+  runtime_type: string | null;
   base_url: string;
   model: string;
   api_key: string | null;
@@ -545,6 +549,27 @@ class SqliteAppDatabase implements AppDatabase {
     });
   }
 
+  upsertToolItem(item: ToolItem): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO items (id, thread_id, turn_id, kind, payload, created_at)
+           VALUES (:id, :threadId, :turnId, 'tool', :payload, :createdAt)
+           ON CONFLICT(id) DO UPDATE SET payload = excluded.payload`,
+        )
+        .run({
+          id: item.id,
+          threadId: item.threadId,
+          turnId: item.turnId ?? null,
+          payload: JSON.stringify(item),
+          createdAt: item.createdAt,
+        });
+      this.db
+        .prepare('UPDATE threads SET updated_at = :updatedAt WHERE id = :threadId')
+        .run({ updatedAt: item.createdAt, threadId: item.threadId });
+    });
+  }
+
   upsertApproval(approval: Approval): void {
     this.transaction(() => {
       this.db
@@ -582,10 +607,13 @@ class SqliteAppDatabase implements AppDatabase {
       reasoningInput.protocol ?? 'none',
     );
     const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);
+    const deploymentType = normalizeDeploymentType(input.deploymentType ?? existing?.deploymentType, input.baseUrl);
     const profile: RuntimeModelProfile = {
       id: input.id ?? randomUUID(),
       name: requireTrimmed(input.name, 'Model profile name'),
       provider: input.provider,
+      deploymentType,
+      runtimeType: normalizeRuntimeType(input.runtimeType ?? existing?.runtimeType, deploymentType),
       baseUrl: normalizeBaseUrl(input.baseUrl),
       model: requireTrimmed(input.model, 'Model name'),
       apiKey: input.apiKey?.trim() || existing?.apiKey,
@@ -610,11 +638,13 @@ class SqliteAppDatabase implements AppDatabase {
       }
       this.db
         .prepare(
-          `INSERT INTO model_profiles (id, name, provider, base_url, model, api_key, capabilities, reasoning, max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at)
-           VALUES (:id, :name, :provider, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :maxConcurrency, :maxOutputTokens, :responseSpeed, :isDefault, :createdAt, :updatedAt)
+          `INSERT INTO model_profiles (id, name, provider, deployment_type, runtime_type, base_url, model, api_key, capabilities, reasoning, max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at)
+           VALUES (:id, :name, :provider, :deploymentType, :runtimeType, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :maxConcurrency, :maxOutputTokens, :responseSpeed, :isDefault, :createdAt, :updatedAt)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
              provider = excluded.provider,
+             deployment_type = excluded.deployment_type,
+             runtime_type = excluded.runtime_type,
              base_url = excluded.base_url,
              model = excluded.model,
              api_key = excluded.api_key,
@@ -630,6 +660,8 @@ class SqliteAppDatabase implements AppDatabase {
           id: profile.id,
           name: profile.name,
           provider: profile.provider,
+          deploymentType: profile.deploymentType,
+          runtimeType: profile.runtimeType,
           baseUrl: profile.baseUrl,
           model: profile.model,
           apiKey: profile.apiKey ?? null,
@@ -946,6 +978,8 @@ class SqliteAppDatabase implements AppDatabase {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         provider TEXT NOT NULL,
+        deployment_type TEXT NOT NULL DEFAULT 'cloud',
+        runtime_type TEXT NOT NULL DEFAULT 'openai-compatible',
         base_url TEXT NOT NULL,
         model TEXT NOT NULL,
         api_key TEXT,
@@ -987,6 +1021,16 @@ class SqliteAppDatabase implements AppDatabase {
       'response_speed',
       "ALTER TABLE model_profiles ADD COLUMN response_speed TEXT NOT NULL DEFAULT 'standard'",
     );
+    this.ensureColumn(
+      'model_profiles',
+      'deployment_type',
+      "ALTER TABLE model_profiles ADD COLUMN deployment_type TEXT NOT NULL DEFAULT 'cloud'",
+    );
+    this.ensureColumn(
+      'model_profiles',
+      'runtime_type',
+      "ALTER TABLE model_profiles ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'openai-compatible'",
+    );
     this.applyMigration(2, () => this.compactAssistantMessageFragments());
     this.applyMigration(3, () => this.migrateLegacyTurnCompletion());
     this.applyMigration(4, () => this.ensureColumn('turns', 'metrics', 'ALTER TABLE turns ADD COLUMN metrics TEXT'));
@@ -1009,6 +1053,40 @@ class SqliteAppDatabase implements AppDatabase {
       this.db
         .prepare('UPDATE model_profiles SET max_output_tokens = :raised, updated_at = :updatedAt WHERE max_output_tokens = 2048')
         .run({ raised: DEFAULT_MAX_OUTPUT_TOKENS, updatedAt: new Date().toISOString() });
+    });
+    this.applyMigration(11, () => {
+      this.ensureColumn(
+        'model_profiles',
+        'deployment_type',
+        "ALTER TABLE model_profiles ADD COLUMN deployment_type TEXT NOT NULL DEFAULT 'cloud'",
+      );
+      this.ensureColumn(
+        'model_profiles',
+        'runtime_type',
+        "ALTER TABLE model_profiles ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'openai-compatible'",
+      );
+      const rows = this.db.prepare('SELECT id, provider, base_url, model FROM model_profiles').all() as Array<{
+        id: string;
+        provider: ModelProfile['provider'];
+        base_url: string;
+        model: string;
+      }>;
+      const update = this.db.prepare(`
+        UPDATE model_profiles
+        SET deployment_type = :deploymentType,
+            runtime_type = :runtimeType
+        WHERE id = :id
+      `);
+      for (const row of rows) {
+        const deploymentType = normalizeDeploymentType(undefined, row.base_url);
+        const runtimeType = deploymentType === 'private' &&
+          row.provider === 'openai-compatible' &&
+          row.base_url === LOCAL_QWEN_BASE_URL &&
+          row.model === LOCAL_QWEN_MODEL
+          ? 'llama.cpp'
+          : 'openai-compatible';
+        update.run({ id: row.id, deploymentType, runtimeType });
+      }
     });
     this.interruptUnfinishedTurns();
   }
@@ -1234,16 +1312,18 @@ class SqliteAppDatabase implements AppDatabase {
     const isDefault = this.defaultModelProfileId() === undefined;
     this.db.prepare(`
       INSERT INTO model_profiles (
-        id, name, provider, base_url, model, api_key, capabilities, reasoning,
+        id, name, provider, deployment_type, runtime_type, base_url, model, api_key, capabilities, reasoning,
         max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at
       ) VALUES (
-        :id, :name, :provider, :baseUrl, :model, NULL, :capabilities, :reasoning,
+        :id, :name, :provider, :deploymentType, :runtimeType, :baseUrl, :model, NULL, :capabilities, :reasoning,
         :maxConcurrency, :maxOutputTokens, 'standard', :isDefault, :createdAt, :updatedAt
       )
     `).run({
       id: presetId,
       name: preset.name,
       provider: preset.provider,
+      deploymentType: preset.deploymentType,
+      runtimeType: preset.runtimeType,
       baseUrl: preset.baseUrl,
       model: preset.model,
       capabilities: JSON.stringify(preset.capabilities),
@@ -1486,6 +1566,8 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
     id: row.id,
     name: row.name,
     provider: row.provider,
+    deploymentType: normalizeDeploymentType(row.deployment_type, row.base_url),
+    runtimeType: normalizeRuntimeType(row.runtime_type, normalizeDeploymentType(row.deployment_type, row.base_url)),
     baseUrl: row.base_url,
     model: row.model,
     apiKey: includeApiKey ? (row.api_key ?? undefined) : undefined,
@@ -1536,6 +1618,23 @@ function clampContextLimit(value: number): number {
 
 function normalizeResponseSpeed(value: unknown): ModelResponseSpeed {
   return value === 'fast' || value === 'quality' ? value : 'standard';
+}
+
+function normalizeDeploymentType(value: unknown, baseUrl: string): 'cloud' | 'private' {
+  if (value === 'cloud' || value === 'private') return value;
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' ? 'private' : 'cloud';
+  } catch {
+    return 'private';
+  }
+}
+
+function normalizeRuntimeType(value: unknown, deploymentType: 'cloud' | 'private'): NonNullable<ModelProfile['runtimeType']> {
+  if (deploymentType === 'cloud') return 'openai-compatible';
+  return value === 'llama.cpp' || value === 'ollama' || value === 'vllm' || value === 'tgi' || value === 'openai-compatible'
+    ? value
+    : 'openai-compatible';
 }
 
 function normalizeBaseUrl(value: string): string {

@@ -2,8 +2,10 @@ import type {
   ModelCapabilities,
   ModelConnectionResult,
   ModelConnectionStatus,
+  ModelDeploymentType,
   ModelProfile,
   ModelProfileInput,
+  ModelRuntimeType,
   ReasoningDisplayMode,
   ReasoningInputMode,
   ReasoningMode,
@@ -22,6 +24,8 @@ export interface ModelProfileFormValues {
   model: string;
   apiKey: string;
   isDefault: boolean;
+  deploymentType?: ModelDeploymentType;
+  runtimeType?: ModelRuntimeType;
   reasoningMode: ReasoningMode;
   reasoningProtocol: ReasoningProtocol;
   reasoningEffort: string;
@@ -64,6 +68,7 @@ export function maxOutputTokensIsValid(value: number): boolean {
 
 type ConnectionDiagnosticTranslationKey =
   | 'connectionConnectedDiagnostic'
+  | 'connectionProviderManagedDiagnostic'
   | 'connectionConcurrencyWarningDiagnostic'
   | 'connectionSlotsUnverifiedDiagnostic'
   | 'connectionModelMismatchDiagnostic'
@@ -79,6 +84,9 @@ export function modelConnectionDiagnostic(
   switch (result.status) {
     case 'connected':
       key = 'connectionConnectedDiagnostic';
+      break;
+    case 'provider-managed':
+      key = 'connectionProviderManagedDiagnostic';
       break;
     case 'concurrency-warning':
       key = 'connectionConcurrencyWarningDiagnostic';
@@ -140,6 +148,10 @@ export function buildModelProfileInput(
   form: ModelProfileFormValues,
   existing?: ModelProfile,
 ): ModelProfileInput {
+  const deploymentType = form.deploymentType ?? existing?.deploymentType ?? deploymentTypeForBaseUrl(form.baseUrl);
+  const requestedRuntimeType = form.runtimeType ?? existing?.runtimeType ??
+    (deploymentType === 'private' ? 'llama.cpp' : 'openai-compatible');
+  const runtimeType = deploymentType === 'cloud' ? 'openai-compatible' : requestedRuntimeType;
   const capabilities = cloneCapabilities(existing?.capabilities ?? canonicalCapabilities());
   capabilities.reasoning = {
     ...capabilities.reasoning,
@@ -157,6 +169,8 @@ export function buildModelProfileInput(
     id: form.id || existing?.id,
     name: form.name,
     provider: existing?.provider ?? 'openai-compatible',
+    deploymentType,
+    runtimeType,
     baseUrl: form.baseUrl,
     model: form.model,
     apiKey: form.apiKey || undefined,
@@ -173,6 +187,14 @@ export function buildModelProfileInput(
     maxOutputTokens: form.maxOutputTokens,
     responseSpeed: existing?.responseSpeed,
   };
+}
+
+export function connectionConcurrencyForForm(
+  result: ModelConnectionResult,
+  deploymentType: ModelDeploymentType,
+  currentConcurrency: number,
+): number {
+  return deploymentType === 'private' && result.ok ? result.clientConcurrency : currentConcurrency;
 }
 
 export function isNewModelProfileDraft(formId: string | undefined, profiles: readonly ModelProfile[]): boolean {
@@ -341,6 +363,15 @@ function cloneCapabilities(capabilities: ModelCapabilities): ModelCapabilities {
     concurrency: { ...capabilities.concurrency },
     usage: { ...capabilities.usage },
   };
+}
+
+function deploymentTypeForBaseUrl(baseUrl: string): ModelDeploymentType {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' ? 'private' : 'cloud';
+  } catch {
+    return 'private';
+  }
 }
 
 function parseCustomRequestBody(text: string | undefined): Record<string, unknown> | undefined {

@@ -55,6 +55,15 @@ function xmlInvoke(tool: string, params: Array<[string, string]>): string {
   return `${xmlOpen('tool_calls')} ${xmlOpen('invoke', ` name="${tool}"`)}${renderedParams} ${xmlClose('invoke')} ${xmlClose('tool_calls')}`;
 }
 
+function xmlToolCall(tool: string, inputs: Array<[string, string, boolean]>): string {
+  const renderedInputs = inputs
+    .map(([name, value, stringValue]) =>
+      `${xmlOpen('tool_input', ` name="${name}" string="${String(stringValue)}"`)}${value}${xmlClose('tool_input')}`,
+    )
+    .join(' ');
+  return `${xmlOpen('tool_call', ` name="${tool}"`)}${renderedInputs}${xmlClose('tool_call')}`;
+}
+
 interface LoopHarness {
   emitted: Array<{ type: string; [key: string]: unknown }>;
   /** One entry per loop iteration: the classifier verdict for that reply. */
@@ -150,6 +159,24 @@ describe('tool call parsing', () => {
     });
     const stray = `${xmlInvoke('read_file', [['path', 'src/App.vue']])} ${xmlClose('invoke')}`;
     expect(parseToolCall(stray)).toEqual({ tool: 'read_file', input: { path: 'src/App.vue' } });
+  });
+
+  it('parses and strips the screenshot tool_call tool_input dialect', () => {
+    const screenshotCall = xmlToolCall('search_code', [
+      ['query', 'compress|summarize|context.*limit|上下文', true],
+      ['maxResults', '30', false],
+      ['caseSensitive', 'false', false],
+    ]);
+
+    expect(parseToolCall(screenshotCall)).toEqual({
+      tool: 'search_code',
+      input: {
+        query: 'compress|summarize|context.*limit|上下文',
+        maxResults: 30,
+        caseSensitive: false,
+      },
+    });
+    expect(stripToolFences(screenshotCall)).toBe('');
   });
 
   it('decodes JSON-valued XML parameters', () => {
@@ -349,6 +376,23 @@ describe('runAgentLoop', () => {
     const started = emitted[0] as unknown as { title: string };
     expect(started.title).toBe('read_file');
     expect(String(modelCalls[1].at(-1)?.content)).toContain('answer = 42');
+  });
+
+  it('executes screenshot tool_call markup without leaking it into the final answer', async () => {
+    const screenshotCall = xmlToolCall('search_code', [
+      ['query', 'compress|summarize|context.*limit|上下文', true],
+      ['maxResults', '30', false],
+      ['caseSensitive', 'false', false],
+    ]);
+    const { emitted, outcome } = await runLoop(
+      [screenshotCall, '当前工作区没有找到上下文压缩实现。'],
+      context,
+    );
+
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 1 });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+    expect(emitted.at(-1)).toEqual({ type: 'answer.delta', text: '当前工作区没有找到上下文压缩实现。' });
+    expect(emitted.some((event) => String(event.text ?? event.output ?? '').includes(xmlOpen('tool_call')))).toBe(false);
   });
 
   it('feeds structured tool errors back to the model', async () => {
@@ -841,6 +885,27 @@ describe('native tool calling branch', () => {
     expect(toolResult?.role).toBe('tool');
     expect(toolResult?.tool_call_id).toBe('call-a');
     expect(String(toolResult?.content)).toContain('export const answer = 42;');
+  });
+
+  it('falls back to screenshot text tool markup when a native-capable provider emits no function call', async () => {
+    const screenshotCall = xmlToolCall('search_code', [
+      ['query', 'compress|summarize|context.*limit|上下文', true],
+      ['maxResults', '30', false],
+      ['caseSensitive', 'false', false],
+    ]);
+    const { emitted, modelCalls, outcome } = await runNativeLoop(
+      [
+        { text: screenshotCall },
+        { text: '已检查当前工作区。' },
+      ],
+      context,
+    );
+
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 1, emptyAnswer: false });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+    expect(emitted.at(-1)).toEqual({ type: 'answer.delta', text: '已检查当前工作区。' });
+    expect(String(modelCalls[1]?.at(-1)?.content)).toContain('Tool result for call');
+    expect(emitted.some((event) => String(event.text ?? event.output ?? '').includes(xmlOpen('tool_call')))).toBe(false);
   });
 
   it('requests the trust-level schemas and drops the fenced-JSON tutorial', async () => {

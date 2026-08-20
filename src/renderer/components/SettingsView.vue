@@ -4,8 +4,10 @@ import type {
   AppSettings,
   LanguagePreference,
   ModelConnectionResult,
+  ModelDeploymentType,
   ModelProfile,
   ModelProfileInput,
+  ModelRuntimeType,
   ReasoningDisplayMode,
   ReasoningInputMode,
   ReasoningMode,
@@ -20,6 +22,7 @@ import type { Translator } from '../i18n';
 import {
   buildModelProfileInput,
   captureFormOperation,
+  connectionConcurrencyForForm,
   connectionTestStateForFingerprint,
   customRequestBodyValidationIssue,
   effortValidationIssue,
@@ -78,6 +81,8 @@ const form = reactive({
   model: 'your-model-name',
   apiKey: 'local-not-used',
   isDefault: true,
+  deploymentType: 'private' as ModelDeploymentType,
+  runtimeType: 'llama.cpp' as ModelRuntimeType,
   reasoningMode: 'disabled' as ReasoningMode,
   reasoningProtocol: 'none' as ReasoningProtocol,
   reasoningEffort: '',
@@ -204,6 +209,8 @@ function loadProfile(profile: ModelProfile): void {
   form.model = profile.model;
   form.apiKey = '';
   form.isDefault = profile.isDefault;
+  form.deploymentType = profile.deploymentType ?? 'private';
+  form.runtimeType = profile.runtimeType ?? 'openai-compatible';
   form.reasoningMode = profile.reasoning.mode;
   form.reasoningProtocol = profile.reasoning.protocol;
   form.reasoningEffort = profile.reasoning.effort ?? '';
@@ -233,6 +240,8 @@ function resetForm(): void {
   form.model = 'your-model-name';
   form.apiKey = 'local-not-used';
   form.isDefault = props.modelProfiles.length === 0;
+  form.deploymentType = 'private';
+  form.runtimeType = 'llama.cpp';
   form.reasoningMode = 'disabled';
   form.reasoningProtocol = 'none';
   form.reasoningEffort = '';
@@ -261,6 +270,8 @@ function inputFromForm(): ModelProfileInput {
     model: form.model,
     apiKey: form.apiKey,
     isDefault: form.isDefault,
+    deploymentType: form.deploymentType,
+    runtimeType: form.runtimeType,
     reasoningMode: form.reasoningMode,
     reasoningProtocol: form.reasoningProtocol,
     reasoningEffort: form.reasoningEffort,
@@ -329,6 +340,11 @@ async function testProfile(): Promise<void> {
         modelStatus.value = props.t('connectionTestStale');
       }
       return;
+    }
+    const detectedConcurrency = connectionConcurrencyForForm(result, form.deploymentType, form.maxConcurrency);
+    if (detectedConcurrency !== form.maxConcurrency) {
+      form.maxConcurrency = detectedConcurrency;
+      testedFingerprint.value = modelProfileFormFingerprint(inputFromForm());
     }
     connectionTestState.value = result.status;
     connectionResult.value = result;
@@ -556,6 +572,23 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
               <input v-model="form.name" class="text-input" placeholder="Private model endpoint" />
             </label>
             <label class="field-stack">
+              <span>{{ t('deploymentType') }}</span>
+              <select v-model="form.deploymentType" data-testid="deployment-type-select" class="model-select wide">
+                <option value="cloud">{{ t('cloudModel') }}</option>
+                <option value="private">{{ t('privateModel') }}</option>
+              </select>
+            </label>
+            <label v-if="form.deploymentType === 'private'" class="field-stack">
+              <span>{{ t('runtimeType') }}</span>
+              <select v-model="form.runtimeType" data-testid="runtime-type-select" class="model-select wide">
+                <option value="llama.cpp">llama.cpp</option>
+                <option value="ollama">Ollama</option>
+                <option value="vllm">vLLM</option>
+                <option value="tgi">TGI</option>
+                <option value="openai-compatible">{{ t('otherOpenAiCompatible') }}</option>
+              </select>
+            </label>
+            <label class="field-stack">
               <span>{{ t('baseUrl') }}</span>
               <input v-model="form.baseUrl" class="text-input" placeholder="http://127.0.0.1:8080/v1" />
             </label>
@@ -652,9 +685,12 @@ function reasoningProtocolLabel(protocol: ReasoningProtocol): string {
                   type="number"
                   min="1"
                   :max="maxConcurrencyLimit"
-                  :disabled="editingProfile?.capabilities.concurrency.configurable === false"
+                  :disabled="form.deploymentType === 'private' || editingProfile?.capabilities.concurrency.configurable === false"
                 />
               </label>
+              <p class="settings-note capability-wide">
+                {{ form.deploymentType === 'cloud' ? t('cloudConcurrencyHint') : t('privateConcurrencyHint') }}
+              </p>
               <label class="field-stack">
                 <span>{{ t('maximumOutputTokens') }}</span>
                 <input

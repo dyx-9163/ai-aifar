@@ -56,37 +56,40 @@ export async function inspectModelConnection(
     model: profile.model,
     clientConcurrency: profile.maxConcurrency,
   };
+  if (profile.deploymentType === 'cloud') {
+    return {
+      ...baseResult,
+      status: 'provider-managed',
+      message: `Connected to ${profile.name} (${profile.model}); concurrency is managed by the cloud provider.`,
+    };
+  }
+
+  const slotFallbackResult = { ...baseResult, clientConcurrency: 1 };
+  if (profile.runtimeType !== 'llama.cpp') {
+    return slotsUnverified(profile, slotFallbackResult);
+  }
+
   try {
     signal.throwIfAborted();
     const slotsUrl = `${new URL(profile.baseUrl).origin}/slots`;
     const slotsResponse = await withExplicitAbort(fetchImpl(slotsUrl, { headers, signal }), signal);
     signal.throwIfAborted();
-    if (!slotsResponse.ok) return slotsUnverified(profile, baseResult);
+    if (!slotsResponse.ok) return slotsUnverified(profile, slotFallbackResult);
     const slots: unknown = await withExplicitAbort(slotsResponse.json(), signal);
     signal.throwIfAborted();
     const serviceSlots = readServiceSlotCount(slots);
-    if (serviceSlots === undefined) return slotsUnverified(profile, baseResult);
+    if (serviceSlots === undefined) return slotsUnverified(profile, slotFallbackResult);
 
-    if (serviceSlots !== profile.maxConcurrency) {
-      signal.throwIfAborted();
-      return {
-        ...baseResult,
-        status: 'concurrency-warning',
-        message: `Connected to ${profile.name} (${profile.model}), but service slots (${serviceSlots}) do not match client concurrency (${profile.maxConcurrency}).`,
-        serviceSlots,
-      };
-    }
-
-    signal.throwIfAborted();
     return {
       ...baseResult,
+      clientConcurrency: serviceSlots,
       status: 'connected',
-      message: `Connected to ${profile.name} (${profile.model}); service slots match client concurrency (${serviceSlots}).`,
+      message: `Connected to ${profile.name} (${profile.model}); detected ${serviceSlots} llama.cpp service slots.`,
       serviceSlots,
     };
   } catch (error) {
     if (signal.aborted) throw signal.reason ?? error;
-    return slotsUnverified(profile, baseResult);
+    return slotsUnverified(profile, slotFallbackResult);
   }
 }
 

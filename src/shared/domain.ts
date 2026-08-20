@@ -24,6 +24,8 @@ export interface BaseItem {
   turnId?: string;
   kind: ItemKind;
   createdAt: string;
+  /** Original harness-event sequence within the turn, when the item came from a stream event. */
+  sequence?: number;
 }
 
 export interface MessageItem extends BaseItem {
@@ -54,6 +56,8 @@ export interface ReasoningItem extends BaseItem {
 
 export interface ToolItem extends BaseItem {
   kind: 'tool';
+  /** Provider/harness invocation id used to merge live and persisted events. */
+  toolId?: string;
   title: string;
   status: 'running' | 'completed' | 'failed';
   output?: string;
@@ -181,10 +185,17 @@ export interface ModelCapabilitiesInput {
   nativeTools?: boolean;
 }
 
+export type ModelDeploymentType = 'cloud' | 'private';
+export type ModelRuntimeType = 'llama.cpp' | 'ollama' | 'vllm' | 'tgi' | 'openai-compatible';
+
 export interface ModelProfile {
   id: string;
   name: string;
   provider: ModelProviderType;
+  /** Where inference capacity is managed. */
+  deploymentType: ModelDeploymentType;
+  /** Private inference engine used for runtime-specific capability inspection. */
+  runtimeType: ModelRuntimeType;
   baseUrl: string;
   model: string;
   apiKeyConfigured: boolean;
@@ -203,6 +214,8 @@ export interface ModelProfileInput {
   id?: string;
   name: string;
   provider: ModelProviderType;
+  deploymentType?: ModelDeploymentType;
+  runtimeType?: ModelRuntimeType;
   baseUrl: string;
   model: string;
   apiKey?: string;
@@ -215,7 +228,7 @@ export interface ModelProfileInput {
   isDefault?: boolean;
 }
 
-export type ModelConnectionSuccessStatus = 'connected' | 'concurrency-warning' | 'slots-unverified';
+export type ModelConnectionSuccessStatus = 'connected' | 'provider-managed' | 'concurrency-warning' | 'slots-unverified';
 export type ModelConnectionFailureStatus = 'offline' | 'model-mismatch';
 export type ModelConnectionStatus = ModelConnectionSuccessStatus | ModelConnectionFailureStatus;
 
@@ -237,6 +250,11 @@ export interface ModelConnectionConcurrencyWarningResult extends ModelConnection
   serviceSlots: number;
 }
 
+export interface ModelConnectionProviderManagedResult extends ModelConnectionResultBase {
+  ok: true;
+  status: 'provider-managed';
+}
+
 export interface ModelConnectionSlotsUnverifiedResult extends ModelConnectionResultBase {
   ok: true;
   status: 'slots-unverified';
@@ -254,6 +272,7 @@ export interface ModelConnectionMismatchResult extends ModelConnectionResultBase
 
 export type ModelConnectionSuccessResult =
   | ModelConnectionConnectedResult
+  | ModelConnectionProviderManagedResult
   | ModelConnectionConcurrencyWarningResult
   | ModelConnectionSlotsUnverifiedResult;
 export type ModelConnectionFailureResult = ModelConnectionOfflineResult | ModelConnectionMismatchResult;

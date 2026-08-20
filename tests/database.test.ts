@@ -112,7 +112,7 @@ describe('sqlite app database', () => {
     const migrated = new DatabaseSync(path);
     try {
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 },
       ]);
     } finally {
       migrated.close();
@@ -128,6 +128,8 @@ describe('sqlite app database', () => {
         id: 'local-qwen35',
         name: 'Local Qwen3.5-9B',
         provider: 'openai-compatible',
+        deploymentType: 'private',
+        runtimeType: 'llama.cpp',
         baseUrl: 'http://127.0.0.1:8080/v1',
         model: 'Qwen3.5-9B',
         maxConcurrency: 1,
@@ -316,7 +318,7 @@ describe('sqlite app database', () => {
         },
       ]);
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 },
       ]);
     } finally {
       migrated.close();
@@ -765,6 +767,8 @@ describe('sqlite app database', () => {
     const saved = first.saveModelProfile({
       name: 'AIFAR Qwen',
       provider: 'openai-compatible',
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
       baseUrl: 'http://127.0.0.1:8080/v1',
       model: 'Qwen3.5-9B',
       apiKey: 'local-not-used',
@@ -775,6 +779,8 @@ describe('sqlite app database', () => {
     expect(firstSnapshot.modelProfiles[0]).toMatchObject({
       id: saved.id,
       name: 'AIFAR Qwen',
+      deploymentType: 'private',
+      runtimeType: 'llama.cpp',
       baseUrl: 'http://127.0.0.1:8080/v1',
       model: 'Qwen3.5-9B',
       apiKeyConfigured: true,
@@ -786,6 +792,7 @@ describe('sqlite app database', () => {
     const second = openDatabase(dbPath);
     const snapshot = second.getSnapshot();
     expect(snapshot.modelProfiles[0]?.apiKeyConfigured).toBe(true);
+    expect(snapshot.modelProfiles[0]).toMatchObject({ deploymentType: 'private', runtimeType: 'llama.cpp' });
     expect(snapshot.settings.activeModelProfileId).toBe(saved.id);
     expect(second.getModelProfileForRuntime(saved.id)?.apiKey).toBe('local-not-used');
     second.close();

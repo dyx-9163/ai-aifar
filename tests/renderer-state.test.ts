@@ -22,6 +22,7 @@ import { renderMarkdown } from '../src/renderer/markdown';
 import {
   buildModelProfileInput,
   captureFormOperation,
+  connectionConcurrencyForForm,
   connectionTestStateForFingerprint,
   customRequestBodyValidationIssue,
   effortValidationIssue,
@@ -48,7 +49,12 @@ import {
   threadRuntimePresentation,
 } from '../src/renderer/modelControls';
 import { isNearBottom } from '../src/renderer/scrolling';
-import { createTimelineEntries, type TimelineEntry } from '../src/renderer/timeline';
+import {
+  createTimelineEntries,
+  createTurnTimelineGroups,
+  operationPanelState,
+  type TimelineEntry,
+} from '../src/renderer/timeline';
 
 function deltaEvent(sequence: number): AgentEvent {
   return {
@@ -79,6 +85,8 @@ function modelProfileFixture(capabilities: ModelCapabilities): ModelProfile {
     id: 'model-1',
     name: 'Fixture',
     provider: 'openai-compatible',
+    deploymentType: 'private',
+    runtimeType: 'llama.cpp',
     baseUrl: 'http://127.0.0.1:8080/v1',
     model: 'fixture',
     apiKeyConfigured: false,
@@ -301,6 +309,8 @@ describe('renderer state reducer', () => {
       model: existing.model,
       apiKey: '',
       isDefault: existing.isDefault,
+      deploymentType: 'cloud',
+      runtimeType: 'openai-compatible',
       reasoningMode: 'enabled',
       reasoningProtocol: 'custom',
       reasoningEffort: 'vendor-max',
@@ -318,6 +328,8 @@ describe('renderer state reducer', () => {
 
     expect(input).toMatchObject({
       provider: existing.provider,
+      deploymentType: 'cloud',
+      runtimeType: 'openai-compatible',
       capabilities: {
         text: true,
         vision: true,
@@ -370,6 +382,27 @@ describe('renderer state reducer', () => {
       streaming: true,
       usage: { tokens: true, reasoningTokens: true },
     });
+  });
+
+  it('applies detected private concurrency while leaving cloud concurrency provider-managed', () => {
+    const detected = {
+      ok: true,
+      status: 'connected',
+      message: '',
+      model: 'local-model',
+      clientConcurrency: 3,
+      serviceSlots: 3,
+    } satisfies ModelConnectionResult;
+    const cloud = {
+      ok: true,
+      status: 'provider-managed',
+      message: '',
+      model: 'cloud-model',
+      clientConcurrency: 8,
+    } satisfies ModelConnectionResult;
+
+    expect(connectionConcurrencyForForm(detected, 'private', 1)).toBe(3);
+    expect(connectionConcurrencyForForm(cloud, 'cloud', 5)).toBe(5);
   });
 
   it('marks an empty form id as a new model draft even when existing profiles remain visible', () => {
@@ -546,6 +579,8 @@ describe('renderer state reducer', () => {
   it.each([
     [{ ok: true, status: 'connected', message: '', model: 'Qwen3.5-9B', clientConcurrency: 2, serviceSlots: 2 }, false,
       'connected Qwen3.5-9B slots=2 client=2'],
+    [{ ok: true, status: 'provider-managed', message: '', model: 'qwen3.8-max', clientConcurrency: 4 }, false,
+      'provider qwen3.8-max'],
     [{ ok: true, status: 'concurrency-warning', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1, serviceSlots: 3 }, false,
       'warning Qwen3.5-9B slots=3 client=1'],
     [{ ok: true, status: 'slots-unverified', message: '', model: 'Qwen3.5-9B', clientConcurrency: 1 }, false,
@@ -559,6 +594,7 @@ describe('renderer state reducer', () => {
   ] satisfies Array<[ModelConnectionResult, boolean, string]>)('renders a typed diagnostic without lifecycle coupling', (result, builtIn, expected) => {
     const templates: Record<string, string> = {
       connectionConnectedDiagnostic: 'connected {model} slots={slots} client={concurrency}',
+      connectionProviderManagedDiagnostic: 'provider {model}',
       connectionConcurrencyWarningDiagnostic: 'warning {model} slots={slots} client={concurrency}',
       connectionSlotsUnverifiedDiagnostic: 'unverified {model}',
       connectionModelMismatchDiagnostic: 'mismatch {model}',
@@ -1904,6 +1940,60 @@ describe('renderer state reducer', () => {
     }], [], createTranslator('zh-CN'))[0]?.text).toBe(
       '思考：enabled/qwen · 2.0s · 20.0 tok/s (client) · 40 tokens (server) · stop',
     );
+  });
+
+  it('groups each turn into user text, reasoning, ordered operations, and final answers', () => {
+    const items: Item[] = [
+      {
+        id: 'user-1', threadId: 'thread-1', turnId: 'turn-1', kind: 'message', role: 'user',
+        text: '检查压缩逻辑', createdAt: '2026-08-17T00:00:00.000Z',
+      },
+      {
+        id: 'reasoning-1', threadId: 'thread-1', turnId: 'turn-1', kind: 'reasoning', mode: 'raw',
+        text: '先搜索再读取', incomplete: false, createdAt: '2026-08-17T00:00:01.000Z',
+      },
+      {
+        id: 'tool-search', threadId: 'thread-1', turnId: 'turn-1', kind: 'tool', title: 'search_code',
+        status: 'completed', output: '找到 2 项', sequence: 4, createdAt: '2026-08-17T00:00:02.000Z',
+      },
+      {
+        id: 'tool-read', threadId: 'thread-1', turnId: 'turn-1', kind: 'tool', title: 'read_file',
+        status: 'completed', output: '读取完成', sequence: 7, createdAt: '2026-08-17T00:00:03.000Z',
+      },
+      {
+        id: 'answer-1', threadId: 'thread-1', turnId: 'turn-1', kind: 'message', role: 'assistant',
+        text: '当前已实现压缩。', incomplete: false, createdAt: '2026-08-17T00:00:04.000Z',
+      },
+    ];
+    const groups = createTurnTimelineGroups(items, [], [{
+      id: 'turn-1', threadId: 'thread-1', modelProfileId: 'model-1', status: 'completed',
+      createdAt: '2026-08-17T00:00:00.000Z', completedAt: '2026-08-17T00:00:05.000Z', incomplete: false,
+    }]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      turnId: 'turn-1',
+      running: false,
+      userMessages: [{ text: '检查压缩逻辑' }],
+      reasoning: [{ text: '先搜索再读取' }],
+      operations: [
+        { title: 'search_code', text: '找到 2 项', sequence: 4 },
+        { title: 'read_file', text: '读取完成', sequence: 7 },
+      ],
+      finalAnswers: [{ text: '当前已实现压缩。' }],
+    });
+  });
+
+  it('opens operations while running and collapses completed operation history with a count', () => {
+    const t = createTranslator('zh-CN');
+    expect(operationPanelState(2, true, t)).toEqual({
+      open: true,
+      summary: '正在执行操作（2）',
+    });
+    expect(operationPanelState(2, false, t)).toEqual({
+      open: false,
+      summary: '已执行 2 项操作',
+    });
   });
 
   it('places persisted metrics after the message from the same turn instead of stacking all metrics at the end', () => {

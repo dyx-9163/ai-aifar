@@ -31,6 +31,7 @@ export async function runDemoTurn(
       type: 'tool.output',
       toolId: `tool-${input.turnId}-plan`,
       output: 'No filesystem changes were made. A local approval is required before any simulated write.',
+      status: 'completed',
     });
     await next({
       type: 'approval.required',
@@ -55,6 +56,7 @@ export async function runDemoTurn(
     type: 'tool.output',
     toolId: `tool-${input.turnId}-plan`,
     output: 'Workspace context reviewed in deterministic demo mode.',
+    status: 'completed',
   });
 
   for (const text of responseDeltas(input.text)) {

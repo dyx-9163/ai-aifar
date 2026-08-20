@@ -17,6 +17,10 @@ type ConcurrencyWarningResultIsExact = Assert<Exact<
   Extract<ModelConnectionResult, { status: 'concurrency-warning' }>,
   ResultBase & { ok: true; status: 'concurrency-warning'; serviceSlots: number }
 >>;
+type ProviderManagedResultIsExact = Assert<Exact<
+  Extract<ModelConnectionResult, { status: 'provider-managed' }>,
+  ResultBase & { ok: true; status: 'provider-managed' }
+>>;
 type SlotsUnverifiedResultIsExact = Assert<Exact<
   Extract<ModelConnectionResult, { status: 'slots-unverified' }>,
   ResultBase & { ok: true; status: 'slots-unverified' }
@@ -32,6 +36,7 @@ type ModelMismatchResultIsExact = Assert<Exact<
 
 export type ModelConnectionResultTypeAssertions =
   | ConnectedResultIsExact
+  | ProviderManagedResultIsExact
   | ConcurrencyWarningResultIsExact
   | SlotsUnverifiedResultIsExact
   | OfflineResultIsExact

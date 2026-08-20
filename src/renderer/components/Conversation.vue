@@ -25,8 +25,9 @@ import {
   type ReasoningItemGroup,
 } from '../modelControls';
 import { isNearBottom } from '../scrolling';
-import { createTimelineEntries } from '../timeline';
+import { createTurnTimelineGroups, type TurnTimelineGroup } from '../timeline';
 import Composer from './Composer.vue';
+import OperationPanel from './OperationPanel.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
 
 const props = defineProps<{
@@ -57,38 +58,11 @@ const emit = defineEmits<{
   updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
 
-const timelineEntries = computed(() => createTimelineEntries(props.items, props.events, props.turns, props.t));
+const timelineGroups = computed(() => createTurnTimelineGroups(props.items, props.events, props.turns, props.t));
 const reasoningGroups = computed(() => groupReasoningItems(
   props.items.filter((item): item is ReasoningItem => item.kind === 'reasoning'),
 ));
 const reasoningGroupByTurn = computed(() => new Map(reasoningGroups.value.map((group) => [group.turnId, group])));
-const reasoningPanelByEntryId = computed(() => {
-  const panels = new Map(reasoningGroups.value.map((group) => [group.anchorId, group]));
-  for (const entry of timelineEntries.value) {
-    if (entry.kind !== 'message' || entry.role !== 'assistant' || !entry.turnId || reasoningGroupByTurn.value.has(entry.turnId)) {
-      continue;
-    }
-    const running = props.activeRuntime?.turnId === entry.turnId
-      && (props.activeRuntime.status === 'running' || props.activeRuntime.status === 'cancelling');
-    if (shouldShowReasoningPanel(props.reasoningDisplayMode, [], running)) {
-      panels.set(entry.id, { turnId: entry.turnId, anchorId: entry.id });
-    }
-  }
-  return panels;
-});
-const standaloneReasoningGroup = computed<ReasoningItemGroup | undefined>(() => {
-  const runtime = props.activeRuntime;
-  if (!runtime?.turnId || (runtime.status !== 'running' && runtime.status !== 'cancelling')) {
-    return undefined;
-  }
-  if (reasoningGroupByTurn.value.has(runtime.turnId)) {
-    return undefined;
-  }
-  const hasAssistantAnchor = timelineEntries.value.some(
-    (entry) => entry.kind === 'message' && entry.role === 'assistant' && entry.turnId === runtime.turnId,
-  );
-  return hasAssistantAnchor ? undefined : { turnId: runtime.turnId, anchorId: `reasoning-${runtime.turnId}` };
-});
 const supportsVision = computed(() => Boolean(
   props.activeModelProfile?.capabilities.vision ||
   (props.activeModelProfile && isLocalQwenServiceProfile(props.activeModelProfile)),
@@ -105,10 +79,27 @@ const reasoningMenuId = 'reasoning-effort-menu';
 const copyResetTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const scrollSignature = computed(() =>
-  timelineEntries.value
-    .map((entry) => `${entry.id}:${entry.kind === 'progress' ? entry.phase : entry.text.length}`)
+  timelineGroups.value
+    .flatMap((group) => [
+      `${group.id}:${group.running}`,
+      ...group.userMessages.map((entry) => `${entry.id}:${entry.text.length}`),
+      ...group.reasoning.map((entry) => `${entry.id}:${entry.text.length}`),
+      ...group.operations.map((entry) => `${entry.id}:${entry.status}:${entry.text.length}`),
+      ...group.finalAnswers.map((entry) => `${entry.id}:${entry.text.length}`),
+      ...group.metrics.map((entry) => `${entry.id}:${entry.text.length}`),
+      ...group.progress.map((entry) => `${entry.id}:${entry.phase}`),
+    ])
     .join('|'),
 );
+
+function reasoningGroupForTurn(group: TurnTimelineGroup): ReasoningItemGroup | undefined {
+  if (!group.turnId) return undefined;
+  const existing = reasoningGroupByTurn.value.get(group.turnId);
+  if (existing) return existing;
+  return shouldShowReasoningPanel(props.reasoningDisplayMode, [], group.running)
+    ? { turnId: group.turnId, anchorId: `reasoning-${group.turnId}` }
+    : undefined;
+}
 
 function handleModelChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value;
@@ -220,11 +211,6 @@ onUnmounted(() => {
   for (const timer of copyResetTimers.values()) clearTimeout(timer);
   copyResetTimers.clear();
 });
-
-function isReasoningRunning(group: ReasoningItemGroup): boolean {
-  return props.activeRuntime?.turnId === group.turnId
-    && (props.activeRuntime.status === 'running' || props.activeRuntime.status === 'cancelling');
-}
 
 function scrollToBottomNow(): void {
   const element = timelineRef.value;
@@ -432,92 +418,95 @@ function nextAnimationFrame(): Promise<void> {
         <div v-if="loading" class="empty-state">{{ t('loadingWorkspace') }}</div>
         <div v-else-if="!thread" class="empty-state">{{ t('createTaskHint') }}</div>
 
-        <ReasoningPanel
-          v-if="standaloneReasoningGroup"
-          :preference="reasoningDisplayMode"
-          :running="true"
-          :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
-          :turn-id="standaloneReasoningGroup.turnId"
-          :t="t"
-        />
-
         <template
-          v-for="entry in timelineEntries"
-          :key="entry.id"
+          v-for="group in timelineGroups"
+          :key="group.id"
         >
+          <article
+            v-for="entry in [...group.userMessages, ...group.otherMessages]"
+            :key="entry.id"
+            :data-testid="`${entry.role}-message`"
+            data-item-kind="message"
+            :data-message-role="entry.role"
+            :data-turn-id="entry.turnId"
+            :class="['message-row', `role-${entry.role}`, { live: entry.live }]"
+          >
+            <div class="message-header">
+              <span class="message-role">{{ entry.role === 'user' ? t('user') : entry.role }}</span>
+            </div>
+            <div class="message-content user-message-content" :data-testid="`${entry.role}-message-content`">
+              <p>{{ userMessageText(entry.text) }}</p>
+              <div v-if="imageAttachments(entry).length > 0" class="message-attachments" :aria-label="t('attachedImages')">
+                <figure
+                  v-for="(attachment, index) in imageAttachments(entry)"
+                  :key="`${entry.id}-${attachment.name}-${index}`"
+                  class="message-attachment"
+                >
+                  <img :src="attachment.dataUrl" :alt="attachment.name" loading="lazy" />
+                  <figcaption :title="attachment.name">{{ attachment.name }}</figcaption>
+                </figure>
+              </div>
+            </div>
+          </article>
+
           <ReasoningPanel
-            v-if="reasoningPanelByEntryId.get(entry.id)"
-            :raw="reasoningPanelByEntryId.get(entry.id)?.raw"
-            :summary="reasoningPanelByEntryId.get(entry.id)?.summary"
+            v-if="reasoningGroupForTurn(group)"
+            :raw="reasoningGroupForTurn(group)?.raw"
+            :summary="reasoningGroupForTurn(group)?.summary"
             :preference="reasoningDisplayMode"
-            :running="isReasoningRunning(reasoningPanelByEntryId.get(entry.id)!)"
+            :running="group.running"
             :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
-            :turn-id="reasoningPanelByEntryId.get(entry.id)?.turnId"
+            :turn-id="group.turnId"
             :t="t"
           />
+
+          <OperationPanel
+            v-if="group.operations.length > 0"
+            :operations="group.operations"
+            :running="group.running"
+            :t="t"
+          />
+
           <article
-            v-if="entry.kind !== 'reasoning'"
-            :data-testid="entry.kind === 'message' ? `${entry.role}-message` : entry.kind === 'metrics' ? 'turn-metrics' : entry.kind === 'tool' && entry.status === 'failed' ? 'turn-error' : undefined"
-            :data-item-kind="entry.kind"
-            :data-message-role="entry.kind === 'message' ? entry.role : undefined"
-            :data-turn-id="entry.kind === 'message' ? entry.turnId : undefined"
-            :class="
-              entry.kind === 'message'
-                ? ['message-row', `role-${entry.role}`, { live: entry.live }]
-                : entry.kind === 'metrics'
-                  ? 'metrics-row'
-                  : entry.kind === 'progress'
-                    ? 'progress-row'
-                    : 'tool-row'
-            "
+            v-for="entry in group.finalAnswers"
+            :key="entry.id"
+            data-testid="assistant-message"
+            data-item-kind="message"
+            data-message-role="assistant"
+            :data-turn-id="entry.turnId"
+            :class="['message-row', 'role-assistant', { live: entry.live }]"
           >
-            <template v-if="entry.kind === 'message'">
-              <div class="message-header">
-                <span class="message-role">{{ entry.role === 'assistant' ? t('assistant') : entry.role === 'user' ? t('user') : entry.role }}</span>
-                <button
-                  v-if="entry.role === 'assistant'"
-                  type="button"
-                  class="message-copy-button"
-                  data-testid="copy-answer-button"
-                  :data-copy-state="messageCopyState[entry.id] ?? 'idle'"
-                  @click="copyAssistantMessage(entry.id, entry.text)"
-                >
-                  {{ messageCopyState[entry.id] === 'copied' ? t('copied') : messageCopyState[entry.id] === 'failed' ? t('copyAnswerFailed') : t('copyAnswer') }}
-                </button>
-              </div>
-              <div
-                v-if="entry.role === 'assistant'"
-                class="message-content markdown-body"
-                data-testid="assistant-message-content"
-                @click="handleAssistantContentClick"
-                v-html="renderMarkdown(entry.text, { copyCodeLabel: t('copyCode') })"
-              ></div>
-              <div
-                v-if="entry.role === 'assistant' && entry.truncated"
-                class="truncation-notice"
-                data-testid="answer-truncated-notice"
+            <div class="message-header">
+              <span class="message-role">{{ t('assistant') }}</span>
+              <button
+                type="button"
+                class="message-copy-button"
+                data-testid="copy-answer-button"
+                :data-copy-state="messageCopyState[entry.id] ?? 'idle'"
+                @click="copyAssistantMessage(entry.id, entry.text)"
               >
-                {{ t('answerTruncated') }}
-              </div>
-              <div v-if="entry.role !== 'assistant'" class="message-content user-message-content" :data-testid="`${entry.role}-message-content`">
-                <p>{{ userMessageText(entry.text) }}</p>
-                <div v-if="imageAttachments(entry).length > 0" class="message-attachments" :aria-label="t('attachedImages')">
-                  <figure
-                    v-for="(attachment, index) in imageAttachments(entry)"
-                    :key="`${entry.id}-${attachment.name}-${index}`"
-                    class="message-attachment"
-                  >
-                    <img :src="attachment.dataUrl" :alt="attachment.name" loading="lazy" />
-                    <figcaption :title="attachment.name">{{ attachment.name }}</figcaption>
-                  </figure>
-                </div>
-              </div>
-            </template>
-            <span v-else-if="entry.kind === 'progress'" class="progress-label">
+                {{ messageCopyState[entry.id] === 'copied' ? t('copied') : messageCopyState[entry.id] === 'failed' ? t('copyAnswerFailed') : t('copyAnswer') }}
+              </button>
+            </div>
+            <div
+              class="message-content markdown-body"
+              data-testid="assistant-message-content"
+              @click="handleAssistantContentClick"
+              v-html="renderMarkdown(entry.text, { copyCodeLabel: t('copyCode') })"
+            ></div>
+            <div v-if="entry.truncated" class="truncation-notice" data-testid="answer-truncated-notice">
+              {{ t('answerTruncated') }}
+            </div>
+          </article>
+
+          <article v-for="entry in group.metrics" :key="entry.id" class="metrics-row" data-testid="turn-metrics">
+            {{ entry.text }}
+          </article>
+          <article v-for="entry in group.progress" :key="entry.id" class="progress-row">
+            <span class="progress-label">
               <span class="progress-dot" aria-hidden="true"></span>
               {{ progressLabel(entry.phase) }}
             </span>
-            <span v-else>{{ entry.text }}</span>
           </article>
         </template>
       </div>

@@ -357,6 +357,39 @@ describe('command policy', () => {
 });
 
 describe('run_command execution', () => {
+  it('rejects a package manager that does not match the workspace before spawning it', async () => {
+    writeFileSync(join(workspaceRoot, 'package.json'), JSON.stringify({
+      scripts: { test: 'node -e "process.exit(0)"' },
+    }));
+    writeFileSync(join(workspaceRoot, 'package-lock.json'), '{}');
+
+    const result = await runTool('run_command', { command: 'pnpm', args: ['test'] });
+
+    expect(result.status).toBe('error');
+    expect(result.error).toMatchObject({
+      code: 'package-manager-mismatch',
+      retryable: false,
+    });
+    expect(result.error?.message).toContain('npm test');
+  });
+
+  it.each([
+    ['npm', ['run', 'dev']],
+    ['npm', ['start']],
+    ['pnpm', ['serve']],
+    ['yarn', ['watch']],
+  ])('rejects the long-running package script %s %s', async (command, args) => {
+    writeFileSync(join(workspaceRoot, 'package.json'), JSON.stringify({
+      packageManager: `${command}@1.0.0`,
+      scripts: { dev: 'node --version', start: 'node --version', serve: 'node --version', watch: 'node --version' },
+    }));
+
+    const result = await runTool('run_command', { command, args });
+
+    expect(result.status).toBe('error');
+    expect(result.error).toMatchObject({ code: 'long-running-command', retryable: false });
+  });
+
   it('runs gated commands automatically without an approval hook', async () => {
     const result = await runTool('run_command', { command: 'node', args: ['--version'] });
     expect(result.status).toBe('success');
@@ -413,6 +446,36 @@ describe('run_command execution', () => {
     expect(output.exitCode).toBeNull();
   }, 15_000);
 
+  it('cancels the whole package-manager process tree without leaving a descendant running', async () => {
+    writeFileSync(join(workspaceRoot, 'package.json'), JSON.stringify({
+      packageManager: 'pnpm@10.0.0',
+      scripts: { hold: 'node hold.js' },
+    }));
+    writeFileSync(join(workspaceRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
+    writeFileSync(join(workspaceRoot, 'hold.js'), [
+      'const { writeFileSync } = require("node:fs");',
+      'writeFileSync("ready.txt", "ready");',
+      'setTimeout(() => writeFileSync("survived.txt", "survived"), 600);',
+      'setTimeout(() => undefined, 1200);',
+    ].join('\n'));
+    const controller = new AbortController();
+
+    const running = runTool(
+      'run_command',
+      { command: 'pnpm', args: ['run', 'hold'], timeoutMs: 5_000 },
+      { signal: controller.signal },
+    );
+    await waitForFile(join(workspaceRoot, 'ready.txt'));
+    controller.abort();
+
+    await expect(Promise.race([
+      running,
+      delay(1_500).then(() => { throw new Error('cancel did not settle'); }),
+    ])).resolves.toBeDefined();
+    await delay(800);
+    expect(existsSync(join(workspaceRoot, 'survived.txt'))).toBe(false);
+  }, 15_000);
+
   it('refuses write commands in a read-only workspace before any approval', async () => {
     context = { ...context, trustLevel: 'read-only' };
     let approvalRequests = 0;
@@ -426,3 +489,15 @@ describe('run_command execution', () => {
     expect(result.error?.code).toBe('read-only-workspace');
   });
 });
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
+    await delay(25);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

@@ -56,7 +56,7 @@ export type SequencedAgentEvent =
   | ({ type: 'reasoning.summary.delta'; text: string } & SequencedTurnEnvelope)
   | ({ type: 'model.progress'; phase: ModelRunPhase } & SequencedTurnEnvelope)
   | ({ type: 'tool.started'; toolId: string; title: string } & SequencedTurnEnvelope)
-  | ({ type: 'tool.output'; toolId: string; output: string } & SequencedTurnEnvelope)
+  | ({ type: 'tool.output'; toolId: string; output: string; status?: 'completed' | 'failed' } & SequencedTurnEnvelope)
   | ({ type: 'loop.classified'; kind: string; iteration: number } & SequencedTurnEnvelope)
   | ({ type: 'model.metrics'; metrics: ModelRunMetrics } & SequencedTurnEnvelope)
   | ({ type: 'approval.required'; approvalId: string; title: string; description: string; fileChanges?: FileChangePreview[] } & SequencedTurnEnvelope)
@@ -271,6 +271,13 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
     hasOptionalString(value, 'id') &&
     hasString(value, 'name') &&
     value.provider === 'openai-compatible' &&
+    (value.deploymentType === undefined || value.deploymentType === 'cloud' || value.deploymentType === 'private') &&
+    (value.runtimeType === undefined ||
+      value.runtimeType === 'llama.cpp' ||
+      value.runtimeType === 'ollama' ||
+      value.runtimeType === 'vllm' ||
+      value.runtimeType === 'tgi' ||
+      value.runtimeType === 'openai-compatible') &&
     hasString(value, 'baseUrl') &&
     hasString(value, 'model') &&
     hasOptionalString(value, 'apiKey') &&
@@ -369,7 +376,9 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
     case 'tool.started':
       return hasString(value, 'toolId') && hasString(value, 'title');
     case 'tool.output':
-      return hasString(value, 'toolId') && typeof value.output === 'string';
+      return hasString(value, 'toolId')
+        && typeof value.output === 'string'
+        && (value.status === undefined || value.status === 'completed' || value.status === 'failed');
     case 'loop.classified':
       return hasString(value, 'kind') && isPositiveInteger(value.iteration);
     case 'model.metrics':
