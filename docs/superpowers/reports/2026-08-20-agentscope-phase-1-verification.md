@@ -111,12 +111,13 @@ The review contracts were exercised with repository-local Vitest:
 ## 6. Rollback
 
 Phase 1 introduced no database migration and performs no user-data conversion. Rollback therefore
-does not delete or rewrite a user's data directory. Revert the review-fix commit first, then revert
-these Phase 1 commits in this exact newest-to-oldest order:
+does not delete or rewrite a user's data directory. Revert every Phase 1 commit in this exact
+newest-to-oldest order:
 
 ```text
-7612ff7 edb2d67 df07863 2db8321 06b299f 837187b 994bfcc 5748f6d 4bcbe6b 21b2856
+28c8a78 7612ff7 edb2d67 df07863 2db8321 06b299f 837187b 994bfcc 5748f6d 4bcbe6b 21b2856
 5776095 90e982e 8a64ec8 b71c0e1 4981e59 83dd0fe e741f44 482ea0c a2d473e 244e117
+b79db0b e216dae
 ```
 
 Then rebuild the desktop artifact with the normal verified package command. No database down
