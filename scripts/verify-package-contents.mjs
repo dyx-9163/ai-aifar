@@ -1,5 +1,5 @@
 import { listPackage } from '@electron/asar';
-import { lstat, readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -74,6 +74,12 @@ function normalizeInventoryPath(candidate) {
   return String(candidate).replaceAll('\\', '/').replace(/^\/+/, '');
 }
 
+function allowsManifestBackedDependencySource(file, forbiddenSegments) {
+  return forbiddenSegments.length > 0 &&
+    forbiddenSegments.every((segment) => segment === 'src') &&
+    /^resources\/agentscope-runtime\/site-packages\/(?:[^/]+\/)+src\/[^/]+/.test(file);
+}
+
 export function validateAsarInventory(entries, bytes) {
   if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_ASAR_BYTES) {
     throw new Error(`ASAR size limit exceeded: ${bytes} bytes (limit ${MAX_ASAR_BYTES}).`);
@@ -108,12 +114,17 @@ export function validateOuterInventory(files, runtimeManifestFiles = []) {
     const isAllowedRuntimeFile = allowedRuntimeFiles.has(file);
     const segments = file.toLowerCase().split('/');
     const name = segments.at(-1) ?? '';
+    const forbiddenSegments = segments.filter((segment) => forbiddenOuterSegments.has(segment));
     if (
-      !isAllowedRuntimeFile && (
-        segments.some((segment) => forbiddenOuterSegments.has(segment)) ||
-        name === '.env' ||
-        name.startsWith('.env.') ||
-        name.endsWith('.gguf')
+      name === '.env' ||
+      name.startsWith('.env.') ||
+      name.endsWith('.gguf') ||
+      (
+        forbiddenSegments.length > 0 &&
+        !(
+          isAllowedRuntimeFile &&
+          allowsManifestBackedDependencySource(file, forbiddenSegments)
+        )
       )
     ) {
       throw new Error(`Forbidden outer-package file: ${file}`);
@@ -139,18 +150,68 @@ export function validateOuterInventory(files, runtimeManifestFiles = []) {
   return { files: normalized.length };
 }
 
-async function enumerateFiles(root, current = root) {
+function canonicalNativePath(candidate) {
+  const normalized = path.normalize(candidate);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function assertRealPathContained(rootRealPath, candidateRealPath, label) {
+  const relative = path.relative(rootRealPath, candidateRealPath);
+  if (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(`${label} escapes the outer package root.`);
+  }
+}
+
+async function inspectOuterEntry(rootRealPath, candidate, label) {
+  const metadata = await lstat(candidate);
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symlink or reparse point.`);
+  }
+  const resolved = await realpath(candidate);
+  assertRealPathContained(rootRealPath, resolved, label);
+  if (canonicalNativePath(resolved) !== canonicalNativePath(path.resolve(candidate))) {
+    throw new Error(`${label} must not resolve through a symlink or reparse point.`);
+  }
+  return metadata;
+}
+
+async function enumerateOuterDirectory(root, rootRealPath, current) {
   const results = [];
-  const entries = await readdir(current, { withFileTypes: true });
+  const entries = await readdir(current);
+  entries.sort((left, right) => left.localeCompare(right, 'en'));
   for (const entry of entries) {
-    const absolute = path.join(current, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...await enumerateFiles(root, absolute));
-    } else {
+    const absolute = path.join(current, entry);
+    const relative = normalizeInventoryPath(path.relative(root, absolute));
+    const metadata = await inspectOuterEntry(rootRealPath, absolute, `Outer-package entry ${relative}`);
+    if (metadata.isDirectory()) {
+      results.push(...await enumerateOuterDirectory(root, rootRealPath, absolute));
+    } else if (metadata.isFile()) {
       results.push(normalizeInventoryPath(path.relative(root, absolute)));
+    } else {
+      throw new Error(`Outer-package entry must be a regular file or directory: ${relative}`);
     }
   }
   return results;
+}
+
+export async function enumerateOuterFiles(root) {
+  const packageRoot = path.resolve(root);
+  const rootMetadata = await lstat(packageRoot);
+  if (rootMetadata.isSymbolicLink()) {
+    throw new Error('Outer package root must not be a symlink or reparse point.');
+  }
+  if (!rootMetadata.isDirectory()) {
+    throw new Error('Outer package root must be a directory.');
+  }
+  const rootRealPath = await realpath(packageRoot);
+  if (canonicalNativePath(rootRealPath) !== canonicalNativePath(packageRoot)) {
+    throw new Error('Outer package root must not resolve through a symlink or reparse point.');
+  }
+  return enumerateOuterDirectory(packageRoot, rootRealPath, packageRoot);
 }
 
 export async function verifyPackagedAgentScopeRuntime(packageRoot, options = {}) {
@@ -193,8 +254,8 @@ export async function verifyPackagedApp(projectRoot = process.cwd(), options = {
     'out',
     `Private AI Desktop-${process.platform}-${process.arch}`,
   );
+  const outerFiles = await enumerateOuterFiles(packageRoot);
   const runtime = await verifyPackagedAgentScopeRuntime(packageRoot, options);
-  const outerFiles = await enumerateFiles(packageRoot);
   const outer = validateOuterInventory(outerFiles, runtime.manifest.files);
   const asarPath = path.join(packageRoot, 'resources', 'app.asar');
   const asarStat = await stat(asarPath);

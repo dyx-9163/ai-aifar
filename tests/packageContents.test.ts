@@ -75,4 +75,18 @@ describe('packaged application content policy', () => {
       'resources/vendor/src/fortranobject.c',
     ])).toThrow(/forbidden outer-package file/i);
   });
+
+  it.each([
+    'models/model.gguf',
+    'models/readme.txt',
+    'docs/design.md',
+    'node_modules/pkg/index.js',
+    '.superpowers/report.md',
+  ])('rejects a forbidden runtime path even when inventoried: %s', (runtimeFile) => {
+    expect(() => validateOuterInventory([
+      'resources/app.asar',
+      'resources/agentscope-runtime/runtime-manifest.json',
+      `resources/agentscope-runtime/${runtimeFile}`,
+    ], [runtimeFile])).toThrow(/forbidden outer-package file/i);
+  });
 });

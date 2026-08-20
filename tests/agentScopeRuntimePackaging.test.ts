@@ -13,6 +13,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import forgeConfig from '../forge.config';
 import {
+  enumerateOuterFiles,
   validateOuterInventory,
   verifyPackagedAgentScopeRuntime,
 } from '../scripts/verify-package-contents.mjs';
@@ -70,6 +71,22 @@ const createPackageFixture = async () => {
 };
 
 const fakeInterpreter = async () => ({ stdout: versionOutput, stderr: '' });
+
+const skipUnsupportedLinkPrivilege = (
+  error: unknown,
+  skip: (condition?: boolean, note?: string) => void,
+) => {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    ['EACCES', 'ENOSYS', 'EPERM'].includes(String(error.code))
+  ) {
+    skip(true, `Filesystem links are unavailable: ${String(error.code)}`);
+    return true;
+  }
+  return false;
+};
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -189,5 +206,51 @@ describe('embedded AgentScope package contract', () => {
     await expect(verifyPackagedAgentScopeRuntime(fixture.packageRoot, {
       executeInterpreter: fakeInterpreter,
     })).rejects.toThrow(/symlink|reparse/i);
+  });
+
+  it('rejects a symlink even when its filename is allowed by the outer policy', async ({ skip }) => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'agentscope-outer-link-'));
+    temporaryRoots.push(parent);
+    const packageRoot = path.join(parent, 'package');
+    const externalFile = path.join(parent, 'external-license.txt');
+    await mkdir(packageRoot);
+    await writeFile(externalFile, 'external', 'utf8');
+    try {
+      await symlink(externalFile, path.join(packageRoot, 'LICENSE'), 'file');
+    } catch (error) {
+      if (skipUnsupportedLinkPrivilege(error, skip)) {
+        return;
+      }
+      throw error;
+    }
+
+    await expect(enumerateOuterFiles(packageRoot)).rejects.toThrow(/symlink|reparse/i);
+    await expect(readFile(externalFile, 'utf8')).resolves.toBe('external');
+  });
+
+  it('rejects a directory junction or reparse point without traversing it', async ({ skip }) => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'agentscope-outer-junction-'));
+    temporaryRoots.push(parent);
+    const packageRoot = path.join(parent, 'package');
+    const externalDirectory = path.join(parent, 'external-locales');
+    const marker = path.join(externalDirectory, 'must-survive.pak');
+    await mkdir(packageRoot);
+    await mkdir(externalDirectory);
+    await writeFile(marker, 'external', 'utf8');
+    try {
+      await symlink(
+        externalDirectory,
+        path.join(packageRoot, 'locales'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch (error) {
+      if (skipUnsupportedLinkPrivilege(error, skip)) {
+        return;
+      }
+      throw error;
+    }
+
+    await expect(enumerateOuterFiles(packageRoot)).rejects.toThrow(/symlink|reparse/i);
+    await expect(readFile(marker, 'utf8')).resolves.toBe('external');
   });
 });
