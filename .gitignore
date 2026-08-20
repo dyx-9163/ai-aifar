@@ -14,3 +14,5 @@ test-results/
 *.log
 models/*.gguf
 model-runtime/.env
+/resources/agentscope-runtime/
+/resources/.agentscope-runtime-staging-*/
