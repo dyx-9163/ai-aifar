@@ -16,7 +16,7 @@ export interface ThreadSummary {
   updatedAt: string;
 }
 
-export type ItemKind = 'message' | 'reasoning' | 'tool' | 'change';
+export type ItemKind = 'message' | 'reasoning' | 'tool' | 'change' | 'loop';
 
 export interface BaseItem {
   id: string;
@@ -66,7 +66,15 @@ export interface ChangeItem extends BaseItem {
   summary: string;
 }
 
-export type Item = MessageItem | ReasoningItem | ToolItem | ChangeItem;
+/** One agent-loop iteration verdict, kept for post-mortem forensics; never rendered. */
+export interface LoopItem extends BaseItem {
+  kind: 'loop';
+  /** Classifier verdict, e.g. 'tool-calls', 'truncated-tool', 'false-completion'. */
+  loopKind: string;
+  iteration: number;
+}
+
+export type Item = MessageItem | ReasoningItem | ToolItem | ChangeItem | LoopItem;
 
 export type PatchDiffLineKind = 'context' | 'added' | 'removed';
 

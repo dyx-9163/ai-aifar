@@ -123,6 +123,11 @@ export function createTimelineEntries(
       continue;
     }
 
+    if (item.kind === 'loop') {
+      // Loop verdicts are forensic records; the timeline never renders them.
+      continue;
+    }
+
     entries.push({
       id: item.id,
       kind: 'message',

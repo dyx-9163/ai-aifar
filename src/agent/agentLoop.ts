@@ -14,6 +14,7 @@ import type { AgentToolCall, AgentToolResult } from '../shared/toolProtocol.js';
 import { runAutoVerification } from './tools/autoVerify.js';
 import type { RuntimeModelProfile } from './database.js';
 import type { ChatMessage, ModelStreamHandlers } from './modelProvider.js';
+import { classifyReply, steerKindsFor, STEER_RULES, type SteerKind } from './replyClassifier.js';
 import {
   executeAgentToolCall,
   READ_ONLY_TOOL_NAMES,
@@ -30,20 +31,6 @@ const CODE_FENCE_PATTERN = /```[^\n]*\n([\s\S]*?)```/g;
 const FENCE_WITH_LANG_PATTERN = /```([^\n]*)\n([\s\S]*?)```/g;
 /** A fenced code block with at least this many non-empty lines counts as a manual code dump. */
 const CODE_DUMP_MIN_LINES = 12;
-/** How many times the loop re-prompts the model instead of accepting a pasted-code answer. */
-const MAX_CODE_DUMP_STEERS = 2;
-/** How many times the loop re-prompts after a tool call was cut off by the output limit. */
-const MAX_TRUNCATED_TOOL_STEERS = 3;
-/** How many times the loop re-prompts when the model announces edits without issuing tool calls. */
-const MAX_INTENT_STEERS = 2;
-/** How many times the loop re-prompts when a fenced tool call was not valid JSON. */
-const MAX_MALFORMED_TOOL_STEERS = 2;
-/** How many times the loop re-prompts when the visible answer is empty. */
-const MAX_EMPTY_ANSWER_STEERS = 2;
-/** How many times the loop re-prompts when an XML tool block survived parsing but not stripping. */
-const MAX_UNPARSED_XML_STEERS = 2;
-/** How many times the loop re-prompts when the answer claims work no tool call executed. */
-const MAX_FALSE_COMPLETION_STEERS = 2;
 /** How many times per turn the loop runs deterministic post-write verification. */
 const MAX_AUTO_VERIFICATIONS = 3;
 /** Reads of the same path without an intervening write that trigger a steering note. */
@@ -62,7 +49,8 @@ export type AgentLoopEmit = (
   payload:
     | { type: 'answer.delta'; text: string }
     | { type: 'tool.started'; toolId: string; title: string }
-    | { type: 'tool.output'; toolId: string; output: string },
+    | { type: 'tool.output'; toolId: string; output: string }
+    | { type: 'loop.classified'; kind: string; iteration: number },
 ) => Promise<void> | void;
 
 export interface AgentLoopOptions {
@@ -280,19 +268,6 @@ export function looksLikeTruncatedToolCall(text: string): boolean {
   return /```tool\b/.test(withoutCompleteCalls) || /<invoke\b/.test(withoutCompleteCalls);
 }
 
-const CODE_DUMP_STEERING_MESSAGE = [
-  'You pasted code blocks into the answer instead of applying them to the workspace.',
-  'This workspace is read-write, so you must apply the changes yourself with apply_patch.',
-  'If you have not read the target file yet, call read_file first; for a brand-new file use "baseContentHash": "" with a single insertion edit.',
-  'Reply with ```tool calls now (a single apply_patch with a "files" array when several files change) and never paste replacement code into the answer.',
-].join(' ');
-
-const TRUNCATED_TOOL_STEERING_MESSAGE = [
-  'Your previous reply was cut off by the output limit while a tool call was still open, so nothing ran.',
-  'Resend the tool call now, but keep each reply small enough to finish: split big file rewrites into several apply_patch edits whose "replacement" is at most ~120 lines each, spreading the work over multiple replies if needed.',
-  'Never paste replacement code into the answer.',
-].join(' ');
-
 const TOOL_INTENT_PATTERN = /(apply_patch|read_file|workspace_tree|替换|更新|修改|写入|创建|读取|查看|检查|修复|replac|updat|writ|creat|read|check|inspect|fix|repair)/i;
 const FILE_PATH_PATTERN = /`[^`\n]*\.[A-Za-z0-9]+`|[\w./\\-]+\.(?:vue|tsx?|jsx?|html|css|json|md|py|go|rs)/;
 /** First-person openers that promise an action about to happen ("let me ..."). */
@@ -326,38 +301,6 @@ export function looksLikeUnverifiedCompletionClaim(text: string): boolean {
   if (COMPLETION_CLAIM_PATTERN.test(trimmed)) return true;
   return ENGLISH_CLAIM_VERB_PATTERN.test(trimmed) && FILE_PATH_PATTERN.test(trimmed);
 }
-
-const UNFULFILLED_INTENT_STEERING_MESSAGE = [
-  'You announced reading or editing files but your reply contained no ```tool call, so nothing happened.',
-  'Do not narrate—act: reply now with ```tool calls (read_file to inspect, apply_patch with a "files" array to change several files at once); call read_file first when you lack a fresh contentHash.',
-  'Never paste replacement code into the answer.',
-].join(' ');
-
-const MALFORMED_TOOL_STEERING_MESSAGE = [
-  'A ```tool block in your previous reply was not valid JSON, so it was ignored and nothing ran.',
-  'Resend the call now as one strict-JSON ```tool block: close every { and [, quote every string, keep numbers unquoted, and keep each "replacement" at most ~120 lines.',
-  'Never paste code into the answer.',
-].join(' ');
-
-const UNPARSED_XML_STEERING_MESSAGE = [
-  'Your reply contained an XML tool block (such as <tool_calls>/<invoke>) that could not be parsed, so nothing happened.',
-  'Resend the same call as a fenced JSON block exactly like: ```tool',
-  '{"tool": "read_file", "input": {"path": "src/main.ts"}}',
-  '```',
-  'Never use XML tool syntax.',
-].join(' ');
-
-const EMPTY_ANSWER_STEERING_MESSAGE = [
-  'Your reply was empty: it contained neither a visible answer nor a tool call, so nothing happened.',
-  'Either act now with ```tool calls (apply_patch to finish the edits you planned, read_file when you need fresh content), or write the final answer for the user.',
-  'Never end a turn silently.',
-].join(' ');
-
-const FALSE_COMPLETION_STEERING_MESSAGE = [
-  'Your reply claims completed work ("fixed", "added", "build passed") but this turn executed no apply_patch and no run_command, so nothing changed and nothing was verified.',
-  'Either apply the edits now with ```tool apply_patch calls (the harness verifies automatically after each write), or, if the change already exists from an earlier turn, confirm it with read_file/search_code evidence and say so explicitly.',
-  'Never report unexecuted work as done.',
-].join(' ');
 
 /** Removes tool fences and XML tool-call blocks so intermediate text never reaches the answer stream. */
 export function stripToolFences(text: string): string {
@@ -438,13 +381,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   let iterations = 0;
   let toolCallsExecuted = 0;
-  let codeDumpSteersUsed = 0;
-  let truncatedToolSteersUsed = 0;
-  let intentSteersUsed = 0;
-  let malformedToolSteersUsed = 0;
-  let emptyAnswerSteersUsed = 0;
-  let unparsedXmlSteersUsed = 0;
-  let falseCompletionSteersUsed = 0;
+  const steerCounters = new Map<SteerKind, number>();
   let actingToolsExecuted = 0;
   let autoVerificationsUsed = 0;
   const readCounts = new Map<string, number>();
@@ -466,87 +403,42 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     return { text: buffered, metrics };
   };
 
+  const steerLimitFor = (kind: SteerKind): number =>
+    STEER_RULES.find((rule) => rule.kind === kind)?.limit ?? 0;
+  const steersUsed = (kind: SteerKind): number => steerCounters.get(kind) ?? 0;
+
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     iterations = iteration;
     const { text } = await runOnce();
     const parsedCalls = parseToolCalls(text);
-    if (
-      parsedCalls.length > 0 &&
-      truncatedToolSteersUsed < MAX_TRUNCATED_TOOL_STEERS &&
-      looksLikeTruncatedToolCall(text)
-    ) {
-      // The output limit cut a later call mid-parameter; executing the
-      // half-parsed batch would feed garbage errors back into the loop, so
-      // ask for a smaller resend instead.
-      truncatedToolSteersUsed += 1;
-      messages.push({ role: 'assistant', content: text });
-      messages.push({ role: 'user', content: TRUNCATED_TOOL_STEERING_MESSAGE });
-      continue;
-    }
-    if (parsedCalls.length === 0) {
-      const answer = stripToolFences(text);
-      if (truncatedToolSteersUsed < MAX_TRUNCATED_TOOL_STEERS && looksLikeTruncatedToolCall(text)) {
-        // The output limit cut the tool call mid-fence; ask for a smaller resend.
-        truncatedToolSteersUsed += 1;
-        messages.push({ role: 'assistant', content: text });
-        messages.push({ role: 'user', content: TRUNCATED_TOOL_STEERING_MESSAGE });
-        continue;
-      }
-      if (malformedToolSteersUsed < MAX_MALFORMED_TOOL_STEERS && hasUnparsedToolFence(text)) {
-        // A fenced call survived neither raw parsing nor repair; ask for a strict resend.
-        malformedToolSteersUsed += 1;
-        messages.push({ role: 'assistant', content: text });
-        messages.push({ role: 'user', content: MALFORMED_TOOL_STEERING_MESSAGE });
-        continue;
-      }
-      if (unparsedXmlSteersUsed < MAX_UNPARSED_XML_STEERS && hasUnparsedXmlToolBlock(text)) {
-        // An XML tool block escaped both parsing and stripping; without this
-        // steer the reply would strip down to "" and loop as a silent empty answer.
-        unparsedXmlSteersUsed += 1;
-        messages.push({ role: 'assistant', content: text });
-        messages.push({ role: 'user', content: UNPARSED_XML_STEERING_MESSAGE });
-        continue;
-      }
-      if (answer.length === 0 && emptyAnswerSteersUsed < MAX_EMPTY_ANSWER_STEERS) {
-        // Reasoning-heavy models can spend the whole reply on thinking and emit
-        // nothing visible; force an act-or-answer decision instead of ending silent.
-        emptyAnswerSteersUsed += 1;
+    const answer = parsedCalls.length > 0 ? '' : stripToolFences(text);
+    const classificationInput = {
+      text,
+      parsedCalls,
+      answer,
+      trustLevel: options.toolContext.trustLevel,
+      actingToolsExecuted,
+    };
+    const classification = classifyReply(classificationInput);
+    await options.emit({ type: 'loop.classified', kind: classification.kind, iteration });
+
+    // Truncation outranks parsed calls, but once its steering budget is spent
+    // salvage the complete parsed calls instead of looping forever.
+    const truncatedBudgetSpent =
+      classification.kind === 'truncated-tool' &&
+      steersUsed('truncated-tool') >= steerLimitFor('truncated-tool');
+    const hasExecutableCalls =
+      classification.kind === 'tool-calls' || (truncatedBudgetSpent && parsedCalls.length > 0);
+
+    if (!hasExecutableCalls) {
+      const steerKind = steerKindsFor(classificationInput).find(
+        (kind) => steersUsed(kind) < steerLimitFor(kind),
+      );
+      if (steerKind) {
+        const rule = STEER_RULES.find((candidate) => candidate.kind === steerKind);
+        steerCounters.set(steerKind, steersUsed(steerKind) + 1);
         messages.push({ role: 'assistant', content: text.length > 0 ? text : '(empty reply)' });
-        messages.push({ role: 'user', content: EMPTY_ANSWER_STEERING_MESSAGE });
-        continue;
-      }
-      if (
-        options.toolContext.trustLevel !== 'read-only' &&
-        codeDumpSteersUsed < MAX_CODE_DUMP_STEERS &&
-        looksLikeManualCodeDump(answer)
-      ) {
-        // The model dumped code for manual pasting; re-prompt it to use apply_patch.
-        codeDumpSteersUsed += 1;
-        messages.push({ role: 'assistant', content: text });
-        messages.push({ role: 'user', content: CODE_DUMP_STEERING_MESSAGE });
-        continue;
-      }
-      if (
-        options.toolContext.trustLevel !== 'read-only' &&
-        intentSteersUsed < MAX_INTENT_STEERS &&
-        looksLikeUnfulfilledToolIntent(answer)
-      ) {
-        // The model narrated edits without issuing tool calls; force it to act.
-        intentSteersUsed += 1;
-        messages.push({ role: 'assistant', content: text });
-        messages.push({ role: 'user', content: UNFULFILLED_INTENT_STEERING_MESSAGE });
-        continue;
-      }
-      if (
-        options.toolContext.trustLevel !== 'read-only' &&
-        actingToolsExecuted === 0 &&
-        falseCompletionSteersUsed < MAX_FALSE_COMPLETION_STEERS &&
-        looksLikeUnverifiedCompletionClaim(answer)
-      ) {
-        // The model reported success without executing anything; force real action.
-        falseCompletionSteersUsed += 1;
-        messages.push({ role: 'assistant', content: text });
-        messages.push({ role: 'user', content: FALSE_COMPLETION_STEERING_MESSAGE });
+        messages.push({ role: 'user', content: rule?.message ?? 'Resend your reply.' });
         continue;
       }
       if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });

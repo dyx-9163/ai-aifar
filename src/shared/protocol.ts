@@ -57,6 +57,7 @@ export type SequencedAgentEvent =
   | ({ type: 'model.progress'; phase: ModelRunPhase } & SequencedTurnEnvelope)
   | ({ type: 'tool.started'; toolId: string; title: string } & SequencedTurnEnvelope)
   | ({ type: 'tool.output'; toolId: string; output: string } & SequencedTurnEnvelope)
+  | ({ type: 'loop.classified'; kind: string; iteration: number } & SequencedTurnEnvelope)
   | ({ type: 'model.metrics'; metrics: ModelRunMetrics } & SequencedTurnEnvelope)
   | ({ type: 'approval.required'; approvalId: string; title: string; description: string; fileChanges?: FileChangePreview[] } & SequencedTurnEnvelope)
   | ({ type: 'turn.cancelling' } & SequencedTurnEnvelope)
@@ -369,6 +370,8 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
       return hasString(value, 'toolId') && hasString(value, 'title');
     case 'tool.output':
       return hasString(value, 'toolId') && typeof value.output === 'string';
+    case 'loop.classified':
+      return hasString(value, 'kind') && isPositiveInteger(value.iteration);
     case 'model.metrics':
       return (
         isRecord(value.metrics) &&

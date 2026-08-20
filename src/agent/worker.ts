@@ -4,6 +4,7 @@ import type {
   Approval,
   FileChangePreview,
   Item,
+  LoopItem,
   MessageItem,
   ModelConnectionResult,
   ModelProfileInput,
@@ -604,6 +605,8 @@ function persistStreamEvent(database: AppDatabase, event: SequencedEvent, create
     database.appendItem(reasoningItem(event.threadId, event.turnId, 'raw', event.text, createdAt));
   } else if (event.type === 'reasoning.summary.delta') {
     database.appendItem(reasoningItem(event.threadId, event.turnId, 'summary', event.text, createdAt));
+  } else if (event.type === 'loop.classified') {
+    database.appendItem(loopItem(event.threadId, event.turnId, event.kind, event.iteration, createdAt));
   } else if (event.type === 'approval.required') {
     database.upsertApproval(approvalFromEvent(event, createdAt));
   }
@@ -747,6 +750,24 @@ function reasoningItem(
     mode,
     text,
     incomplete: true,
+    createdAt,
+  };
+}
+
+function loopItem(
+  threadId: string,
+  turnId: string,
+  loopKind: string,
+  iteration: number,
+  createdAt: string,
+): LoopItem {
+  return {
+    id: `item-${turnId}-loop-${iteration}`,
+    threadId,
+    turnId,
+    kind: 'loop',
+    loopKind,
+    iteration,
     createdAt,
   };
 }

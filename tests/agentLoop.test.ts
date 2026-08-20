@@ -56,6 +56,8 @@ function xmlInvoke(tool: string, params: Array<[string, string]>): string {
 
 interface LoopHarness {
   emitted: Array<{ type: string; [key: string]: unknown }>;
+  /** One entry per loop iteration: the classifier verdict for that reply. */
+  classifications: Array<{ kind: string; iteration: number }>;
   modelCalls: ChatMessage[][];
   outcome: Awaited<ReturnType<typeof runAgentLoop>>;
 }
@@ -68,7 +70,8 @@ async function runLoop(
     requestApproval?: (request: { title: string; description: string }) => Promise<boolean>;
   } = {},
 ): Promise<LoopHarness> {
-  const emitted: Array<{ type: string; [key: string]: unknown }> = [];
+  const allEvents: Array<{ type: string; [key: string]: unknown }> = [];
+  const classifications: Array<{ kind: string; iteration: number }> = [];
   const modelCalls: ChatMessage[][] = [];
   let run = 0;
   const outcome = await runAgentLoop({
@@ -84,14 +87,20 @@ async function runLoop(
       return metricsFor(run);
     },
     emit: (payload) => {
-      emitted.push(payload as { type: string });
+      allEvents.push(payload as { type: string });
+      if (payload.type === 'loop.classified') {
+        classifications.push({ kind: String(payload.kind), iteration: Number(payload.iteration) });
+      }
     },
     signal: new AbortController().signal,
     maxIterations: options.maxIterations,
     requestApproval: options.requestApproval,
     createCallId: () => `call-${run + 1}`,
   });
-  return { emitted, modelCalls, outcome };
+  // Existing assertions predate the loop.classified observability event; keep
+  // the stream view free of it and expose it separately instead.
+  const emitted = allEvents.filter((event) => event.type !== 'loop.classified');
+  return { emitted, classifications, modelCalls, outcome };
 }
 
 let tempDirectories: string[] = [];
@@ -742,5 +751,24 @@ describe('runAgentLoop', () => {
     );
     expect(outcome).toMatchObject({ toolCallsExecuted: 1, emptyAnswer: false });
     expect(String(modelCalls[1].at(-1)?.content)).toContain('XML tool block');
+  });
+
+  it('records the classifier verdict for every loop iteration', async () => {
+    const readWrite = { ...context, trustLevel: 'read-write' as const };
+    const { classifications, outcome } = await runLoop(
+      [
+        '让我先读取 `src/main.ts` 再修改。',
+        fencedToolCall('{"tool": "read_file", "input": {"path": "src/main.ts"}}'),
+        'It exports answer = 42.',
+      ],
+      readWrite,
+    );
+    expect(outcome).toMatchObject({ iterations: 3, toolCallsExecuted: 1 });
+    expect(classifications.map((entry) => entry.kind)).toEqual([
+      'unfulfilled-intent',
+      'tool-calls',
+      'answer',
+    ]);
+    expect(classifications.map((entry) => entry.iteration)).toEqual([1, 2, 3]);
   });
 });

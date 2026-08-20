@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../src/shared/protocol';
-import type { ModelConnectionResult } from '../src/shared/domain';
+import type { Item, ModelConnectionResult } from '../src/shared/domain';
 import { openDatabase, type AppDatabase, type RuntimeModelProfile } from '../src/agent/database';
 import { streamChatCompletion, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import {
@@ -687,6 +687,43 @@ describe('worker turn runtime', () => {
     const failed = harness.database.getSnapshot().turns.find((turn) => turn.id === turnId);
     expect(failed).toMatchObject({ status: 'failed', incomplete: true });
     expect(failed?.error).toContain('claiming changes, but no file writes or commands were executed');
+    harness.database.close();
+  });
+
+  it('persists loop classifier verdicts as loop items for post-mortem forensics', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-loopws-'));
+    tempDirectories.push(workspaceDirectory);
+    writeFileSync(join(workspaceDirectory, 'README.md'), '# project\n');
+
+    let run = 0;
+    const harness = createHarness(async (_modelProfile, _messages, handlers) => {
+      run += 1;
+      if (run === 1) {
+        handlers.onAnswerDelta('已修复，构建通过。改动点：子弹自动追踪。');
+      } else {
+        handlers.onAnswerDelta('Understood—nothing has been applied yet.');
+      }
+      return metrics();
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-write' });
+    const thread = harness.database.createThread('Loop forensics');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'Fix the CSS',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    expect(typesFor(harness.events, turnId)).toContain('loop.classified');
+    const loopItems = harness.database
+      .getSnapshot()
+      .items[thread.id]
+      .filter((item): item is Extract<Item, { kind: 'loop' }> => item.kind === 'loop');
+    expect(loopItems.map((item) => item.loopKind)).toEqual(['false-completion', 'answer']);
+    expect(loopItems.map((item) => item.iteration)).toEqual([1, 2]);
     harness.database.close();
   });
 
