@@ -14,8 +14,8 @@
     "agentscope:bundle": "node scripts/agentscope-runtime/build.mjs",
     "agentscope:verify": "node scripts/agentscope-runtime/verify.mjs",
     "build": "pnpm package",
-    "package": "electron-forge package && node scripts/verify-package-contents.mjs",
-    "make": "electron-forge make"
+    "package": "pnpm agentscope:bundle && electron-forge package && node scripts/verify-package-contents.mjs",
+    "make": "pnpm package && electron-forge make --skip-package"
   },
   "dependencies": {
     "vue": "^3.5.41"

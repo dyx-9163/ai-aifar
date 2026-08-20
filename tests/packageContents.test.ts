@@ -42,7 +42,8 @@ describe('packaged application content policy', () => {
       'Private AI Desktop.exe',
       'resources/app.asar',
       'locales/en-US.pak',
-    ])).toEqual({ files: 3 });
+      'locales/es-419.pak',
+    ])).toEqual({ files: 4 });
     for (const forbidden of [
       'resources/.superpowers/report.md',
       'resources/app/src/main.ts',
@@ -52,5 +53,26 @@ describe('packaged application content policy', () => {
     ]) {
       expect(() => validateOuterInventory(['resources/app.asar', forbidden])).toThrow(/forbidden outer-package file/i);
     }
+  });
+
+  it('rejects arbitrary outer files instead of allowing all resources', () => {
+    expect(() => validateOuterInventory([
+      'Private AI Desktop.exe',
+      'resources/app.asar',
+      'resources/uninventoried.bin',
+    ])).toThrow(/unexpected outer-package file/i);
+  });
+
+  it('allows dependency source paths only when the runtime manifest inventories them', () => {
+    const runtimeFile = 'site-packages/numpy/f2py/src/fortranobject.c';
+    expect(validateOuterInventory([
+      'resources/app.asar',
+      'resources/agentscope-runtime/runtime-manifest.json',
+      `resources/agentscope-runtime/${runtimeFile}`,
+    ], [runtimeFile])).toEqual({ files: 3 });
+    expect(() => validateOuterInventory([
+      'resources/app.asar',
+      'resources/vendor/src/fortranobject.c',
+    ])).toThrow(/forbidden outer-package file/i);
   });
 });

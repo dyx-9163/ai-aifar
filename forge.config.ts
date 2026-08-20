@@ -9,6 +9,7 @@ process.env.VITE_CONFIG_NATIVE_IGNORE_WARNING ??= 'true';
 const config = {
   packagerConfig: {
     asar: true,
+    extraResource: ['resources/agentscope-runtime'],
     ignore: [/^\/(?!\.vite(?:\/|$)|package\.json$)/],
     download: {
       cacheRoot: path.join(os.tmpdir(), 'private-ai-desktop-electron-cache'),

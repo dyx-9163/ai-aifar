@@ -1,7 +1,11 @@
 import { listPackage } from '@electron/asar';
-import { readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  parseRuntimeManifest,
+  verifyRuntimeArtifact,
+} from './agentscope-runtime/verify.mjs';
 
 export const MAX_ASAR_BYTES = 2 * 1024 * 1024;
 
@@ -29,6 +33,42 @@ const forbiddenOuterSegments = new Set([
   'test-results',
   'tests',
 ]);
+const allowedOuterRootFiles = new Set([
+  'chrome_100_percent.pak',
+  'chrome_200_percent.pak',
+  'd3dcompiler_47.dll',
+  'dxcompiler.dll',
+  'dxil.dll',
+  'ffmpeg.dll',
+  'icudtl.dat',
+  'libEGL.dll',
+  'libGLESv2.dll',
+  'LICENSE',
+  'LICENSES.chromium.html',
+  'Private AI Desktop.exe',
+  'resources.pak',
+  'snapshot_blob.bin',
+  'v8_context_snapshot.bin',
+  'version',
+  'vk_swiftshader_icd.json',
+  'vk_swiftshader.dll',
+  'vulkan-1.dll',
+]);
+const localeFile = /^locales\/[a-z]{2,3}(?:-(?:[A-Z]{2}|[0-9]{3}))?\.pak$/;
+const runtimeOuterPrefix = 'resources/agentscope-runtime/';
+const forbiddenRuntimeSecretNames = new Set([
+  '.secret',
+  '.secrets',
+  'credentials.json',
+  'credentials.toml',
+  'credentials.yaml',
+  'credentials.yml',
+  'secret.json',
+  'secret.toml',
+  'secret.yaml',
+  'secret.yml',
+  'token.txt',
+]);
 
 function normalizeInventoryPath(candidate) {
   return String(candidate).replaceAll('\\', '/').replace(/^\/+/, '');
@@ -52,22 +92,49 @@ export function validateAsarInventory(entries, bytes) {
   return { entries: normalized.length, bytes };
 }
 
-export function validateOuterInventory(files) {
+export function validateOuterInventory(files, runtimeManifestFiles = []) {
   const normalized = files.map(normalizeInventoryPath);
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error('Outer-package inventory contains duplicate paths.');
+  }
+  const allowedRuntimeFiles = new Set(runtimeManifestFiles.length > 0 ? [
+    `${runtimeOuterPrefix}runtime-manifest.json`,
+    ...runtimeManifestFiles.map((file) => {
+      const relativePath = typeof file === 'string' ? file : file?.path;
+      return `${runtimeOuterPrefix}${normalizeInventoryPath(relativePath)}`;
+    }),
+  ] : []);
   for (const file of normalized) {
+    const isAllowedRuntimeFile = allowedRuntimeFiles.has(file);
     const segments = file.toLowerCase().split('/');
     const name = segments.at(-1) ?? '';
     if (
-      segments.some((segment) => forbiddenOuterSegments.has(segment)) ||
-      name === '.env' ||
-      name.startsWith('.env.') ||
-      name.endsWith('.gguf')
+      !isAllowedRuntimeFile && (
+        segments.some((segment) => forbiddenOuterSegments.has(segment)) ||
+        name === '.env' ||
+        name.startsWith('.env.') ||
+        name.endsWith('.gguf')
+      )
     ) {
       throw new Error(`Forbidden outer-package file: ${file}`);
+    }
+    const allowed = allowedOuterRootFiles.has(file) ||
+      localeFile.test(file) ||
+      file === 'resources/app.asar' ||
+      isAllowedRuntimeFile;
+    if (!allowed) {
+      throw new Error(`Unexpected outer-package file: ${file}`);
     }
   }
   if (!normalized.includes('resources/app.asar')) {
     throw new Error('Packaged application is missing resources/app.asar.');
+  }
+  if (runtimeManifestFiles.length > 0) {
+    for (const required of allowedRuntimeFiles) {
+      if (!normalized.includes(required)) {
+        throw new Error(`Manifest-backed runtime file is missing from package: ${required}`);
+      }
+    }
   }
   return { files: normalized.length };
 }
@@ -86,19 +153,54 @@ async function enumerateFiles(root, current = root) {
   return results;
 }
 
-export async function verifyPackagedApp(projectRoot = process.cwd()) {
+export async function verifyPackagedAgentScopeRuntime(packageRoot, options = {}) {
+  const resourcesRoot = path.join(path.resolve(packageRoot), 'resources');
+  const asarPath = path.join(resourcesRoot, 'app.asar');
+  const asarMetadata = await lstat(asarPath);
+  if (!asarMetadata.isFile() || asarMetadata.isSymbolicLink()) {
+    throw new Error('Packaged application resources/app.asar must be a regular file.');
+  }
+
+  const runtimeRoot = path.join(resourcesRoot, 'agentscope-runtime');
+  const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json');
+  const manifestBefore = await readFile(manifestPath);
+  let manifest;
+  try {
+    manifest = parseRuntimeManifest(JSON.parse(manifestBefore.toString('utf8')));
+  } catch (error) {
+    throw new Error(
+      `Packaged AgentScope runtime manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const secretFile = manifest.files.find((file) => {
+    const name = file.path.split('/').at(-1)?.toLowerCase() ?? '';
+    return forbiddenRuntimeSecretNames.has(name);
+  });
+  if (secretFile) {
+    throw new Error(`Secret or credential file is forbidden in packaged runtime: ${secretFile.path}`);
+  }
+  const verified = await verifyRuntimeArtifact(runtimeRoot, options);
+  const manifestAfter = await readFile(manifestPath);
+  if (!manifestBefore.equals(manifestAfter)) {
+    throw new Error('Packaged AgentScope runtime manifest changed during verification.');
+  }
+  return { ...verified, manifest };
+}
+
+export async function verifyPackagedApp(projectRoot = process.cwd(), options = {}) {
   const packageRoot = path.join(
     projectRoot,
     'out',
     `Private AI Desktop-${process.platform}-${process.arch}`,
   );
+  const runtime = await verifyPackagedAgentScopeRuntime(packageRoot, options);
   const outerFiles = await enumerateFiles(packageRoot);
-  const outer = validateOuterInventory(outerFiles);
+  const outer = validateOuterInventory(outerFiles, runtime.manifest.files);
   const asarPath = path.join(packageRoot, 'resources', 'app.asar');
   const asarStat = await stat(asarPath);
   const asarEntries = listPackage(asarPath);
   const asar = validateAsarInventory(asarEntries, asarStat.size);
-  return { packageRoot, outer, asar };
+  return { packageRoot, outer, asar, runtime };
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
@@ -107,7 +209,9 @@ if (invokedPath === path.resolve(fileURLToPath(import.meta.url))) {
     const result = await verifyPackagedApp();
     console.log(
       `Package content verified: outerFiles=${result.outer.files} ` +
-      `asarEntries=${result.asar.entries} asarBytes=${result.asar.bytes}`,
+      `asarEntries=${result.asar.entries} asarBytes=${result.asar.bytes} ` +
+      `agentScopeFiles=${result.runtime.inventory.files} ` +
+      `agentScopeManifestSha256=${result.runtime.manifestSha256}`,
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
