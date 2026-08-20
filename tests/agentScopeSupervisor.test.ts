@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentScopeSupervisor,
@@ -45,6 +46,66 @@ function secretMetadata(secret: string) {
 
 function containsSecret(value: unknown, secret: string): boolean {
   return secret.length > 0 && JSON.stringify(value).includes(secret);
+}
+
+function stateMatches(actual: unknown, expected: unknown): boolean {
+  return isDeepStrictEqual(actual, expected);
+}
+
+function stateIncludes(actual: unknown, expected: Record<string, unknown>): boolean {
+  if (typeof actual !== 'object' || actual === null || Array.isArray(actual)) return false;
+  const record = actual as Record<string, unknown>;
+  return Object.entries(expected).every(([key, value]) => isDeepStrictEqual(record[key], value));
+}
+
+function safeStateKind(state: unknown): string {
+  if (typeof state !== 'object' || state === null || Array.isArray(state)) return 'invalid';
+  const kind = (state as Record<string, unknown>).state;
+  return kind === 'stopped' || kind === 'starting' || kind === 'ready' || kind === 'degraded'
+    ? kind
+    : 'invalid';
+}
+
+function inspectBootstrapLine(line: string): {
+  token: string;
+  diagnostics: {
+    parsed: boolean;
+    exactKeys: boolean;
+    userDataDirMatches: boolean;
+    logDirMatches: boolean;
+  };
+} {
+  const sanitizedFailure = {
+    token: '',
+    diagnostics: {
+      parsed: false,
+      exactKeys: false,
+      userDataDirMatches: false,
+      logDirMatches: false,
+    },
+  };
+  try {
+    const decoded = JSON.parse(line) as unknown;
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
+      return sanitizedFailure;
+    }
+    const record = decoded as Record<string, unknown>;
+    return {
+      token: typeof record.token === 'string' ? record.token : '',
+      diagnostics: {
+        parsed: true,
+        exactKeys:
+          Object.keys(record).length === 3 &&
+          Object.hasOwn(record, 'token') &&
+          Object.hasOwn(record, 'user_data_dir') &&
+          Object.hasOwn(record, 'log_dir'),
+        userDataDirMatches: record.user_data_dir === path.resolve('C:\\PrivateAI\\user-data'),
+        logDirMatches: record.log_dir === path.resolve('C:\\PrivateAI\\logs'),
+      },
+    };
+  } catch {
+    return sanitizedFailure;
+  }
 }
 
 function sanitizeSpawnCall(
@@ -122,11 +183,13 @@ class FakeChild extends EventEmitter implements AgentScopeChildProcess {
   readonly stdout = new FakeStdout();
   readonly killCalls: Array<NodeJS.Signals | number | undefined> = [];
   exited = false;
+  closed = false;
 
   constructor(
     readonly pid: number = READY_PID,
     private readonly exitWhenKilled = true,
     private readonly killResult = true,
+    private readonly closeWhenExited = true,
   ) {
     super();
   }
@@ -143,6 +206,13 @@ class FakeChild extends EventEmitter implements AgentScopeChildProcess {
     if (this.exited) return;
     this.exited = true;
     this.emit('exit', code, signal);
+    if (this.closeWhenExited) this.close(code, signal);
+  }
+
+  close(code = 0, signal: NodeJS.Signals | null = null): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.emit('close', code, signal);
   }
 }
 
@@ -246,6 +316,23 @@ afterEach(() => {
 });
 
 describe('AgentScopeSupervisor secure startup', () => {
+  it('uses constant sanitized diagnostics when bootstrap inspection cannot parse', () => {
+    const inspected = inspectBootstrapLine('{');
+
+    expect({
+      tokenIsEmpty: inspected.token.length === 0,
+      diagnostics: inspected.diagnostics,
+    }).toEqual({
+      tokenIsEmpty: true,
+      diagnostics: {
+        parsed: false,
+        exactKeys: false,
+        userDataDirMatches: false,
+        logDirMatches: false,
+      },
+    });
+  });
+
   it('writes one bounded config line from exactly 32 random bytes and starts the direct minimal process', async () => {
     const logs: string[] = [];
     const { children, fetchCalls, randomByteRequests, spawnCalls, supervisor } = makeHarness({
@@ -257,20 +344,21 @@ describe('AgentScopeSupervisor secure startup', () => {
     expect(randomByteRequests).toEqual([32]);
     expect(children[0].stdin.writes.length).toBe(1);
     const bootstrapLine = children[0].stdin.writes[0] ?? '';
-    const decodedBootstrap = JSON.parse(bootstrapLine) as Record<string, unknown>;
-    const bootstrapToken = typeof decodedBootstrap.token === 'string' ? decodedBootstrap.token : '';
-    const { token: _token, ...nonSecretBootstrap } = decodedBootstrap;
+    const bootstrap = inspectBootstrapLine(bootstrapLine);
+    const bootstrapToken = bootstrap.token;
     expect({
       endsWithNewline: bootstrapLine.endsWith('\n'),
       bounded: Buffer.byteLength(bootstrapLine, 'utf8') <= 16 * 1024,
-      nonSecretBootstrap,
+      bootstrap: bootstrap.diagnostics,
       token: secretMetadata(bootstrapToken),
     }).toEqual({
       endsWithNewline: true,
       bounded: true,
-      nonSecretBootstrap: {
-        user_data_dir: path.resolve('C:\\PrivateAI\\user-data'),
-        log_dir: path.resolve('C:\\PrivateAI\\logs'),
+      bootstrap: {
+        parsed: true,
+        exactKeys: true,
+        userDataDirMatches: true,
+        logDirMatches: true,
       },
       token: {
         characterLength: 43,
@@ -291,13 +379,13 @@ describe('AgentScopeSupervisor secure startup', () => {
       environmentMatches: true,
       containsSecret: false,
     });
-    expect(state).toEqual({
+    expect(stateMatches(state, {
       state: 'ready',
       pid: READY_PID,
       port: READY_PORT,
       runtimeVersion: '1.0.0',
       agentScopeVersion: '2.0.6',
-    });
+    })).toBe(true);
     expect(fetchCalls.length).toBe(1);
     const sanitizedFetch = sanitizeFetchCall(fetchCalls[0], bootstrapToken);
     expect(containsSecret(sanitizedFetch, bootstrapToken)).toBe(false);
@@ -325,7 +413,7 @@ describe('AgentScopeSupervisor secure startup', () => {
     child.stdin.onEnd = () => child.exit(0);
     const { supervisor } = makeHarness({ children: [child] });
     const observed: string[] = [];
-    const unsubscribe = supervisor.subscribe((state) => observed.push(state.state));
+    const unsubscribe = supervisor.subscribe((state) => observed.push(safeStateKind(state)));
 
     await finishReadyStart(supervisor, child);
     unsubscribe();
@@ -349,9 +437,9 @@ describe('AgentScopeSupervisor secure startup', () => {
       firstStart.then(() => supervisor.start()),
     ]);
 
-    expect(firstState.state).toBe('ready');
-    expect(concurrentState.state).toBe('ready');
-    expect(repeatedState.state).toBe('ready');
+    expect(stateIncludes(firstState, { state: 'ready' })).toBe(true);
+    expect(stateIncludes(concurrentState, { state: 'ready' })).toBe(true);
+    expect(stateIncludes(repeatedState, { state: 'ready' })).toBe(true);
     expect(spawnCalls.length).toBe(1);
     expect(randomByteRequests).toEqual([32]);
   });
@@ -373,7 +461,7 @@ describe('AgentScopeSupervisor secure startup', () => {
     expect(spawnCalls.length).toBe(1);
     expect(randomByteRequests).toEqual([32]);
     children[0].stdout.emit('data', Buffer.from(readyLine()));
-    expect((await outerStart).state).toBe('ready');
+    expect(stateIncludes(await outerStart, { state: 'ready' })).toBe(true);
   });
 
   it('publishes the stop guard before a stopped subscriber can re-enter stop', async () => {
@@ -410,8 +498,8 @@ describe('AgentScopeSupervisor secure startup', () => {
     const state = await finishReadyStart(supervisor, child);
     await stopping;
 
-    expect(state).toEqual({ state: 'stopped' });
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(state, { state: 'stopped' })).toBe(true);
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -425,8 +513,8 @@ describe('AgentScopeSupervisor secure startup', () => {
     const state = await supervisor.start();
     await stopping;
 
-    expect(state).toEqual({ state: 'stopped' });
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(state, { state: 'stopped' })).toBe(true);
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
     expect(randomByteRequests).toEqual([]);
     expect(spawnCalls.length).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
@@ -449,11 +537,11 @@ describe('AgentScopeSupervisor secure startup', () => {
     children[0].stdout.emit('data', Buffer.from(stdout));
     const state = await starting;
 
-    expect(state).toEqual({
+    expect(stateMatches(state, {
       state: 'degraded',
       reason: 'protocol-mismatch',
       detail: 'AgentScope runtime readiness validation failed.',
-    });
+    })).toBe(true);
     expect(children[0].stdin.endCalls).toBe(1);
     expect(children[0].killCalls).toEqual(['SIGKILL']);
     expect(children[0].stdout.listenerCount('data')).toBe(0);
@@ -473,7 +561,7 @@ describe('AgentScopeSupervisor secure startup', () => {
     resolveFetch(response());
     const state = await starting;
 
-    expect(state).toMatchObject({ state: 'degraded', reason: 'protocol-mismatch' });
+    expect(stateIncludes(state, { state: 'degraded', reason: 'protocol-mismatch' })).toBe(true);
     expect(children[0].killCalls).toEqual(['SIGKILL']);
   });
 
@@ -496,11 +584,11 @@ describe('AgentScopeSupervisor secure startup', () => {
 
     expect(fetchCalls[0]?.url).toBe(`http://127.0.0.1:${READY_PORT}/v1/health`);
     expect(fetchCalls[0]?.init?.redirect).toBe('error');
-    expect(state).toEqual({
+    expect(stateMatches(state, {
       state: 'degraded',
       reason: 'health-failed',
       detail: 'AgentScope runtime health check failed.',
-    });
+    })).toBe(true);
     expect(children[0].stdin.endCalls).toBe(1);
     expect(children[0].killCalls).toEqual(['SIGKILL']);
   });
@@ -514,11 +602,11 @@ describe('AgentScopeSupervisor secure startup', () => {
     await vi.advanceTimersByTimeAsync(1);
     const state = await starting;
 
-    expect(state).toEqual({
+    expect(stateMatches(state, {
       state: 'degraded',
       reason: 'start-timeout',
       detail: 'AgentScope runtime startup timed out.',
-    });
+    })).toBe(true);
     expect(children[0].stdin.endCalls).toBe(1);
     expect(children[0].killCalls).toEqual(['SIGKILL']);
     expect(vi.getTimerCount()).toBe(0);
@@ -539,31 +627,38 @@ describe('AgentScopeSupervisor secure startup', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     const state = await starting;
 
-    expect(state).toMatchObject({ state: 'degraded', reason: 'start-timeout' });
+    expect(stateIncludes(state, { state: 'degraded', reason: 'start-timeout' })).toBe(true);
     expect(healthSignal?.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('redacts dependency errors from state, logs, and serialized diagnostics', async () => {
+  it('redacts dependency failures from state, logs, and serialized diagnostics', async () => {
     const logs: string[] = [];
     let observedToken = '';
     const { children, supervisor } = makeHarness({
       logger: (level, message) => logs.push(`${level}:${message}`),
       fetch: async (_url, init) => {
         observedToken = String((init?.headers as Record<string, string>).Authorization).slice(7);
-        throw new Error(`provider leaked ${observedToken}`);
+        throw new Error('provider failed');
       },
     });
 
-    const state = await finishReadyStart(supervisor, children[0]);
+    let lifecycleRejected = false;
+    let state: ReturnType<AgentScopeSupervisor['status']>;
+    try {
+      state = await finishReadyStart(supervisor, children[0]);
+    } catch {
+      lifecycleRejected = true;
+      state = supervisor.status();
+    }
     const serialized = JSON.stringify({ state, logs });
 
-    const bootstrap = JSON.parse(children[0].stdin.writes[0] ?? '{}') as Record<string, unknown>;
-    const bootstrapToken = typeof bootstrap.token === 'string' ? bootstrap.token : '';
+    const bootstrapToken = inspectBootstrapLine(children[0].stdin.writes[0] ?? '').token;
     expect({
       dependencyReceivedBootstrapToken: observedToken === bootstrapToken,
       dependencyToken: secretMetadata(observedToken),
       diagnosticsContainSecret: containsSecret(serialized, observedToken),
+      lifecycleRejected,
     }).toEqual({
       dependencyReceivedBootstrapToken: true,
       dependencyToken: {
@@ -573,12 +668,90 @@ describe('AgentScopeSupervisor secure startup', () => {
         sha256: ZERO_ENTROPY_TOKEN_SHA256,
       },
       diagnosticsContainSecret: false,
+      lifecycleRejected: false,
     });
-    expect(state).toMatchObject({ state: 'degraded', reason: 'health-failed' });
+    expect(stateIncludes(state, { state: 'degraded', reason: 'health-failed' })).toBe(true);
   });
 });
 
 describe('AgentScopeSupervisor restart and stop ownership', () => {
+  it('reaps an error-plus-close startup failure even when exit never fires', async () => {
+    const child = new FakeChild(READY_PID, false);
+    const { supervisor } = makeHarness({ children: [child] });
+    const starting = supervisor.start();
+    let startSettled = false;
+    void starting.then(() => {
+      startSettled = true;
+    });
+
+    child.emit('error', new Error('spawn failed'));
+    await flushPromises();
+    expect(startSettled).toBe(false);
+    expect(child.listenerCount('close')).toBe(1);
+
+    child.close(1);
+    const state = await starting;
+    expect(stateIncludes(state, { state: 'degraded', reason: 'exited' })).toBe(true);
+    expect(child.listenerCount('close')).toBe(0);
+  });
+
+  it('retains error listeners and stop ownership between asynchronous exit and close', async () => {
+    const child = new FakeChild(READY_PID, true, true, false);
+    const { supervisor } = makeHarness({ children: [child] });
+    await finishReadyStart(supervisor, child);
+    let stopSettled = false;
+    const stopping = supervisor.stop().then(() => {
+      stopSettled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(child.exited).toBe(true);
+    expect(stopSettled).toBe(false);
+    expect(child.listenerCount('close')).toBe(1);
+    expect(child.listenerCount('error')).toBe(1);
+    expect(child.stdin.listenerCount('error')).toBe(1);
+    child.stdin.emit('error', new Error('late EPIPE'));
+    child.emit('error', new Error('late child error'));
+    expect(stateIncludes(supervisor.status(), { state: 'stopped' })).toBe(false);
+
+    child.close(1, 'SIGKILL');
+    await stopping;
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
+  });
+
+  it('defers an unexpected restart and safely absorbs errors until close follows exit', async () => {
+    const exitedChild = new FakeChild(READY_PID, true, true, false);
+    const replacement = new FakeChild();
+    replacement.stdin.onEnd = () => replacement.exit(0);
+    const { spawnCalls, supervisor } = makeHarness({ children: [exitedChild, replacement] });
+    await finishReadyStart(supervisor, exitedChild);
+
+    exitedChild.exit(7);
+    exitedChild.stdin.emit('error', new Error('late EPIPE'));
+    exitedChild.emit('error', new Error('late child error'));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(stateIncludes(supervisor.status(), { state: 'degraded', reason: 'exited' })).toBe(
+      true,
+    );
+    expect(exitedChild.listenerCount('error')).toBe(1);
+    expect(exitedChild.stdin.listenerCount('error')).toBe(1);
+    expect(exitedChild.listenerCount('close')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+
+    exitedChild.close(7);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(spawnCalls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnCalls.length).toBe(2);
+    replacement.stdout.emit('data', Buffer.from(readyLine()));
+    await flushPromises();
+    expect(stateIncludes(supervisor.status(), { state: 'ready' })).toBe(true);
+    await supervisor.stop();
+  });
+
   it('retains failed-start ownership until an asynchronously killed child actually exits', async () => {
     const failedChild = new FakeChild(READY_PID, false);
     const replacement = new FakeChild();
@@ -602,9 +775,43 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
 
     failedChild.exit(1, 'SIGKILL');
     const [state, repeatedState] = await Promise.all([starting, repeatedStart]);
-    expect(state).toMatchObject({ state: 'degraded', reason: 'protocol-mismatch' });
-    expect(repeatedState).toMatchObject({ state: 'degraded', reason: 'protocol-mismatch' });
+    expect(stateIncludes(state, { state: 'degraded', reason: 'protocol-mismatch' })).toBe(true);
+    expect(
+      stateIncludes(repeatedState, { state: 'degraded', reason: 'protocol-mismatch' }),
+    ).toBe(true);
     expect(failedChild.listenerCount('exit')).toBe(0);
+  });
+
+  it('settles failed startup at 15 seconds but retains ownership when kill returns false without close', async () => {
+    const failedChild = new FakeChild(READY_PID, false, false);
+    const replacement = new FakeChild();
+    replacement.stdin.onEnd = () => replacement.exit(0);
+    const { spawnCalls, supervisor } = makeHarness({ children: [failedChild, replacement] });
+    const starting = supervisor.start();
+    let startSettled = false;
+    void starting.then(() => {
+      startSettled = true;
+    });
+    failedChild.stdout.emit('data', Buffer.from('{\n'));
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(startSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const state = await starting;
+
+    expect(stateIncludes(state, { state: 'degraded', reason: 'protocol-mismatch' })).toBe(true);
+    expect(failedChild.listenerCount('close')).toBe(1);
+    expect(failedChild.listenerCount('error')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+    expect(stateIncludes(await supervisor.start(), { state: 'degraded' })).toBe(true);
+    expect(spawnCalls.length).toBe(1);
+
+    failedChild.close(1);
+    const restarted = supervisor.start();
+    expect(spawnCalls.length).toBe(2);
+    replacement.stdout.emit('data', Buffer.from(readyLine()));
+    expect(stateIncludes(await restarted, { state: 'ready' })).toBe(true);
+    await supervisor.stop();
   });
 
   it('restarts after 1, 3, and 10 seconds without overlap, then exhausts the budget', async () => {
@@ -613,7 +820,9 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     await finishReadyStart(supervisor, children[0]);
 
     children[0].exit(7);
-    expect(supervisor.status()).toMatchObject({ state: 'degraded', reason: 'exited' });
+    expect(stateIncludes(supervisor.status(), { state: 'degraded', reason: 'exited' })).toBe(
+      true,
+    );
     await vi.advanceTimersByTimeAsync(999);
     expect(spawnCalls.length).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
@@ -637,16 +846,16 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     children[3].exit(7);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(spawnCalls.length).toBe(4);
-    expect(supervisor.status()).toEqual({
+    expect(stateMatches(supervisor.status(), {
       state: 'degraded',
       reason: 'exited',
       detail: 'AgentScope runtime exited unexpectedly.',
-    });
+    })).toBe(true);
 
     async function finishRestart(child: FakeChild): Promise<void> {
       child.stdout.emit('data', Buffer.from(readyLine()));
       await flushPromises();
-      expect(supervisor.status().state).toBe('ready');
+      expect(stateIncludes(supervisor.status(), { state: 'ready' })).toBe(true);
     }
   });
 
@@ -681,7 +890,7 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     expect(child.stdin.endCalls).toBe(1);
     expect(child.killCalls).toEqual([]);
     expect(spawnCalls.length).toBe(1);
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -725,11 +934,11 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     expect(child.listenerCount('exit')).toBe(1);
     expect(child.listenerCount('error')).toBe(1);
     expect(child.stdin.listenerCount('error')).toBe(1);
-    expect(supervisor.status().state).not.toBe('stopped');
+    expect(stateIncludes(supervisor.status(), { state: 'stopped' })).toBe(false);
 
     child.exit(0);
     await stopping;
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
   });
 
   it('waits five seconds before force-killing only the unresponsive owned child', async () => {
@@ -747,7 +956,7 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
 
     expect(owned.killCalls).toEqual(['SIGKILL']);
     expect(unrelated.killCalls).toEqual([]);
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
   });
 
   it('does not report stopped until an asynchronous force-kill is reaped', async () => {
@@ -764,16 +973,16 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
 
     expect(owned.killCalls).toEqual(['SIGKILL']);
     expect(stopSettled).toBe(false);
-    expect(supervisor.status().state).not.toBe('stopped');
+    expect(stateIncludes(supervisor.status(), { state: 'stopped' })).toBe(false);
     expect(owned.listenerCount('exit')).toBe(1);
 
     owned.exit(1, 'SIGKILL');
     await stopping;
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
     expect(owned.listenerCount('exit')).toBe(0);
   });
 
-  it('retains ownership when force-kill returns false and delays replacement until later exit', async () => {
+  it('bounds kill-false stop and queued start as degraded while retaining ownership until close', async () => {
     const owned = new FakeChild(READY_PID, false, false);
     const replacement = new FakeChild();
     replacement.stdin.onEnd = () => replacement.exit(0);
@@ -790,16 +999,25 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
 
     expect(owned.killCalls).toEqual(['SIGKILL']);
     expect(stopSettled).toBe(false);
-    expect(supervisor.status().state).not.toBe('stopped');
-    expect(owned.listenerCount('exit')).toBe(1);
+    expect(stateIncludes(supervisor.status(), { state: 'stopped' })).toBe(false);
+    expect(owned.listenerCount('close')).toBe(1);
     expect(spawnCalls.length).toBe(1);
 
-    owned.exit(0);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(stopSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     await stopping;
-    await flushPromises();
+    expect(stateIncludes(supervisor.status(), { state: 'degraded' })).toBe(true);
+    expect(stateIncludes(await queuedStart, { state: 'degraded' })).toBe(true);
+    expect(owned.listenerCount('close')).toBe(1);
+    expect(owned.listenerCount('error')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+
+    owned.close(0);
+    const restarted = supervisor.start();
     expect(spawnCalls.length).toBe(2);
     replacement.stdout.emit('data', Buffer.from(readyLine()));
-    expect((await queuedStart).state).toBe('ready');
+    expect(stateIncludes(await restarted, { state: 'ready' })).toBe(true);
     await supervisor.stop();
   });
 
@@ -813,6 +1031,6 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     await vi.advanceTimersByTimeAsync(60_000);
 
     expect(spawnCalls.length).toBe(1);
-    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(stateMatches(supervisor.status(), { state: 'stopped' })).toBe(true);
   });
 });

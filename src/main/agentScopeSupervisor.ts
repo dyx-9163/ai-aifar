@@ -12,6 +12,7 @@ const MAX_BOOTSTRAP_BYTES = 16 * 1024;
 const MAX_READINESS_BYTES = 16 * 1024;
 const START_TIMEOUT_MS = 15_000;
 const STOP_TIMEOUT_MS = 5_000;
+const POST_KILL_CLOSE_TIMEOUT_MS = 1_000;
 const STABILITY_RESET_MS = 60_000;
 const RESTART_DELAYS_MS = [1_000, 3_000, 10_000] as const;
 
@@ -97,20 +98,22 @@ interface OwnedChild {
   readonly attempt: number;
   readonly completion: Promise<AgentScopeRuntimeState>;
   readonly resolveCompletion: (state: AgentScopeRuntimeState) => void;
-  readonly exitPromise: Promise<void>;
-  readonly resolveExit: () => void;
+  readonly closePromise: Promise<void>;
+  readonly resolveClose: () => void;
   readonly cancellationPromise: Promise<void>;
   readonly resolveCancellation: () => void;
   readonly abortController: AbortController;
   readonly onStdoutData: (chunk: unknown) => void;
   readonly onStdoutEnd: () => void;
   readonly onChildExit: (code: unknown, signal: unknown) => void;
+  readonly onChildClose: (code: unknown, signal: unknown) => void;
   readonly onChildError: (error: unknown) => void;
   readonly onStdinError: (error: unknown) => void;
   stdoutBytes: Buffer;
   readinessAccepted: boolean;
   ready: boolean;
   exited: boolean;
+  reaped: boolean;
   closed: boolean;
   intentional: boolean;
   failureInProgress: boolean;
@@ -120,6 +123,7 @@ interface OwnedChild {
   startupTimer?: TimerHandle;
   stabilityTimer?: TimerHandle;
   healthySince?: number;
+  startupDeadline: number;
 }
 
 function createDeferred<T>(): {
@@ -341,7 +345,7 @@ export class AgentScopeSupervisor {
     token: string,
   ): OwnedChild {
     const completion = createDeferred<AgentScopeRuntimeState>();
-    const exit = createDeferred<void>();
+    const close = createDeferred<void>();
     const cancellation = createDeferred<void>();
     const context = {} as OwnedChild;
     Object.assign(context, {
@@ -350,26 +354,30 @@ export class AgentScopeSupervisor {
       attempt,
       completion: completion.promise,
       resolveCompletion: completion.resolve,
-      exitPromise: exit.promise,
-      resolveExit: exit.resolve,
+      closePromise: close.promise,
+      resolveClose: close.resolve,
       cancellationPromise: cancellation.promise,
       resolveCancellation: cancellation.resolve,
       abortController: new AbortController(),
       onStdoutData: (chunk: unknown) => this.handleStdoutData(context, chunk),
       onStdoutEnd: () => this.handleStdoutEnd(context),
       onChildExit: (code: unknown, signal: unknown) => this.handleChildExit(context, code, signal),
+      onChildClose: (code: unknown, signal: unknown) =>
+        this.handleChildClose(context, code, signal),
       onChildError: (_error: unknown) => this.handleOwnedError(context),
       onStdinError: (_error: unknown) => this.handleOwnedError(context),
       stdoutBytes: Buffer.alloc(0),
       readinessAccepted: false,
       ready: false,
       exited: false,
+      reaped: false,
       closed: false,
       intentional: false,
       failureInProgress: false,
       completionSettled: false,
       cancellationSettled: false,
       token,
+      startupDeadline: this.dependencies.now() + START_TIMEOUT_MS,
     } satisfies Partial<OwnedChild>);
     return context;
   }
@@ -380,15 +388,17 @@ export class AgentScopeSupervisor {
     context.child.stdin.on('error', context.onStdinError);
     context.child.on('error', context.onChildError);
     context.child.on('exit', context.onChildExit);
+    context.child.on('close', context.onChildClose);
   }
 
   private detachChild(context: OwnedChild): void {
-    if (context.closed || !context.exited) return;
+    if (context.closed || !context.reaped) return;
     context.closed = true;
     this.cancelContextOperations(context);
     context.child.stdin.removeListener('error', context.onStdinError);
     context.child.removeListener('error', context.onChildError);
     context.child.removeListener('exit', context.onChildExit);
+    context.child.removeListener('close', context.onChildClose);
     if (this.ownedChild === context) this.ownedChild = undefined;
   }
 
@@ -411,6 +421,8 @@ export class AgentScopeSupervisor {
       this.ownedChild !== context ||
       context.intentional ||
       context.failureInProgress ||
+      context.exited ||
+      context.reaped ||
       !this.isCurrentGeneration(context.generation)
     ) {
       return;
@@ -511,7 +523,17 @@ export class AgentScopeSupervisor {
   private handleChildExit(context: OwnedChild, _code: unknown, _signal: unknown): void {
     if (context.exited) return;
     context.exited = true;
-    context.resolveExit();
+    this.cancelContextOperations(context);
+
+    if (context.intentional || context.failureInProgress || !this.isCurrentGeneration(context.generation)) return;
+
+    this.setDegraded('exited');
+  }
+
+  private handleChildClose(context: OwnedChild, _code: unknown, _signal: unknown): void {
+    if (context.reaped) return;
+    context.reaped = true;
+    context.resolveClose();
     this.cancelContextOperations(context);
 
     if (context.intentional || context.failureInProgress || !this.isCurrentGeneration(context.generation)) {
@@ -543,7 +565,10 @@ export class AgentScopeSupervisor {
         // Process termination errors are deliberately redacted and cannot change ownership.
       }
     }
-    if (!context.exited) await context.exitPromise;
+    if (!context.reaped) {
+      const remainingStartupMs = Math.max(0, context.startupDeadline - this.dependencies.now());
+      await this.waitForClose(context, remainingStartupMs);
+    }
     this.detachChild(context);
     this.settleCompletion(context, state);
   }
@@ -592,28 +617,35 @@ export class AgentScopeSupervisor {
       // EOF is best effort; the bounded force-kill path below still owns cleanup.
     }
 
-    if (!context.exited) await this.waitForExit(context, STOP_TIMEOUT_MS);
-    if (!context.exited) {
+    if (!context.reaped) await this.waitForClose(context, STOP_TIMEOUT_MS);
+    if (!context.reaped) {
       this.setDegraded('exited');
-      try {
-        context.child.kill('SIGKILL');
-      } catch {
-        // The supervisor still releases only this exact owned generation.
+      if (!context.exited) {
+        try {
+          context.child.kill('SIGKILL');
+        } catch {
+          // The supervisor still releases only this exact owned generation.
+        }
       }
+      if (!context.reaped) await this.waitForClose(context, POST_KILL_CLOSE_TIMEOUT_MS);
     }
-    if (!context.exited) await context.exitPromise;
     this.detachChild(context);
-    this.setState({ state: 'stopped' });
+    if (context.reaped) {
+      this.setState({ state: 'stopped' });
+      this.settleCompletion(context, this.status());
+      this.log('info', 'AgentScope runtime is stopped.');
+      return;
+    }
     this.settleCompletion(context, this.status());
-    this.log('info', 'AgentScope runtime is stopped.');
   }
 
-  private async waitForExit(context: OwnedChild, timeoutMs: number): Promise<void> {
+  private async waitForClose(context: OwnedChild, timeoutMs: number): Promise<void> {
+    if (context.reaped || timeoutMs <= 0) return;
     let timer: TimerHandle | undefined;
     const timeout = new Promise<void>((resolve) => {
       timer = this.dependencies.setTimeout(resolve, timeoutMs);
     });
-    await Promise.race([context.exitPromise, timeout]);
+    await Promise.race([context.closePromise, timeout]);
     this.clearTimer(timer);
   }
 
