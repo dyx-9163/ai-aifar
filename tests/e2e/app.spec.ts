@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -70,6 +70,113 @@ test('fake model server releases a controlled provider HTTP failure', async () =
     await expect(response.json()).resolves.toEqual({ error: { message: 'controlled failure' } });
   } finally {
     await server.close();
+  }
+});
+
+test('fake model server releases native tool call streams', async () => {
+  const server = await startFakeModelServer();
+  try {
+    const responsePromise = fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'task-9-fake', messages: [], stream: true }),
+    });
+
+    await expect.poll(() => server.requestCount()).toBe(1);
+    server.releaseNext([
+      { toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'notes.txt' } }] },
+    ]);
+
+    const response = await responsePromise;
+    expect(response.ok).toBe(true);
+    const body = await response.text();
+    // arguments JSON is split across two deltas so clients must accumulate fragments.
+    expect(body).toContain('"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"n"');
+    expect(body).toContain('"tool_calls":[{"index":0,"function":{"arguments":"otes.txt\\"}"');
+    expect(body).toContain('"finish_reason":"tool_calls"');
+    expect(body.trimEnd().endsWith('data: [DONE]')).toBe(true);
+  } finally {
+    await server.close();
+  }
+});
+
+test('app completes a native tool calling turn end to end', async () => {
+  const userData = createUserData('native-tools');
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'native-tools-workspace-'));
+  writeFileSync(join(workspaceRoot, 'notes.txt'), 'launch checklist: verify native tools');
+  const server = await startFakeModelServer();
+  let app: ElectronApplication | undefined;
+  try {
+    const databasePath = join(userData, 'app.sqlite');
+    const database = openDatabase(databasePath);
+    const workspace = database.registerWorkspace({
+      displayName: 'Native Tools',
+      rootPath: workspaceRoot,
+      canonicalRootPath: workspaceRoot,
+      trustLevel: 'read-write',
+    });
+    database.saveModelProfile({
+      name: 'Native fake model',
+      provider: 'openai-compatible',
+      baseUrl: server.baseUrl,
+      model: 'task-9-fake',
+      apiKey: `task9-${randomUUID()}`,
+      capabilities: {
+        text: true,
+        vision: false,
+        longContext: false,
+        reasoning: { inputMode: 'toggle', effortOptions: [], outputModes: ['raw'] },
+        concurrency: { defaultLimit: 1, configurable: true, maxLimit: 4 },
+        streaming: true,
+        usage: { tokens: true, reasoningTokens: true },
+        nativeTools: true,
+      },
+      reasoning: { mode: 'enabled', protocol: 'qwen', display: 'auto' },
+      maxConcurrency: 1,
+      isDefault: true,
+    });
+    const thread = database.createThread('Native tools', workspace.id);
+    database.close();
+
+    app = await launchPackagedApp(userData);
+    const page = await app.firstWindow();
+    await submitOnThread(page, thread.id, 'Read the workspace notes and answer.');
+
+    await expect.poll(() => server.requestCount()).toBe(1);
+    expect(server.requestBody(0)).toContain('"tool_choice":"auto"');
+    server.releaseNext([
+      { toolCalls: [{ id: 'call-notes', name: 'read_file', arguments: { path: 'notes.txt' } }] },
+    ]);
+
+    await expect.poll(() => server.requestCount()).toBe(2);
+    const secondBody = server.requestBody(1);
+    expect(secondBody).toContain('"role":"tool"');
+    expect(secondBody).toContain('"tool_call_id":"call-notes"');
+    expect(secondBody).toContain('verify native tools');
+    server.releaseNext([{ answer: 'Native tool loop finished.' }]);
+
+    const assistant = page.getByTestId('assistant-message').last();
+    await expect(assistant).toContainText('Native tool loop finished.');
+    const turnId = await assistant.getAttribute('data-turn-id');
+    expect(turnId).toBeTruthy();
+
+    const verifyDb = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const rows = verifyDb.prepare('SELECT payload FROM items WHERE turn_id = ?').all(turnId) as Array<{
+        payload: string;
+      }>;
+      const items = rows.map((row) => JSON.parse(row.payload) as Record<string, unknown>);
+      expect(items.filter((item) => item.kind === 'message' && item.role === 'assistant')).toHaveLength(1);
+      expect(items.some((item) => item.kind === 'loop' && item.loopKind === 'tool-calls')).toBe(true);
+      expect(items.some((item) => item.kind === 'loop' && item.loopKind === 'answer')).toBe(true);
+    } finally {
+      verifyDb.close();
+    }
+  } finally {
+    await closeElectron(app);
+    await server.close();
+    removeUserData(userData);
+    rmSync(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 

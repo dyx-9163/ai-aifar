@@ -1,10 +1,23 @@
 import { createServer, type ServerResponse } from 'node:http';
 
+export interface FakeToolCallPart {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 export interface FakeModelServer {
   baseUrl: string;
   requestCount(): number;
+  /** Raw JSON body of the completion request at the given index. */
+  requestBody(index: number): string;
   setConnectionState(state: FakeConnectionState): void;
-  releaseNext(parts: Array<{ answer?: string; rawReasoning?: string; summary?: string }>): void;
+  releaseNext(parts: Array<{
+    answer?: string;
+    rawReasoning?: string;
+    summary?: string;
+    toolCalls?: FakeToolCallPart[];
+  }>): void;
   failNext(status: number, body: unknown): void;
   close(): Promise<void>;
 }
@@ -22,6 +35,7 @@ interface PendingResponse {
 
 export async function startFakeModelServer(port = 0): Promise<FakeModelServer> {
   const pending: PendingResponse[] = [];
+  const bodies: string[] = [];
   let completionRequestCount = 0;
   let connectionState: FakeConnectionState = { modelIds: ['task-9-fake'], slots: 1 };
 
@@ -50,9 +64,13 @@ export async function startFakeModelServer(port = 0): Promise<FakeModelServer> {
       return;
     }
 
-    completionRequestCount += 1;
-    request.resume();
-    pending.push({ response });
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', () => {
+      completionRequestCount += 1;
+      bodies.push(Buffer.concat(chunks).toString('utf8'));
+      pending.push({ response });
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -72,6 +90,7 @@ export async function startFakeModelServer(port = 0): Promise<FakeModelServer> {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requestCount: () => completionRequestCount,
+    requestBody: (index) => bodies[index] ?? '',
     setConnectionState(state) {
       connectionState = { ...state };
     },
@@ -84,15 +103,35 @@ export async function startFakeModelServer(port = 0): Promise<FakeModelServer> {
         connection: 'close',
       });
       for (const part of parts) {
-        const delta: Record<string, string> = {};
+        const delta: Record<string, unknown> = {};
         if (part.answer !== undefined) delta.content = part.answer;
         if (part.rawReasoning !== undefined) delta.reasoning_content = part.rawReasoning;
         if (part.summary !== undefined) delta.reasoning_summary = part.summary;
         next.response.write(`data: ${JSON.stringify({ choices: [{ delta }] })}\n\n`);
+        for (const [offset, call] of (part.toolCalls ?? []).entries()) {
+          const serialized = JSON.stringify(call.arguments);
+          const midpoint = Math.ceil(serialized.length / 2);
+          next.response.write(`data: ${JSON.stringify({
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: offset,
+                  id: call.id,
+                  type: 'function',
+                  function: { name: call.name, arguments: serialized.slice(0, midpoint) },
+                }],
+              },
+            }],
+          })}\n\n`);
+          next.response.write(`data: ${JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: offset, function: { arguments: serialized.slice(midpoint) } }] } }],
+          })}\n\n`);
+        }
       }
+      const hasToolCalls = parts.some((part) => (part.toolCalls?.length ?? 0) > 0);
       const completionTokens = Math.max(1, parts.filter((part) => part.answer).length);
       next.response.write(`data: ${JSON.stringify({
-        choices: [{ delta: {}, finish_reason: 'stop' }],
+        choices: [{ delta: {}, finish_reason: hasToolCalls ? 'tool_calls' : 'stop' }],
         usage: {
           prompt_tokens: 3,
           completion_tokens: completionTokens,
