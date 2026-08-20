@@ -1,21 +1,59 @@
 import io
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import urllib.request
 
 import pytest
 
 from private_ai_agentscope import bootstrap
 
+
+class _BoundedLineReader:
+    def __init__(self, stream) -> None:
+        self._result: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
+        self._thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _read(self, stream) -> None:
+        try:
+            self._result.put(stream.readline())
+        except BaseException as error:
+            self._result.put(error)
+
+    def read(self, timeout: float) -> str:
+        try:
+            result = self._result.get(timeout=timeout)
+        except queue.Empty as error:
+            raise TimeoutError("ready line did not arrive before the timeout") from error
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def join(self) -> None:
+        self._thread.join(timeout=5)
+        assert not self._thread.is_alive()
+
 _WINDOWS_CONTROL_BREAK_WRAPPER = r'''
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
+
+result_queue = queue.Queue(maxsize=1)
+
+def read_ready_line(stream):
+    try:
+        result_queue.put(stream.readline())
+    except BaseException as error:
+        result_queue.put(error)
 
 process = subprocess.Popen(
     [sys.executable, "-m", "private_ai_agentscope.bootstrap"],
@@ -29,19 +67,30 @@ process = subprocess.Popen(
 try:
     process.stdin.write(os.environ["BOOTSTRAP_CONFIG"] + "\n")
     process.stdin.flush()
-    ready_line = process.stdout.readline()
-    os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+    reader = threading.Thread(target=read_ready_line, args=(process.stdout,), daemon=True)
+    reader.start()
+    try:
+        ready_line = result_queue.get(timeout=5)
+    except queue.Empty:
+        ready_line = ""
+        ready_timed_out = True
+    else:
+        ready_timed_out = False
+        if isinstance(ready_line, BaseException):
+            raise ready_line
+        os.kill(process.pid, signal.CTRL_BREAK_EVENT)
     try:
         returncode = process.wait(timeout=5)
-        timed_out = False
+        shutdown_timed_out = False
     except subprocess.TimeoutExpired:
-        timed_out = True
+        shutdown_timed_out = True
         process.kill()
         returncode = process.wait(timeout=5)
     print(json.dumps({
         "ready_line": ready_line,
+        "ready_timed_out": ready_timed_out,
         "returncode": returncode,
-        "timed_out": timed_out,
+        "shutdown_timed_out": shutdown_timed_out,
         "stdout_tail": process.stdout.read(),
         "stderr": process.stderr.read(),
     }))
@@ -49,6 +98,10 @@ finally:
     if process.poll() is None:
         process.kill()
         process.wait(timeout=5)
+    if 'reader' in locals():
+        reader.join(timeout=5)
+        if reader.is_alive():
+            raise RuntimeError("ready-line reader did not stop")
 '''
 
 
@@ -91,8 +144,12 @@ def _write_config(process: subprocess.Popen, token: str, tmp_path) -> None:
 
 def _read_ready(process: subprocess.Popen) -> tuple[str, dict]:
     assert process.stdout is not None
-    line = process.stdout.readline()
-    return line, json.loads(line)
+    reader = _BoundedLineReader(process.stdout)
+    try:
+        line = reader.read(timeout=5)
+        return line, json.loads(line)
+    finally:
+        reader.join()
 
 
 def test_bootstrap_emits_exactly_one_redacted_ready_line_and_stops_on_eof(tmp_path) -> None:
@@ -135,23 +192,28 @@ def test_bootstrap_stops_gracefully_on_supervisor_signal(tmp_path) -> None:
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
-        completed = subprocess.run(
+        wrapper = subprocess.Popen(
             [sys.executable, "-c", _WINDOWS_CONTROL_BREAK_WRAPPER],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=15,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
             startupinfo=startupinfo,
             env={**os.environ, "BOOTSTRAP_CONFIG": config},
         )
-        assert completed.returncode == 0
-        result = json.loads(completed.stdout)
-        assert json.loads(result["ready_line"])["type"] == "agentscope.ready"
-        assert result["returncode"] == 0
-        assert result["timed_out"] is False
-        assert result["stdout_tail"] == ""
-        assert token not in result["ready_line"]
-        assert token not in result["stderr"]
+        try:
+            stdout, _ = wrapper.communicate(timeout=15)
+            assert wrapper.returncode == 0
+            result = json.loads(stdout)
+            assert json.loads(result["ready_line"])["type"] == "agentscope.ready"
+            assert result["returncode"] == 0
+            assert result["ready_timed_out"] is False
+            assert result["shutdown_timed_out"] is False
+            assert result["stdout_tail"] == ""
+            assert token not in result["ready_line"]
+            assert token not in result["stderr"]
+        finally:
+            _stop_process(wrapper)
         return
 
     process = _start_bootstrap()
@@ -190,6 +252,34 @@ def test_bootstrap_rejects_malformed_or_oversized_input_without_echoing_it(
         assert secret not in stderr
     finally:
         _stop_process(process)
+
+
+def test_bounded_ready_read_cleans_up_a_bootstrap_process_that_never_emits_ready() -> None:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import private_ai_agentscope.bootstrap; import time; time.sleep(60)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    assert process.stdout is not None
+    reader = None
+    try:
+        reader = _BoundedLineReader(process.stdout)
+        with pytest.raises(TimeoutError, match="ready line"):
+            reader.read(timeout=0.1)
+        assert process.poll() is None
+    finally:
+        _stop_process(process)
+        if reader is not None:
+            reader.join()
+
+    assert process.returncode is not None
 
 
 @pytest.mark.asyncio
