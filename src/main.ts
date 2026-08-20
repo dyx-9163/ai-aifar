@@ -1,6 +1,17 @@
 import { app, BrowserWindow, ipcMain, MessageChannelMain, shell, utilityProcess } from 'electron';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AgentRequestBroker, type AgentReply } from './main/agentRequestBroker.js';
+import { buildAppHealth } from './main/appHealth.js';
+import {
+  parseRuntimeManifest,
+  type AgentScopeRuntimeState,
+} from './main/agentScopeProtocol.js';
+import {
+  resolveAgentScopeRuntimePaths,
+  resolveAgentScopeRuntimeRoot,
+} from './main/agentScopeRuntimePaths.js';
+import { AgentScopeSupervisor } from './main/agentScopeSupervisor.js';
 import { isAgentEvent, isDesktopRequest, type DesktopRequest } from './shared/protocol.js';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -15,6 +26,18 @@ let mainWindow: BrowserWindow | null = null;
 let agentProcess: Electron.UtilityProcess | null = null;
 let agentPort: Electron.MessagePortMain | null = null;
 const agentRequests = new AgentRequestBroker(30_000);
+let agentScopeState: AgentScopeRuntimeState = { state: 'stopped' };
+let agentScopeSupervisor: AgentScopeSupervisor | null = null;
+let agentScopeStartup: Promise<void> | null = null;
+let agentScopeShutdown: Promise<void> | null = null;
+let agentScopeStopping = false;
+let allowFinalQuit = false;
+let unsubscribeAgentScope: (() => void) | null = null;
+
+const AGENTSCOPE_DEGRADED_DETAILS = {
+  'missing-runtime': 'AgentScope runtime is unavailable.',
+  'invalid-manifest': 'AgentScope runtime manifest validation failed.',
+} as const;
 
 function startAgentRuntime(): void {
   if (agentProcess) {
@@ -96,8 +119,7 @@ async function createWindow(): Promise<void> {
 }
 
 ipcMain.handle('app:health', () => ({
-  ok: true as const,
-  version: app.getVersion(),
+  ...buildAppHealth(app.getVersion(), agentScopeState),
 }));
 
 ipcMain.handle('desktop:request', async (_event, request: unknown) => {
@@ -108,6 +130,7 @@ ipcMain.handle('desktop:request', async (_event, request: unknown) => {
 });
 
 app.whenReady().then(async () => {
+  agentScopeStartup = initializeAgentScopeRuntime();
   await createWindow();
 
   app.on('activate', () => {
@@ -123,10 +146,110 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   stopAgentRuntime('Application is quitting.', true);
   mainWindow = null;
+  if (allowFinalQuit) {
+    return;
+  }
+
+  event.preventDefault();
+  void stopAgentScopeRuntime().finally(() => {
+    allowFinalQuit = true;
+    app.quit();
+  });
 });
+
+async function initializeAgentScopeRuntime(): Promise<void> {
+  const runtimeRoot = resolveAgentScopeRuntimeRoot({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    appPath: app.getAppPath(),
+  });
+  const manifestPath = path.resolve(runtimeRoot, 'runtime-manifest.json');
+
+  let manifestText: string;
+  try {
+    manifestText = await readFile(manifestPath, 'utf8');
+  } catch (error) {
+    setAgentScopeUnavailable(isMissingFileError(error) ? 'missing-runtime' : 'invalid-manifest');
+    return;
+  }
+
+  let runtimePaths;
+  try {
+    const manifest = parseRuntimeManifest(JSON.parse(manifestText) as unknown);
+    runtimePaths = resolveAgentScopeRuntimePaths({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    }, manifest);
+  } catch {
+    setAgentScopeUnavailable('invalid-manifest');
+    return;
+  }
+
+  try {
+    const supervisor = new AgentScopeSupervisor({
+      runtimePaths,
+      userDataDir: app.getPath('userData'),
+      logDir: path.join(app.getPath('userData'), 'agentscope-logs'),
+    });
+    agentScopeSupervisor = supervisor;
+    agentScopeState = supervisor.status();
+    unsubscribeAgentScope = supervisor.subscribe((state) => {
+      agentScopeState = state;
+    });
+
+    if (agentScopeStopping) {
+      await supervisor.stop();
+      return;
+    }
+    agentScopeState = await supervisor.start();
+  } catch {
+    agentScopeState = {
+      state: 'degraded',
+      reason: 'exited',
+      detail: 'AgentScope runtime exited unexpectedly.',
+    };
+  }
+}
+
+function stopAgentScopeRuntime(): Promise<void> {
+  if (agentScopeShutdown) {
+    return agentScopeShutdown;
+  }
+
+  agentScopeStopping = true;
+  agentScopeShutdown = (async () => {
+    if (!agentScopeSupervisor && agentScopeStartup) {
+      await agentScopeStartup;
+    }
+    await agentScopeSupervisor?.stop();
+    unsubscribeAgentScope?.();
+    unsubscribeAgentScope = null;
+  })();
+  return agentScopeShutdown;
+}
+
+function setAgentScopeUnavailable(
+  reason: keyof typeof AGENTSCOPE_DEGRADED_DETAILS,
+): void {
+  agentScopeState = {
+    state: 'degraded',
+    reason,
+    detail: AGENTSCOPE_DEGRADED_DETAILS[reason],
+  };
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ENOENT'
+  );
+}
 
 function sendAgentRequest(request: DesktopRequest): Promise<unknown> {
   return agentRequests.request(request);

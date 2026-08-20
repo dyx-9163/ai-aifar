@@ -15,12 +15,13 @@ import type {
   WorkspaceTrustLevel,
 } from '../shared/domain';
 import type { AgentEvent } from '../shared/protocol';
+import type { DesktopHealth } from '../main/appHealth';
 
 declare global {
   interface Window {
     desktop: {
       supportsTurnAttachments?: boolean;
-      health(): Promise<{ ok: true; version: string }>;
+      health(): Promise<DesktopHealth>;
       getSnapshot(): Promise<AppSnapshot>;
       createThread(title: string, workspaceId?: string): Promise<ThreadSummary>;
       deleteThread(threadId: string): Promise<void>;

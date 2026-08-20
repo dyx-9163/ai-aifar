@@ -1,10 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { DesktopHealth } from './main/appHealth.js';
 import type { LanguagePreference, ModelConnectionResult, ModelProfileInput, RuntimeSettingsInput, TurnAttachment, TurnRollbackReport, WorkspaceRecord, WorkspaceTrustLevel } from './shared/domain.js';
 import type { AgentEvent } from './shared/protocol.js';
 
 contextBridge.exposeInMainWorld('desktop', {
   supportsTurnAttachments: true,
-  health: () => ipcRenderer.invoke('app:health'),
+  health: (): Promise<DesktopHealth> => ipcRenderer.invoke('app:health'),
   getSnapshot: () => ipcRenderer.invoke('desktop:request', { type: 'snapshot.get' }),
   createThread: (title: string, workspaceId?: string) => ipcRenderer.invoke('desktop:request', { type: 'thread.create', title, workspaceId }),
   deleteThread: (threadId: string) => ipcRenderer.invoke('desktop:request', { type: 'thread.delete', threadId }),
