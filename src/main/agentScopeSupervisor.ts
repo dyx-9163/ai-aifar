@@ -496,7 +496,12 @@ export class AgentScopeSupervisor {
         throw new Error('Health validation failed.');
       }
     } catch {
-      if (this.isActiveContext(context) && !context.failureInProgress) {
+      if (
+        this.isActiveContext(context) &&
+        !context.failureInProgress &&
+        !context.exited &&
+        !context.reaped
+      ) {
         await this.failContext(context, 'health-failed');
       }
       return;
@@ -527,7 +532,7 @@ export class AgentScopeSupervisor {
 
     if (context.intentional || context.failureInProgress || !this.isCurrentGeneration(context.generation)) return;
 
-    this.setDegraded('exited');
+    this.settleCompletion(context, this.setDegraded('exited'));
   }
 
   private handleChildClose(context: OwnedChild, _code: unknown, _signal: unknown): void {

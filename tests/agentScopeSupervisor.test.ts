@@ -695,6 +695,87 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     expect(child.listenerCount('close')).toBe(0);
   });
 
+  it('settles coalesced and queued starts on exit before readiness while retaining ownership until close', async () => {
+    const exitedChild = new FakeChild(READY_PID, true, true, false);
+    const replacement = new FakeChild();
+    replacement.stdin.onEnd = () => replacement.exit(0);
+    const { spawnCalls, supervisor } = makeHarness({ children: [exitedChild, replacement] });
+    const starting = supervisor.start();
+    const coalescedStart = supervisor.start();
+    const queuedStart = starting.then(() => supervisor.start());
+
+    exitedChild.exit(7);
+    const [state, coalescedState, queuedState] = await Promise.all([
+      starting,
+      coalescedStart,
+      queuedStart,
+    ]);
+
+    for (const observed of [state, coalescedState, queuedState]) {
+      expect(stateMatches(observed, {
+        state: 'degraded',
+        reason: 'exited',
+        detail: 'AgentScope runtime exited unexpectedly.',
+      })).toBe(true);
+    }
+    expect(exitedChild.listenerCount('close')).toBe(1);
+    expect(exitedChild.listenerCount('error')).toBe(1);
+    expect(exitedChild.stdin.listenerCount('error')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(spawnCalls.length).toBe(1);
+
+    exitedChild.close(7);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(spawnCalls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnCalls.length).toBe(2);
+    replacement.stdout.emit('data', Buffer.from(readyLine()));
+    await flushPromises();
+    expect(stateIncludes(supervisor.status(), { state: 'ready' })).toBe(true);
+    await supervisor.stop();
+  });
+
+  it('settles exited startup during unresolved health without waiting for close', async () => {
+    const exitedChild = new FakeChild(READY_PID, true, true, false);
+    let healthSignal: AbortSignal | undefined;
+    const { spawnCalls, supervisor } = makeHarness({
+      children: [exitedChild],
+      fetch: async (_url, init) => {
+        healthSignal = init?.signal ?? undefined;
+        return new Promise<FakeResponse>(() => undefined);
+      },
+    });
+    const starting = supervisor.start();
+    const coalescedStart = supervisor.start();
+    exitedChild.stdout.emit('data', Buffer.from(readyLine()));
+    await flushPromises();
+
+    exitedChild.exit(9);
+    const [state, coalescedState] = await Promise.all([starting, coalescedStart]);
+
+    expect(stateMatches(state, {
+      state: 'degraded',
+      reason: 'exited',
+      detail: 'AgentScope runtime exited unexpectedly.',
+    })).toBe(true);
+    expect(stateMatches(coalescedState, {
+      state: 'degraded',
+      reason: 'exited',
+      detail: 'AgentScope runtime exited unexpectedly.',
+    })).toBe(true);
+    expect(healthSignal?.aborted).toBe(true);
+    expect(exitedChild.listenerCount('close')).toBe(1);
+    expect(exitedChild.listenerCount('error')).toBe(1);
+    expect(exitedChild.stdin.listenerCount('error')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(spawnCalls.length).toBe(1);
+    exitedChild.close(9);
+    await supervisor.stop();
+  });
+
   it('retains error listeners and stop ownership between asynchronous exit and close', async () => {
     const child = new FakeChild(READY_PID, true, true, false);
     const { supervisor } = makeHarness({ children: [child] });
