@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from private_ai_agentscope.protocol import (
     AGENTSCOPE_VERSION,
     PROTOCOL_VERSION,
@@ -5,6 +7,12 @@ from private_ai_agentscope.protocol import (
     BootstrapConfig,
     BootstrapReady,
 )
+
+
+def test_python_runtime_is_pinned_to_3_11_16() -> None:
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+
+    assert 'requires-python = "==3.11.16"' in pyproject.read_text()
 
 
 def test_bootstrap_contract_is_versioned_and_redacted() -> None:
