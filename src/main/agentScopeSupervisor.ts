@@ -209,34 +209,40 @@ export class AgentScopeSupervisor {
     this.dependencies = { ...defaultDependencies(), ...options.dependencies };
   }
 
-  async start(): Promise<AgentScopeRuntimeState> {
-    if (this.stopPromise) await this.stopPromise;
-    if (this.runtimeState.state === 'ready') return this.status();
+  start(): Promise<AgentScopeRuntimeState> {
+    if (this.stopPromise) return this.stopPromise.then(() => this.start());
+    if (this.runtimeState.state === 'ready') return Promise.resolve(this.status());
     if (this.startPromise) return this.startPromise;
-    if (this.ownedChild || this.restartTimer !== undefined) return this.status();
+    if (this.ownedChild || this.restartTimer !== undefined) return Promise.resolve(this.status());
 
-    this.desiredRunning = true;
-    this.restartCursor = 0;
-    const generation = ++this.generation;
-    const operation = this.launch(generation, 1);
-    const guarded = operation.finally(() => {
+    const completion = createDeferred<AgentScopeRuntimeState>();
+    const guarded = completion.promise.finally(() => {
       if (this.startPromise === guarded) this.startPromise = undefined;
     });
     this.startPromise = guarded;
+    this.desiredRunning = true;
+    this.restartCursor = 0;
+    const generation = ++this.generation;
+    void this.launch(generation, 1).then(
+      completion.resolve,
+      () => completion.resolve(this.setDegraded('exited')),
+    );
     return guarded;
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.desiredRunning = false;
-    ++this.generation;
-    this.clearRestartTimer();
-
-    const operation = this.performStop();
-    const guarded = operation.finally(() => {
+    const completion = createDeferred<void>();
+    const guarded = completion.promise.finally(() => {
       if (this.stopPromise === guarded) this.stopPromise = undefined;
     });
     this.stopPromise = guarded;
+    this.desiredRunning = false;
+    ++this.generation;
+    this.clearRestartTimer();
+    void this.performStop().then(completion.resolve, () => {
+      if (!this.ownedChild) completion.resolve();
+    });
     return guarded;
   }
 
@@ -352,8 +358,8 @@ export class AgentScopeSupervisor {
       onStdoutData: (chunk: unknown) => this.handleStdoutData(context, chunk),
       onStdoutEnd: () => this.handleStdoutEnd(context),
       onChildExit: (code: unknown, signal: unknown) => this.handleChildExit(context, code, signal),
-      onChildError: (_error: unknown) => void this.failContext(context, 'exited'),
-      onStdinError: (_error: unknown) => void this.failContext(context, 'exited'),
+      onChildError: (_error: unknown) => this.handleOwnedError(context),
+      onStdinError: (_error: unknown) => this.handleOwnedError(context),
       stdoutBytes: Buffer.alloc(0),
       readinessAccepted: false,
       ready: false,
@@ -377,8 +383,16 @@ export class AgentScopeSupervisor {
   }
 
   private detachChild(context: OwnedChild): void {
-    if (context.closed) return;
+    if (context.closed || !context.exited) return;
     context.closed = true;
+    this.cancelContextOperations(context);
+    context.child.stdin.removeListener('error', context.onStdinError);
+    context.child.removeListener('error', context.onChildError);
+    context.child.removeListener('exit', context.onChildExit);
+    if (this.ownedChild === context) this.ownedChild = undefined;
+  }
+
+  private cancelContextOperations(context: OwnedChild): void {
     context.abortController.abort();
     if (!context.cancellationSettled) {
       context.cancellationSettled = true;
@@ -386,13 +400,22 @@ export class AgentScopeSupervisor {
     }
     context.child.stdout.removeListener('data', context.onStdoutData);
     context.child.stdout.removeListener('end', context.onStdoutEnd);
-    context.child.stdin.removeListener('error', context.onStdinError);
-    context.child.removeListener('error', context.onChildError);
-    context.child.removeListener('exit', context.onChildExit);
     this.clearContextTimers(context);
     context.stdoutBytes = Buffer.alloc(0);
     context.token = '';
-    if (this.ownedChild === context) this.ownedChild = undefined;
+  }
+
+  private handleOwnedError(context: OwnedChild): void {
+    if (
+      context.closed ||
+      this.ownedChild !== context ||
+      context.intentional ||
+      context.failureInProgress ||
+      !this.isCurrentGeneration(context.generation)
+    ) {
+      return;
+    }
+    void this.failContext(context, 'exited');
   }
 
   private handleStdoutData(context: OwnedChild, input: unknown): void {
@@ -489,7 +512,7 @@ export class AgentScopeSupervisor {
     if (context.exited) return;
     context.exited = true;
     context.resolveExit();
-    this.clearContextTimers(context);
+    this.cancelContextOperations(context);
 
     if (context.intentional || context.failureInProgress || !this.isCurrentGeneration(context.generation)) {
       this.detachChild(context);
@@ -505,8 +528,7 @@ export class AgentScopeSupervisor {
   private async failContext(context: OwnedChild, reason: DegradedReason): Promise<void> {
     if (context.failureInProgress || context.closed) return;
     context.failureInProgress = true;
-    context.token = '';
-    this.clearContextTimers(context);
+    this.cancelContextOperations(context);
     const state = this.setDegraded(reason);
     this.log('warn', 'AgentScope runtime startup failed.');
     try {
@@ -521,6 +543,7 @@ export class AgentScopeSupervisor {
         // Process termination errors are deliberately redacted and cannot change ownership.
       }
     }
+    if (!context.exited) await context.exitPromise;
     this.detachChild(context);
     this.settleCompletion(context, state);
   }
@@ -562,7 +585,7 @@ export class AgentScopeSupervisor {
     }
 
     context.intentional = true;
-    this.clearContextTimers(context);
+    this.cancelContextOperations(context);
     try {
       context.child.stdin.end();
     } catch {
@@ -571,12 +594,14 @@ export class AgentScopeSupervisor {
 
     if (!context.exited) await this.waitForExit(context, STOP_TIMEOUT_MS);
     if (!context.exited) {
+      this.setDegraded('exited');
       try {
         context.child.kill('SIGKILL');
       } catch {
         // The supervisor still releases only this exact owned generation.
       }
     }
+    if (!context.exited) await context.exitPromise;
     this.detachChild(context);
     this.setState({ state: 'stopped' });
     this.settleCompletion(context, this.status());

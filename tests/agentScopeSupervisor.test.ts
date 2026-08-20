@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -9,7 +10,8 @@ import {
 } from '../src/main/agentScopeSupervisor';
 import type { AgentScopeRuntimePaths } from '../src/main/agentScopeRuntimePaths';
 
-const EXPECTED_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const ZERO_ENTROPY_TOKEN_SHA256 =
+  '0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a';
 const READY_PORT = 49152;
 const READY_PID = 4242;
 
@@ -30,6 +32,72 @@ const validHealth = () => ({
   runtime_version: '1.0.0',
   agentscope_version: '2.0.6',
 });
+
+function secretMetadata(secret: string) {
+  const decoded = Buffer.from(secret, 'base64url');
+  return {
+    characterLength: secret.length,
+    decodedByteLength: decoded.byteLength,
+    canonicalBase64Url: decoded.toString('base64url') === secret,
+    sha256: createHash('sha256').update(secret).digest('hex'),
+  };
+}
+
+function containsSecret(value: unknown, secret: string): boolean {
+  return secret.length > 0 && JSON.stringify(value).includes(secret);
+}
+
+function sanitizeSpawnCall(
+  call: { command: string; args: readonly string[]; options: Record<string, unknown> } | undefined,
+  secret: string,
+) {
+  const env = call?.options.env as Record<string, string> | undefined;
+  return {
+    commandMatches: call?.command === runtimePaths.pythonPath,
+    argsMatch:
+      call?.args.length === 2 &&
+      call.args[0] === '-m' &&
+      call.args[1] === 'private_ai_agentscope.bootstrap',
+    shellDisabled: call?.options.shell === false,
+    windowHidden: call?.options.windowsHide === true,
+    stdioMatches:
+      Array.isArray(call?.options.stdio) &&
+      call.options.stdio.length === 3 &&
+      call.options.stdio[0] === 'pipe' &&
+      call.options.stdio[1] === 'pipe' &&
+      call.options.stdio[2] === 'ignore',
+    environmentMatches:
+      env !== undefined &&
+      Object.keys(env).length === 5 &&
+      env.PYTHONPATH ===
+        `${runtimePaths.applicationPath}${path.delimiter}${runtimePaths.sitePackagesPath}` &&
+      env.PYTHONNOUSERSITE === '1' &&
+      env.PYTHONDONTWRITEBYTECODE === '1' &&
+      env.PYTHONUTF8 === '1' &&
+      env.PYTHONUNBUFFERED === '1' &&
+      !Object.hasOwn(env, 'PYTHONHOME'),
+    containsSecret: containsSecret(call, secret),
+  };
+}
+
+function sanitizeFetchCall(
+  call: { url: string; init: RequestInit | undefined } | undefined,
+  bootstrapToken: string,
+) {
+  const authorization = new Headers(call?.init?.headers).get('Authorization') ?? '';
+  const bearerPrefix = 'Bearer ';
+  const authorizationToken = authorization.startsWith(bearerPrefix)
+    ? authorization.slice(bearerPrefix.length)
+    : '';
+  return {
+    urlMatches: call?.url === `http://127.0.0.1:${READY_PORT}/v1/health`,
+    redirectBlocked: call?.init?.redirect === 'error',
+    hasAbortSignal: call?.init?.signal instanceof AbortSignal,
+    bearerScheme: authorization.startsWith(bearerPrefix),
+    matchesBootstrapToken: authorizationToken === bootstrapToken,
+    authorizationToken: secretMetadata(authorizationToken),
+  };
+}
 
 class FakeStdin extends EventEmitter {
   readonly writes: string[] = [];
@@ -58,14 +126,17 @@ class FakeChild extends EventEmitter implements AgentScopeChildProcess {
   constructor(
     readonly pid: number = READY_PID,
     private readonly exitWhenKilled = true,
+    private readonly killResult = true,
   ) {
     super();
   }
 
   kill(signal?: NodeJS.Signals | number): boolean {
     this.killCalls.push(signal);
-    if (this.exitWhenKilled) this.exit(1, typeof signal === 'number' ? null : (signal ?? null));
-    return true;
+    if (this.killResult && this.exitWhenKilled) {
+      this.exit(1, typeof signal === 'number' ? null : (signal ?? null));
+    }
+    return this.killResult;
   }
 
   exit(code = 0, signal: NodeJS.Signals | null = null): void {
@@ -184,32 +255,42 @@ describe('AgentScopeSupervisor secure startup', () => {
     const state = await finishReadyStart(supervisor, children[0]);
 
     expect(randomByteRequests).toEqual([32]);
-    expect(children[0].stdin.writes).toHaveLength(1);
-    expect(children[0].stdin.writes[0].endsWith('\n')).toBe(true);
-    expect(Buffer.byteLength(children[0].stdin.writes[0], 'utf8')).toBeLessThanOrEqual(16 * 1024);
-    expect(JSON.parse(children[0].stdin.writes[0])).toEqual({
-      token: EXPECTED_TOKEN,
-      user_data_dir: path.resolve('C:\\PrivateAI\\user-data'),
-      log_dir: path.resolve('C:\\PrivateAI\\logs'),
-    });
-    expect(spawnCalls).toEqual([
-      {
-        command: runtimePaths.pythonPath,
-        args: ['-m', 'private_ai_agentscope.bootstrap'],
-        options: {
-          shell: false,
-          windowsHide: true,
-          stdio: ['pipe', 'pipe', 'ignore'],
-          env: {
-            PYTHONPATH: `${runtimePaths.applicationPath}${path.delimiter}${runtimePaths.sitePackagesPath}`,
-            PYTHONNOUSERSITE: '1',
-            PYTHONDONTWRITEBYTECODE: '1',
-            PYTHONUTF8: '1',
-            PYTHONUNBUFFERED: '1',
-          },
-        },
+    expect(children[0].stdin.writes.length).toBe(1);
+    const bootstrapLine = children[0].stdin.writes[0] ?? '';
+    const decodedBootstrap = JSON.parse(bootstrapLine) as Record<string, unknown>;
+    const bootstrapToken = typeof decodedBootstrap.token === 'string' ? decodedBootstrap.token : '';
+    const { token: _token, ...nonSecretBootstrap } = decodedBootstrap;
+    expect({
+      endsWithNewline: bootstrapLine.endsWith('\n'),
+      bounded: Buffer.byteLength(bootstrapLine, 'utf8') <= 16 * 1024,
+      nonSecretBootstrap,
+      token: secretMetadata(bootstrapToken),
+    }).toEqual({
+      endsWithNewline: true,
+      bounded: true,
+      nonSecretBootstrap: {
+        user_data_dir: path.resolve('C:\\PrivateAI\\user-data'),
+        log_dir: path.resolve('C:\\PrivateAI\\logs'),
       },
-    ]);
+      token: {
+        characterLength: 43,
+        decodedByteLength: 32,
+        canonicalBase64Url: true,
+        sha256: ZERO_ENTROPY_TOKEN_SHA256,
+      },
+    });
+    expect(spawnCalls.length).toBe(1);
+    const sanitizedSpawn = sanitizeSpawnCall(spawnCalls[0], bootstrapToken);
+    expect(containsSecret(sanitizedSpawn, bootstrapToken)).toBe(false);
+    expect(sanitizedSpawn).toEqual({
+      commandMatches: true,
+      argsMatch: true,
+      shellDisabled: true,
+      windowHidden: true,
+      stdioMatches: true,
+      environmentMatches: true,
+      containsSecret: false,
+    });
     expect(state).toEqual({
       state: 'ready',
       pid: READY_PID,
@@ -217,19 +298,26 @@ describe('AgentScopeSupervisor secure startup', () => {
       runtimeVersion: '1.0.0',
       agentScopeVersion: '2.0.6',
     });
-    expect(fetchCalls).toEqual([
-      {
-        url: `http://127.0.0.1:${READY_PORT}/v1/health`,
-        init: {
-          headers: { Authorization: `Bearer ${EXPECTED_TOKEN}` },
-          redirect: 'error',
-          signal: expect.any(AbortSignal),
-        },
+    expect(fetchCalls.length).toBe(1);
+    const sanitizedFetch = sanitizeFetchCall(fetchCalls[0], bootstrapToken);
+    expect(containsSecret(sanitizedFetch, bootstrapToken)).toBe(false);
+    expect(sanitizedFetch).toEqual({
+      urlMatches: true,
+      redirectBlocked: true,
+      hasAbortSignal: true,
+      bearerScheme: true,
+      matchesBootstrapToken: true,
+      authorizationToken: {
+        characterLength: 43,
+        decodedByteLength: 32,
+        canonicalBase64Url: true,
+        sha256: ZERO_ENTROPY_TOKEN_SHA256,
       },
-    ]);
-    expect(JSON.stringify(spawnCalls)).not.toContain(EXPECTED_TOKEN);
-    expect(JSON.stringify(state)).not.toContain(EXPECTED_TOKEN);
-    expect(logs.join('\n')).not.toContain(EXPECTED_TOKEN);
+    });
+    expect({
+      stateContainsSecret: containsSecret(state, bootstrapToken),
+      logsContainSecret: containsSecret(logs, bootstrapToken),
+    }).toEqual({ stateContainsSecret: false, logsContainSecret: false });
   });
 
   it('notifies active subscribers of transitions and honors unsubscribe', async () => {
@@ -252,7 +340,7 @@ describe('AgentScopeSupervisor secure startup', () => {
 
     const firstStart = supervisor.start();
     const concurrentStart = supervisor.start();
-    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls.length).toBe(1);
     children[0].stdout.emit('data', Buffer.from(readyLine()));
 
     const [firstState, concurrentState, repeatedState] = await Promise.all([
@@ -264,8 +352,50 @@ describe('AgentScopeSupervisor secure startup', () => {
     expect(firstState.state).toBe('ready');
     expect(concurrentState.state).toBe('ready');
     expect(repeatedState.state).toBe('ready');
-    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls.length).toBe(1);
     expect(randomByteRequests).toEqual([32]);
+  });
+
+  it('publishes the start guard before a starting subscriber can re-enter start', async () => {
+    const { children, randomByteRequests, spawnCalls, supervisor } = makeHarness();
+    let reentrantStart: Promise<ReturnType<AgentScopeSupervisor['status']>> | undefined;
+    let didReenter = false;
+    supervisor.subscribe((state) => {
+      if (state.state === 'starting' && !didReenter) {
+        didReenter = true;
+        reentrantStart = supervisor.start();
+      }
+    });
+
+    const outerStart = supervisor.start();
+
+    expect(reentrantStart).toBe(outerStart);
+    expect(spawnCalls.length).toBe(1);
+    expect(randomByteRequests).toEqual([32]);
+    children[0].stdout.emit('data', Buffer.from(readyLine()));
+    expect((await outerStart).state).toBe('ready');
+  });
+
+  it('publishes the stop guard before a stopped subscriber can re-enter stop', async () => {
+    const { supervisor } = makeHarness();
+    let stoppedNotifications = 0;
+    let reentrantStop: Promise<void> | undefined;
+    let didReenter = false;
+    supervisor.subscribe((state) => {
+      if (state.state === 'stopped') {
+        stoppedNotifications += 1;
+        if (!didReenter) {
+          didReenter = true;
+          reentrantStop = supervisor.stop();
+        }
+      }
+    });
+
+    const outerStop = supervisor.stop();
+
+    expect(reentrantStop).toBe(outerStop);
+    await outerStop;
+    expect(stoppedNotifications).toBe(1);
   });
 
   it('does not leave a stability timer when a subscriber stops during the ready transition', async () => {
@@ -298,7 +428,7 @@ describe('AgentScopeSupervisor secure startup', () => {
     expect(state).toEqual({ state: 'stopped' });
     expect(supervisor.status()).toEqual({ state: 'stopped' });
     expect(randomByteRequests).toEqual([]);
-    expect(spawnCalls).toHaveLength(0);
+    expect(spawnCalls.length).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -428,13 +558,55 @@ describe('AgentScopeSupervisor secure startup', () => {
     const state = await finishReadyStart(supervisor, children[0]);
     const serialized = JSON.stringify({ state, logs });
 
-    expect(observedToken).toBe(EXPECTED_TOKEN);
-    expect(serialized).not.toContain(EXPECTED_TOKEN);
+    const bootstrap = JSON.parse(children[0].stdin.writes[0] ?? '{}') as Record<string, unknown>;
+    const bootstrapToken = typeof bootstrap.token === 'string' ? bootstrap.token : '';
+    expect({
+      dependencyReceivedBootstrapToken: observedToken === bootstrapToken,
+      dependencyToken: secretMetadata(observedToken),
+      diagnosticsContainSecret: containsSecret(serialized, observedToken),
+    }).toEqual({
+      dependencyReceivedBootstrapToken: true,
+      dependencyToken: {
+        characterLength: 43,
+        decodedByteLength: 32,
+        canonicalBase64Url: true,
+        sha256: ZERO_ENTROPY_TOKEN_SHA256,
+      },
+      diagnosticsContainSecret: false,
+    });
     expect(state).toMatchObject({ state: 'degraded', reason: 'health-failed' });
   });
 });
 
 describe('AgentScopeSupervisor restart and stop ownership', () => {
+  it('retains failed-start ownership until an asynchronously killed child actually exits', async () => {
+    const failedChild = new FakeChild(READY_PID, false);
+    const replacement = new FakeChild();
+    const { spawnCalls, supervisor } = makeHarness({ children: [failedChild, replacement] });
+    const starting = supervisor.start();
+    let startSettled = false;
+    void starting.then(() => {
+      startSettled = true;
+    });
+
+    failedChild.stdout.emit('data', Buffer.from('{\n'));
+    await flushPromises();
+
+    expect(failedChild.killCalls).toEqual(['SIGKILL']);
+    expect(startSettled).toBe(false);
+    expect(failedChild.listenerCount('exit')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+    const repeatedStart = supervisor.start();
+    await flushPromises();
+    expect(spawnCalls.length).toBe(1);
+
+    failedChild.exit(1, 'SIGKILL');
+    const [state, repeatedState] = await Promise.all([starting, repeatedStart]);
+    expect(state).toMatchObject({ state: 'degraded', reason: 'protocol-mismatch' });
+    expect(repeatedState).toMatchObject({ state: 'degraded', reason: 'protocol-mismatch' });
+    expect(failedChild.listenerCount('exit')).toBe(0);
+  });
+
   it('restarts after 1, 3, and 10 seconds without overlap, then exhausts the budget', async () => {
     const children = [new FakeChild(), new FakeChild(), new FakeChild(), new FakeChild()];
     const { spawnCalls, supervisor } = makeHarness({ children });
@@ -443,28 +615,28 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     children[0].exit(7);
     expect(supervisor.status()).toMatchObject({ state: 'degraded', reason: 'exited' });
     await vi.advanceTimersByTimeAsync(999);
-    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls.length).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.length).toBe(2);
     await finishRestart(children[1]);
 
     children[1].exit(7);
     await vi.advanceTimersByTimeAsync(2_999);
-    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.length).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
-    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls.length).toBe(3);
     await finishRestart(children[2]);
 
     children[2].exit(7);
     await vi.advanceTimersByTimeAsync(9_999);
-    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls.length).toBe(3);
     await vi.advanceTimersByTimeAsync(1);
-    expect(spawnCalls).toHaveLength(4);
+    expect(spawnCalls.length).toBe(4);
     await finishRestart(children[3]);
 
     children[3].exit(7);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(spawnCalls).toHaveLength(4);
+    expect(spawnCalls.length).toBe(4);
     expect(supervisor.status()).toEqual({
       state: 'degraded',
       reason: 'exited',
@@ -492,9 +664,9 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     children[1].exit(7);
     await vi.advanceTimersByTimeAsync(999);
-    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.length).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
-    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls.length).toBe(3);
   });
 
   it('stops responsively via stdin EOF, cancels restart, and never force-kills', async () => {
@@ -508,9 +680,56 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
 
     expect(child.stdin.endCalls).toBe(1);
     expect(child.killCalls).toEqual([]);
-    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls.length).toBe(1);
     expect(supervisor.status()).toEqual({ state: 'stopped' });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('atomically aborts unresolved health before sending intentional stdin EOF', async () => {
+    const child = new FakeChild(READY_PID, false);
+    let healthSignal: AbortSignal | undefined;
+    let signalWasAbortedAtEof = false;
+    child.stdin.onEnd = () => {
+      signalWasAbortedAtEof = healthSignal?.aborted === true;
+    };
+    const { supervisor } = makeHarness({
+      children: [child],
+      fetch: async (_url, init) => {
+        healthSignal = init?.signal ?? undefined;
+        return new Promise<FakeResponse>(() => undefined);
+      },
+    });
+    const starting = supervisor.start();
+    child.stdout.emit('data', Buffer.from(readyLine()));
+    await flushPromises();
+
+    const stopping = supervisor.stop();
+
+    expect(healthSignal?.aborted).toBe(true);
+    expect(signalWasAbortedAtEof).toBe(true);
+    child.exit(0);
+    await Promise.all([starting, stopping]);
+  });
+
+  it('ignores intentional stdin and child errors while retaining ownership until exit', async () => {
+    const child = new FakeChild(READY_PID, false);
+    const { supervisor } = makeHarness({ children: [child] });
+    await finishReadyStart(supervisor, child);
+
+    const stopping = supervisor.stop();
+    child.stdin.emit('error', new Error('intentional EPIPE'));
+    child.emit('error', new Error('late process error'));
+    await flushPromises();
+
+    expect(child.killCalls).toEqual([]);
+    expect(child.listenerCount('exit')).toBe(1);
+    expect(child.listenerCount('error')).toBe(1);
+    expect(child.stdin.listenerCount('error')).toBe(1);
+    expect(supervisor.status().state).not.toBe('stopped');
+
+    child.exit(0);
+    await stopping;
+    expect(supervisor.status()).toEqual({ state: 'stopped' });
   });
 
   it('waits five seconds before force-killing only the unresponsive owned child', async () => {
@@ -531,6 +750,59 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     expect(supervisor.status()).toEqual({ state: 'stopped' });
   });
 
+  it('does not report stopped until an asynchronous force-kill is reaped', async () => {
+    const owned = new FakeChild(READY_PID, false);
+    const { supervisor } = makeHarness({ children: [owned] });
+    await finishReadyStart(supervisor, owned);
+    let stopSettled = false;
+    const stopping = supervisor.stop().then(() => {
+      stopSettled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(owned.killCalls).toEqual(['SIGKILL']);
+    expect(stopSettled).toBe(false);
+    expect(supervisor.status().state).not.toBe('stopped');
+    expect(owned.listenerCount('exit')).toBe(1);
+
+    owned.exit(1, 'SIGKILL');
+    await stopping;
+    expect(supervisor.status()).toEqual({ state: 'stopped' });
+    expect(owned.listenerCount('exit')).toBe(0);
+  });
+
+  it('retains ownership when force-kill returns false and delays replacement until later exit', async () => {
+    const owned = new FakeChild(READY_PID, false, false);
+    const replacement = new FakeChild();
+    replacement.stdin.onEnd = () => replacement.exit(0);
+    const { spawnCalls, supervisor } = makeHarness({ children: [owned, replacement] });
+    await finishReadyStart(supervisor, owned);
+    let stopSettled = false;
+    const stopping = supervisor.stop().then(() => {
+      stopSettled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const queuedStart = supervisor.start();
+    await flushPromises();
+
+    expect(owned.killCalls).toEqual(['SIGKILL']);
+    expect(stopSettled).toBe(false);
+    expect(supervisor.status().state).not.toBe('stopped');
+    expect(owned.listenerCount('exit')).toBe(1);
+    expect(spawnCalls.length).toBe(1);
+
+    owned.exit(0);
+    await stopping;
+    await flushPromises();
+    expect(spawnCalls.length).toBe(2);
+    replacement.stdout.emit('data', Buffer.from(readyLine()));
+    expect((await queuedStart).state).toBe('ready');
+    await supervisor.stop();
+  });
+
   it('cancels a pending restart and cannot revive the stopped generation', async () => {
     const children = [new FakeChild(), new FakeChild()];
     const { spawnCalls, supervisor } = makeHarness({ children });
@@ -540,7 +812,7 @@ describe('AgentScopeSupervisor restart and stop ownership', () => {
     await supervisor.stop();
     await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls.length).toBe(1);
     expect(supervisor.status()).toEqual({ state: 'stopped' });
   });
 });
