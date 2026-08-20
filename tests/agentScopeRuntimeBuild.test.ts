@@ -1,5 +1,6 @@
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -15,10 +16,12 @@ import {
   UV_PYTHON_INSTALL_TIMEOUT_MS,
   assertSafeRuntimeOutput,
   canonicalizeDistInfoRecordText,
+  isDirectCliInvocation as isBuildDirectCliInvocation,
   isForbiddenRuntimePath,
   removeContainedDirectoryNoFollow,
   resolveBuildPaths,
   resolveRuntimeTarget,
+  validatePythonInterpreterFacts,
   validateManagedPythonFallback,
 } from '../scripts/agentscope-runtime/build.mjs';
 import {
@@ -27,7 +30,11 @@ import {
   containsBuildPathLeak,
   containsPrivateKeyMaterial,
   isCanonicalDistInfoRecordText,
+  executeFileBounded,
+  isDirectCliInvocation as isVerifyDirectCliInvocation,
   parseRuntimeManifest,
+  parseBundledInterpreterVerificationOutput,
+  verifyRuntimeArtifact,
 } from '../scripts/agentscope-runtime/verify.mjs';
 
 const manifestFile = (filePath: string, overrides: Record<string, unknown> = {}) => ({
@@ -58,7 +65,47 @@ const manifest = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const createRuntimeFixture = async (runtimeRoot: string) => {
+  const contents = new Map([
+    ['app/private_ai_agentscope/bootstrap.py', 'bootstrap'],
+    ['python-install/cpython-3.11.16-windows-x86_64-none/python.exe', 'python'],
+    ['site-packages/agentscope/__init__.py', '__version__ = "2.0.6"'],
+  ]);
+  const files = [];
+  for (const [relativePath, content] of contents) {
+    const absolutePath = path.join(runtimeRoot, ...relativePath.split('/'));
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, content, 'utf8');
+    files.push({
+      path: relativePath,
+      sha256: createHash('sha256').update(content).digest('hex'),
+      size: Buffer.byteLength(content),
+    });
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path, 'en'));
+  const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json');
+  await writeFile(manifestPath, `${JSON.stringify(manifest({ files }), null, 2)}\n`, 'utf8');
+  return manifestPath;
+};
+
 describe('AgentScope embedded runtime build policy', () => {
+  it('matches Windows CLI entry paths canonically and case-insensitively', () => {
+    const modulePath = 'D:\\Repo\\scripts\\agentscope-runtime\\build.mjs';
+    const caseVariant = 'd:\\repo\\SCRIPTS\\agentscope-runtime\\BUILD.mjs';
+    const dottedVariant = 'D:\\Repo\\scripts\\agentscope-runtime\\..\\agentscope-runtime\\build.mjs';
+
+    expect(isBuildDirectCliInvocation(caseVariant, modulePath, 'win32')).toBe(true);
+    expect(isBuildDirectCliInvocation(dottedVariant, modulePath, 'win32')).toBe(true);
+    expect(isBuildDirectCliInvocation('D:\\Repo\\scripts\\other.mjs', modulePath, 'win32'))
+      .toBe(false);
+    expect(isBuildDirectCliInvocation(caseVariant, modulePath, 'linux')).toBe(false);
+
+    expect(isVerifyDirectCliInvocation(caseVariant, modulePath, 'win32')).toBe(true);
+    expect(isVerifyDirectCliInvocation(dottedVariant, modulePath, 'win32')).toBe(true);
+    expect(isVerifyDirectCliInvocation('D:\\Repo\\scripts\\other.mjs', modulePath, 'win32'))
+      .toBe(false);
+  });
+
   it('supports only the verified win32-x64 artifact', () => {
     expect(resolveRuntimeTarget('win32', 'x64')).toEqual({ platform: 'win32', arch: 'x64' });
     expect(() => resolveRuntimeTarget('linux', 'x64')).toThrow(/unsupported embedded runtime/i);
@@ -191,6 +238,7 @@ describe('AgentScope embedded runtime build policy', () => {
       foundPythonPath,
       version: '3.11.16',
       platform: 'win32',
+      compileTarget: 'win-amd64',
       machine: 'AMD64',
       pointerBits: 64,
     })).toEqual({
@@ -210,7 +258,7 @@ describe('AgentScope embedded runtime build policy', () => {
     }],
     ['wrong version', { version: '3.11.15' }],
     ['wrong platform', { platform: 'linux' }],
-    ['wrong architecture', { machine: 'ARM64' }],
+    ['wrong architecture', { compileTarget: 'win-arm64' }],
     ['wrong pointer width', { pointerBits: 32 }],
   ])('rejects fallback from %s', (_label, replacement) => {
     const managedRoot = path.resolve('C:/Users/test/AppData/Roaming/uv/python');
@@ -223,14 +271,107 @@ describe('AgentScope embedded runtime build policy', () => {
       ),
       version: '3.11.16',
       platform: 'win32',
+      compileTarget: 'win-amd64',
       machine: 'AMD64',
       pointerBits: 64,
       ...replacement,
     })).toThrow(/managed CPython fallback/i);
   });
+
+  it('requires the primary installed interpreter to use exact win32-x64 CPython', () => {
+    const exact = {
+      version: '3.11.16',
+      platform: 'win32',
+      compileTarget: 'win-amd64',
+      machine: 'AMD64',
+      pointerBits: 64,
+    };
+    expect(validatePythonInterpreterFacts(exact)).toEqual(exact);
+    for (const replacement of [
+      { version: '3.11.15' },
+      { platform: 'linux' },
+      { compileTarget: 'win-arm64' },
+      { pointerBits: 32 },
+    ]) {
+      expect(() => validatePythonInterpreterFacts({ ...exact, ...replacement }))
+        .toThrow(/win32-x64|64-bit|3\.11\.16/i);
+    }
+  });
 });
 
 describe('independent AgentScope runtime manifest policy', () => {
+  it('forcibly terminates a hanging interpreter verification within its timeout', async () => {
+    const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'agentscope-runtime-timeout-'));
+    const pidFile = path.join(temporaryRoot, 'child.pid');
+    const childCode = [
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
+      'setInterval(() => {}, 1000)',
+    ].join('; ');
+    try {
+      await expect(executeFileBounded(process.execPath, ['-e', childCode], {
+        cwd: temporaryRoot,
+        env: process.env,
+        encoding: 'utf8',
+        timeoutMs: 500,
+      })).rejects.toThrow(/timed out/i);
+      const childPid = Number(await readFile(pidFile, 'utf8'));
+      expect(Number.isSafeInteger(childPid)).toBe(true);
+      expect(() => process.kill(childPid, 0)).toThrow();
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an interpreter that mutates only the runtime manifest', async () => {
+    const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), 'agentscope-runtime-manifest-'));
+    const manifestPath = await createRuntimeFixture(runtimeRoot);
+    try {
+      await expect(verifyRuntimeArtifact(runtimeRoot, {
+        executeInterpreter: async () => {
+          await writeFile(manifestPath, `${await readFile(manifestPath, 'utf8')} `, 'utf8');
+          return {
+            stdout: JSON.stringify({
+              pythonVersion: '3.11.16',
+              agentScopeVersion: '2.0.6',
+              runtimeVersion: '1.0.0',
+              protocolVersion: '1',
+              platform: 'win32',
+              compileTarget: 'win-amd64',
+              machine: 'AMD64',
+              pointerBits: 64,
+            }),
+          };
+        },
+      })).rejects.toThrow(/manifest.*changed/i);
+    } finally {
+      await rm(runtimeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('independently validates interpreter version, compile target, and pointer width', () => {
+    const exact = {
+      pythonVersion: '3.11.16',
+      agentScopeVersion: '2.0.6',
+      runtimeVersion: '1.0.0',
+      protocolVersion: '1',
+      platform: 'win32',
+      compileTarget: 'win-amd64',
+      machine: 'AMD64',
+      pointerBits: 64,
+    };
+    expect(parseBundledInterpreterVerificationOutput(JSON.stringify(exact))).toEqual(exact);
+    for (const replacement of [
+      { pythonVersion: '3.11.15' },
+      { platform: 'linux' },
+      { compileTarget: 'win-arm64' },
+      { pointerBits: 32 },
+    ]) {
+      expect(() => parseBundledInterpreterVerificationOutput(
+        JSON.stringify({ ...exact, ...replacement }),
+      )).toThrow(/interpreter|win32-x64|64-bit|3\.11\.16/i);
+    }
+  });
+
   it('detects PID-scoped staging paths embedded by generated console launchers', () => {
     expect(containsBuildPathLeak(
       'D:\\repo\\resources\\.agentscope-runtime-staging-1234\\site-packages',

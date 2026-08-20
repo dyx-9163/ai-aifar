@@ -148,7 +148,6 @@ export function validateManagedPythonFallback(input) {
   const foundPythonPath = path.resolve(input.foundPythonPath);
   const relative = path.relative(managedRoot, foundPythonPath);
   const segments = relative.split(path.sep);
-  const machine = String(input.machine).toLowerCase();
   const invalidReason =
     path.parse(managedRoot).root === managedRoot ? 'managed root is a filesystem root' :
     relative === '' ? 'interpreter equals the managed root' :
@@ -157,21 +156,41 @@ export function validateManagedPythonFallback(input) {
     segments.length !== 2 ? 'interpreter is not a direct installation child' :
     segments[0] !== 'cpython-3.11.16-windows-x86_64-none' ? 'installation name is not pinned' :
     segments[1].toLowerCase() !== 'python.exe' ? 'interpreter name is not python.exe' :
-    input.version !== RUNTIME_VERSIONS.pythonVersion ? `version is ${String(input.version)}` :
-    input.platform !== RUNTIME_VERSIONS.platform ? `platform is ${String(input.platform)}` :
-    machine !== 'amd64' && machine !== 'x86_64' && machine !== 'win-amd64'
-      ? `machine is ${String(input.machine)}` :
-    input.pointerBits !== 64 ? `pointer width is ${String(input.pointerBits)}` :
     '';
   if (invalidReason) {
     throw new Error(
       `Managed CPython fallback must be exact uv-managed CPython 3.11.16 win32-x64 (${invalidReason}).`,
     );
   }
+  try {
+    validatePythonInterpreterFacts(input);
+  } catch (error) {
+    throw new Error(
+      `Managed CPython fallback must be exact uv-managed CPython 3.11.16 win32-x64 (${error instanceof Error ? error.message : String(error)}).`,
+    );
+  }
   return {
     sourceRoot: path.dirname(foundPythonPath),
     installationName: segments[0],
   };
+}
+
+export function validatePythonInterpreterFacts(input) {
+  if (input.version !== RUNTIME_VERSIONS.pythonVersion) {
+    throw new Error(`Interpreter must be CPython 3.11.16; received ${String(input.version)}.`);
+  }
+  if (
+    input.platform !== RUNTIME_VERSIONS.platform ||
+    String(input.compileTarget).toLowerCase() !== 'win-amd64'
+  ) {
+    throw new Error(
+      `Interpreter must use the win32-x64 compile target; received ${String(input.platform)}/${String(input.compileTarget)}.`,
+    );
+  }
+  if (input.pointerBits !== 64) {
+    throw new Error(`Interpreter must be 64-bit; received ${String(input.pointerBits)}-bit.`);
+  }
+  return input;
 }
 
 function canonicalNativePath(candidate) {
@@ -351,19 +370,19 @@ async function findFilesByName(root, expectedName, current = root) {
 async function resolveBundledPython(pythonInstallRoot) {
   const candidates = await findFilesByName(pythonInstallRoot, 'python.exe');
   const exact = [];
+  const invalid = [];
   for (const candidate of candidates) {
-    const { stdout } = await runCommand(
-      candidate,
-      ['-I', '-c', "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
-      { cwd: pythonInstallRoot, env: isolatedEnvironment({}) },
-    );
-    if (stdout.trim() === RUNTIME_VERSIONS.pythonVersion) {
+    const facts = await inspectPythonInterpreter(candidate, pythonInstallRoot);
+    try {
+      validatePythonInterpreterFacts(facts);
       exact.push(candidate);
+    } catch (error) {
+      invalid.push(error instanceof Error ? error.message : String(error));
     }
   }
   if (exact.length !== 1) {
     throw new Error(
-      `Expected exactly one bundled CPython ${RUNTIME_VERSIONS.pythonVersion} interpreter; found ${exact.length}.`,
+      `Expected exactly one bundled CPython ${RUNTIME_VERSIONS.pythonVersion} win32-x64 64-bit interpreter; found ${exact.length}${invalid.length ? ` (${invalid.join('; ')})` : ''}.`,
     );
   }
   return exact[0];
@@ -371,13 +390,13 @@ async function resolveBundledPython(pythonInstallRoot) {
 
 async function inspectPythonInterpreter(pythonPath, cwd) {
   const code = [
-    'import json, struct, sys, sysconfig',
-    "print(json.dumps({'version': '.'.join(map(str, sys.version_info[:3])), 'platform': sys.platform, 'machine': sysconfig.get_platform(), 'pointerBits': struct.calcsize('P') * 8}))",
+    'import json, platform, struct, sys, sysconfig',
+    "print(json.dumps({'version': '.'.join(map(str, sys.version_info[:3])), 'platform': sys.platform, 'compileTarget': sysconfig.get_platform(), 'machine': platform.machine(), 'pointerBits': struct.calcsize('P') * 8}))",
   ].join('; ');
   const { stdout } = await runCommand(
     pythonPath,
     ['-I', '-c', code],
-    { cwd, env: isolatedEnvironment({}) },
+    { cwd, env: isolatedEnvironment() },
   );
   try {
     return JSON.parse(stdout.trim());
@@ -691,8 +710,20 @@ export async function buildRuntimeArtifact(options = {}) {
   }
 }
 
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
-if (invokedPath === path.resolve(fileURLToPath(import.meta.url))) {
+export function isDirectCliInvocation(invokedPath, modulePath, platform = process.platform) {
+  if (typeof invokedPath !== 'string' || invokedPath.length === 0
+    || typeof modulePath !== 'string' || modulePath.length === 0) {
+    return false;
+  }
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  const canonicalize = (value) => {
+    const canonicalPath = pathApi.resolve(value);
+    return platform === 'win32' ? canonicalPath.toLowerCase() : canonicalPath;
+  };
+  return canonicalize(invokedPath) === canonicalize(modulePath);
+}
+
+if (isDirectCliInvocation(process.argv[1] ?? '', fileURLToPath(import.meta.url))) {
   try {
     const result = await buildRuntimeArtifact();
     console.log(

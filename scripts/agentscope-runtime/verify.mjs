@@ -11,6 +11,25 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
+export const BUNDLED_INTERPRETER_TIMEOUT_MS = 15_000;
+
+export async function executeFileBounded(executable, args, options = {}) {
+  const { timeoutMs = BUNDLED_INTERPRETER_TIMEOUT_MS, ...execOptions } = options;
+  try {
+    return await execFileAsync(executable, args, {
+      ...execOptions,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+    });
+  } catch (error) {
+    const wasKilled = error && typeof error === 'object' &&
+      (error.killed === true || error.signal === 'SIGKILL');
+    if (wasKilled) {
+      throw new Error(`Bundled interpreter verification timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  }
+}
 
 export const RUNTIME_VERSIONS = Object.freeze({
   schemaVersion: 1,
@@ -383,7 +402,49 @@ export function buildIsolatedPythonArguments(code) {
   return ['-I', '-B', '-c', code];
 }
 
-async function verifyBundledInterpreter(runtimeRoot, manifest) {
+export function parseBundledInterpreterVerificationOutput(stdout) {
+  let parsed;
+  try {
+    parsed = requireRecord(JSON.parse(String(stdout).trim()), 'Bundled interpreter output');
+  } catch {
+    throw new Error('Bundled interpreter returned invalid version verification output.');
+  }
+  const keys = [
+    'pythonVersion',
+    'agentScopeVersion',
+    'runtimeVersion',
+    'protocolVersion',
+    'platform',
+    'compileTarget',
+    'machine',
+    'pointerBits',
+  ];
+  requireExactKeys(parsed, keys, 'Bundled interpreter output');
+  requireExact(parsed.pythonVersion, RUNTIME_VERSIONS.pythonVersion, 'interpreter Python version');
+  requireExact(
+    parsed.agentScopeVersion,
+    RUNTIME_VERSIONS.agentScopeVersion,
+    'interpreter AgentScope version',
+  );
+  requireExact(parsed.runtimeVersion, RUNTIME_VERSIONS.runtimeVersion, 'interpreter runtime version');
+  requireExact(parsed.protocolVersion, RUNTIME_VERSIONS.protocolVersion, 'interpreter protocol version');
+  if (
+    parsed.platform !== RUNTIME_VERSIONS.platform ||
+    String(parsed.compileTarget).toLowerCase() !== 'win-amd64'
+  ) {
+    throw new Error('Bundled interpreter must use the win32-x64 compile target.');
+  }
+  if (parsed.pointerBits !== 64) {
+    throw new Error('Bundled interpreter must be 64-bit.');
+  }
+  return parsed;
+}
+
+async function verifyBundledInterpreter(
+  runtimeRoot,
+  manifest,
+  executeInterpreter = executeFileBounded,
+) {
   const pythonPath = resolveContained(runtimeRoot, manifest.pythonRelativePath, 'Python path');
   const appPath = resolveContained(runtimeRoot, manifest.appRelativePath, 'application path');
   const sitePackagesPath = resolveContained(
@@ -392,7 +453,7 @@ async function verifyBundledInterpreter(runtimeRoot, manifest) {
     'site-packages path',
   );
   const verificationCode = [
-    'import json, sys',
+    'import json, platform, struct, sys, sysconfig',
     `sys.path[:0] = ${JSON.stringify([sitePackagesPath, appPath])}`,
     'import agentscope',
     'from private_ai_agentscope.protocol import AGENTSCOPE_VERSION, RUNTIME_VERSION, PROTOCOL_VERSION',
@@ -401,9 +462,12 @@ async function verifyBundledInterpreter(runtimeRoot, manifest) {
     `assert AGENTSCOPE_VERSION == ${JSON.stringify(RUNTIME_VERSIONS.agentScopeVersion)}`,
     `assert RUNTIME_VERSION == ${JSON.stringify(RUNTIME_VERSIONS.runtimeVersion)}`,
     `assert PROTOCOL_VERSION == ${JSON.stringify(RUNTIME_VERSIONS.protocolVersion)}`,
-    "print(json.dumps({'pythonVersion': '.'.join(map(str, sys.version_info[:3])), 'agentScopeVersion': agentscope.__version__, 'runtimeVersion': RUNTIME_VERSION, 'protocolVersion': PROTOCOL_VERSION}))",
+    `assert sys.platform == ${JSON.stringify(RUNTIME_VERSIONS.platform)}`,
+    "assert sysconfig.get_platform().lower() == 'win-amd64'",
+    "assert struct.calcsize('P') * 8 == 64",
+    "print(json.dumps({'pythonVersion': '.'.join(map(str, sys.version_info[:3])), 'agentScopeVersion': agentscope.__version__, 'runtimeVersion': RUNTIME_VERSION, 'protocolVersion': PROTOCOL_VERSION, 'platform': sys.platform, 'compileTarget': sysconfig.get_platform(), 'machine': platform.machine(), 'pointerBits': struct.calcsize('P') * 8}))",
   ].join('; ');
-  const { stdout } = await execFileAsync(
+  const { stdout } = await executeInterpreter(
     pythonPath,
     buildIsolatedPythonArguments(verificationCode),
     {
@@ -414,16 +478,10 @@ async function verifyBundledInterpreter(runtimeRoot, manifest) {
       windowsHide: true,
     },
   );
-  let versions;
-  try {
-    versions = JSON.parse(stdout.trim());
-  } catch {
-    throw new Error('Bundled interpreter returned invalid version verification output.');
-  }
-  return versions;
+  return parseBundledInterpreterVerificationOutput(stdout);
 }
 
-export async function verifyRuntimeArtifact(runtimeRoot) {
+export async function verifyRuntimeArtifact(runtimeRoot, options = {}) {
   const root = path.resolve(runtimeRoot);
   const rootMetadata = await assertNotReparsePoint(root, 'Runtime root');
   if (!rootMetadata.isDirectory()) {
@@ -434,19 +492,33 @@ export async function verifyRuntimeArtifact(runtimeRoot) {
   if (!manifestMetadata.isFile()) {
     throw new Error('Runtime manifest must be a regular file.');
   }
+  const originalManifestBytes = await readFile(manifestPath);
   let decoded;
   try {
-    decoded = JSON.parse(await readFile(manifestPath, 'utf8'));
+    decoded = JSON.parse(originalManifestBytes.toString('utf8'));
   } catch {
     throw new Error('runtime-manifest.json must contain valid JSON.');
   }
   const manifest = parseRuntimeManifest(decoded);
   const actualFiles = await enumerateRuntimeFiles(root);
   const inventory = compareRuntimeInventories(manifest.files, actualFiles);
-  const versions = await verifyBundledInterpreter(root, manifest);
+  const versions = await verifyBundledInterpreter(
+    root,
+    manifest,
+    options.executeInterpreter ?? executeFileBounded,
+  );
+  const finalManifestBytes = await readFile(manifestPath);
+  try {
+    parseRuntimeManifest(JSON.parse(finalManifestBytes.toString('utf8')));
+  } catch {
+    throw new Error('runtime-manifest.json changed to an invalid manifest during verification.');
+  }
+  if (!originalManifestBytes.equals(finalManifestBytes)) {
+    throw new Error('Runtime manifest changed during bundled interpreter verification.');
+  }
   compareRuntimeInventories(manifest.files, await enumerateRuntimeFiles(root));
   const manifestSha256 = createHash('sha256')
-    .update(await readFile(manifestPath))
+    .update(originalManifestBytes)
     .digest('hex');
   return { root, inventory, versions, manifestSha256 };
 }
@@ -455,8 +527,20 @@ export function repositoryRootFromModule(moduleUrl = import.meta.url) {
   return path.resolve(path.dirname(fileURLToPath(moduleUrl)), '..', '..');
 }
 
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
-if (invokedPath === path.resolve(fileURLToPath(import.meta.url))) {
+export function isDirectCliInvocation(invokedPath, modulePath, platform = process.platform) {
+  if (typeof invokedPath !== 'string' || invokedPath.length === 0
+    || typeof modulePath !== 'string' || modulePath.length === 0) {
+    return false;
+  }
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  const canonicalize = (value) => {
+    const canonicalPath = pathApi.resolve(value);
+    return platform === 'win32' ? canonicalPath.toLowerCase() : canonicalPath;
+  };
+  return canonicalize(invokedPath) === canonicalize(modulePath);
+}
+
+if (isDirectCliInvocation(process.argv[1] ?? '', fileURLToPath(import.meta.url))) {
   try {
     const runtimeRoot = path.join(repositoryRootFromModule(), 'resources', 'agentscope-runtime');
     const result = await verifyRuntimeArtifact(runtimeRoot);
