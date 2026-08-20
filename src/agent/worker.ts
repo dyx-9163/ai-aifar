@@ -29,6 +29,7 @@ import { normalizeWorkspacePath } from './workspace/pathSecurity.js';
 import { rollbackTurnFileChanges } from './workspace/fileCheckpoints.js';
 import { runAgentLoop } from './agentLoop.js';
 import { buildChatMessages } from './chatContext.js';
+import type { NativeToolSchema } from './tools/toolSchemas.js';
 import {
   demoTurnTitle,
   requiresApproval,
@@ -75,6 +76,7 @@ type StreamModel = (
   messages: ChatMessage[],
   handlers: ModelStreamHandlers,
   signal: AbortSignal,
+  tools?: readonly NativeToolSchema[],
 ) => Promise<ModelRunMetrics>;
 
 type RunDemo = (
@@ -161,7 +163,9 @@ export function createTurnEventEmitter(
 export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): WorkerTurnRuntime {
   const database = options.database;
   const postEvent = options.postEvent;
-  const runModel = options.streamModel ?? streamChatCompletion;
+  const runModel: StreamModel = options.streamModel
+    ?? ((modelProfile, messages, handlers, signal, tools) =>
+      streamChatCompletion(modelProfile, messages, handlers, signal, undefined, undefined, undefined, tools));
   const executeDemo = options.runDemo ?? runDemoTurn;
   const createTurnId = options.createTurnId ?? (() => `turn-${randomUUID()}`);
   const now = options.now ?? (() => new Date().toISOString());
@@ -289,6 +293,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
             workspaceDisplayName: workspace.displayName,
             initialMessages: withVisionAttachments(history, attachments),
             runModel,
+            nativeTools: profile.capabilities.nativeTools,
             emit: (payload) => context.next(payload),
             signal,
             turnId: turn.turnId,

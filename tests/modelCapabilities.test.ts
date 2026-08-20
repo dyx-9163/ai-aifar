@@ -40,6 +40,7 @@ describe('model capabilities', () => {
       concurrency: { defaultLimit: 4, configurable: false, maxLimit: 8 },
       streaming: false,
       usage: { tokens: false, reasoningTokens: false },
+      nativeTools: false,
     });
   });
 
@@ -62,6 +63,7 @@ describe('model capabilities', () => {
       concurrency: { defaultLimit: 3, configurable: false, maxLimit: 6 },
       streaming: false,
       usage: { tokens: false, reasoningTokens: false },
+      nativeTools: false,
     });
   });
 
@@ -159,6 +161,17 @@ describe('model capabilities', () => {
     [32769, 32768],
   ])('normalizes output limit %s to %s', (value, expected) => {
     expect(normalizeMaxOutputTokens(value)).toBe(expected);
+  });
+
+  it('defaults native tool calling off and honors an explicit opt-in', () => {
+    expect(normalizeModelCapabilities({ nativeTools: true }, 'none').nativeTools).toBe(true);
+    expect(normalizeModelCapabilities({}, 'none').nativeTools).toBe(false);
+    expect(normalizeModelCapabilities(undefined, 'none').nativeTools).toBe(false);
+  });
+
+  it('enables native tools for cloud OpenAI profiles but not the local Qwen runtime', () => {
+    expect(openAiCapabilities().nativeTools).toBe(true);
+    expect(qwenCapabilities().nativeTools).toBe(false);
   });
 });
 

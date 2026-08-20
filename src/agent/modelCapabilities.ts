@@ -20,6 +20,8 @@ export function qwenCapabilities(): ModelCapabilities {
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
     usage: { tokens: true, reasoningTokens: true },
+    // The local small-model runtime is more reliable on the fenced-JSON text protocol.
+    nativeTools: false,
   };
 }
 
@@ -39,6 +41,8 @@ export function openAiCapabilities(effortOptions: string[] = []): ModelCapabilit
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
     usage: { tokens: true, reasoningTokens: true },
+    // OpenAI-compatible cloud endpoints implement function calling natively.
+    nativeTools: true,
   };
 }
 
@@ -69,6 +73,7 @@ export function normalizeModelCapabilities(input: unknown, reasoningProtocol: Re
       tokens: booleanOr(usage?.tokens, legacyStreamingUsage ?? true),
       reasoningTokens: booleanOr(usage?.reasoningTokens, legacyStreamingUsage ?? true),
     },
+    nativeTools: booleanOr(value?.nativeTools, false),
   };
 }
 

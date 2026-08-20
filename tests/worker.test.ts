@@ -1077,6 +1077,53 @@ describe('workspace agent turns', () => {
     harness.database.close();
   });
 
+  it('drives the agent loop through native tool calls when the profile declares nativeTools', async () => {
+    const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-nativews-'));
+    tempDirectories.push(workspaceDirectory);
+    mkdirSync(join(workspaceDirectory, 'src'), { recursive: true });
+    writeFileSync(join(workspaceDirectory, 'src', 'main.ts'), 'export const answer = 42;\n');
+
+    let modelRuns = 0;
+    const harness = createHarness(async (_profile, _messages, handlers) => {
+      modelRuns += 1;
+      if (modelRuns === 1) {
+        await handlers.onNativeToolCalls?.([
+          { id: 'call-native-1', name: 'read_file', arguments: { path: 'src/main.ts' } },
+        ]);
+      } else {
+        await handlers.onAnswerDelta('The file exports answer = 42.');
+      }
+      return metrics();
+    });
+    harness.database.saveModelProfile({
+      ...harness.profile,
+      capabilities: { ...harness.profile.capabilities, nativeTools: true },
+    });
+    const workspace = registerWorkspaceFromPath(harness.database, { path: workspaceDirectory, trustLevel: 'read-only' });
+    const thread = harness.database.createThread('Native workspace');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: 'What does src/main.ts export?',
+      modelProfileId: harness.profile.id,
+      workspaceId: workspace.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    const types = typesFor(harness.events, turnId);
+    // One model placeholder plus the single native read_file call.
+    expect(types.filter((type) => type === 'tool.started')).toHaveLength(2);
+    expect(types).toContain('tool.output');
+    expect(types.filter((type) => type === 'answer.delta')).toHaveLength(1);
+    expect(modelRuns).toBe(2);
+    expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+      id: `item-${turnId}-assistant`,
+      text: 'The file exports answer = 42.',
+    }));
+    harness.database.close();
+  });
+
   it('runs a gated command automatically in a read-write workspace', async () => {
     const workspaceDirectory = mkdtempSync(join(tmpdir(), 'private-ai-approvalws-'));
     tempDirectories.push(workspaceDirectory);

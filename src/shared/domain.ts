@@ -166,6 +166,8 @@ export interface ModelCapabilities {
   };
   streaming: boolean;
   usage: { tokens: boolean; reasoningTokens: boolean };
+  /** Provider supports OpenAI-style function calling; otherwise the fenced-JSON text protocol is used. */
+  nativeTools: boolean;
 }
 
 export interface ModelCapabilitiesInput {
@@ -176,6 +178,7 @@ export interface ModelCapabilitiesInput {
   concurrency?: Partial<ModelCapabilities['concurrency']>;
   streaming?: boolean;
   usage?: Partial<ModelCapabilities['usage']>;
+  nativeTools?: boolean;
 }
 
 export interface ModelProfile {

@@ -19,6 +19,7 @@ import {
 import type { RuntimeModelProfile } from '../src/agent/database';
 import type { ChatMessage } from '../src/agent/modelProvider';
 import type { WorkspaceToolContext } from '../src/agent/tools/toolRouter';
+import { READ_ONLY_TOOL_NAMES, WRITE_TOOL_NAMES } from '../src/agent/tools/toolRouter';
 
 const profile = {} as RuntimeModelProfile;
 
@@ -770,5 +771,109 @@ describe('runAgentLoop', () => {
       'answer',
     ]);
     expect(classifications.map((entry) => entry.iteration)).toEqual([1, 2, 3]);
+  });
+});
+
+describe('native tool calling branch', () => {
+  interface NativeLoopResponse {
+    text?: string;
+    nativeCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
+  }
+
+  async function runNativeLoop(
+    responses: NativeLoopResponse[],
+    loopContext: WorkspaceToolContext,
+    options: { maxIterations?: number } = {},
+  ) {
+    const allEvents: Array<{ type: string; [key: string]: unknown }> = [];
+    const modelCalls: ChatMessage[][] = [];
+    const requestedTools: Array<Array<{ function: { name: string } }>> = [];
+    let run = 0;
+    const outcome = await runAgentLoop({
+      profile,
+      toolContext: loopContext,
+      workspaceDisplayName: 'fixture',
+      initialMessages: [{ role: 'user', content: 'What does src/main.ts export?' }],
+      nativeTools: true,
+      runModel: async (_modelProfile, messages, handlers, _signal, tools) => {
+        modelCalls.push([...messages]);
+        requestedTools.push([...(tools ?? [])] as Array<{ function: { name: string } }>);
+        const response = responses[Math.min(run, responses.length - 1)];
+        run += 1;
+        if (response.text) handlers.onAnswerDelta(response.text);
+        if (response.nativeCalls && handlers.onNativeToolCalls) {
+          await handlers.onNativeToolCalls(response.nativeCalls);
+        }
+        return metricsFor(run);
+      },
+      emit: (payload) => {
+        allEvents.push(payload as { type: string });
+      },
+      signal: new AbortController().signal,
+      maxIterations: options.maxIterations,
+      createCallId: () => `call-${run + 1}`,
+    });
+    const emitted = allEvents.filter((event) => event.type !== 'loop.classified');
+    return { emitted, modelCalls, requestedTools, outcome };
+  }
+
+  it('executes native tool calls and feeds results back as tool-role messages', async () => {
+    const { emitted, modelCalls, outcome } = await runNativeLoop(
+      [
+        { nativeCalls: [{ id: 'call-a', name: 'read_file', arguments: { path: 'src/main.ts' } }] },
+        { text: 'It exports the answer constant.' },
+      ],
+      context,
+    );
+
+    expect(outcome).toMatchObject({ iterations: 2, toolCallsExecuted: 1, emptyAnswer: false });
+    expect(emitted.map((event) => event.type)).toEqual(['tool.started', 'tool.output', 'answer.delta']);
+
+    const secondRequest = modelCalls[1];
+    expect(secondRequest?.at(-2)).toEqual({
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-a', type: 'function', function: { name: 'read_file', arguments: '{"path":"src/main.ts"}' } },
+      ],
+    });
+    const toolResult = secondRequest?.at(-1);
+    expect(toolResult?.role).toBe('tool');
+    expect(toolResult?.tool_call_id).toBe('call-a');
+    expect(String(toolResult?.content)).toContain('export const answer = 42;');
+  });
+
+  it('requests the trust-level schemas and drops the fenced-JSON tutorial', async () => {
+    const { modelCalls, requestedTools } = await runNativeLoop([{ text: 'Plain answer.' }], context);
+
+    expect(requestedTools[0].map((schema) => schema.function.name)).toEqual([...READ_ONLY_TOOL_NAMES]);
+    const systemPrompt = String(modelCalls[0]?.[0]?.content);
+    expect(systemPrompt).not.toContain('```tool');
+    expect(systemPrompt).not.toContain('fenced JSON');
+  });
+
+  it('includes write tools in the schema list for read-write workspaces', async () => {
+    const { requestedTools } = await runNativeLoop(
+      [{ text: 'ok' }],
+      { ...context, trustLevel: 'read-write' as const },
+    );
+
+    const names = requestedTools[0].map((schema) => schema.function.name);
+    expect(names).toEqual([...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES]);
+  });
+
+  it('reports unknown native tool names back to the model as failed results', async () => {
+    const { modelCalls, outcome } = await runNativeLoop(
+      [
+        { nativeCalls: [{ id: 'call-x', name: 'nope_tool', arguments: {} }] },
+        { text: 'Recovered.' },
+      ],
+      context,
+    );
+
+    const toolResult = modelCalls[1]?.at(-1);
+    expect(toolResult?.role).toBe('tool');
+    expect(String(toolResult?.content)).toContain('Unknown tool: nope_tool');
+    expect(outcome).toMatchObject({ toolCallsExecuted: 1, emptyAnswer: false });
   });
 });

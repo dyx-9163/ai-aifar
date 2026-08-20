@@ -1405,6 +1405,148 @@ describe('OpenAI-compatible model provider', () => {
       { role: 'user', content: 'three' },
     ]);
   });
+
+  describe('native tool calling', () => {
+    const tools = [
+      {
+        type: 'function' as const,
+        function: {
+          name: 'read_file',
+          description: 'Read a file.',
+          parameters: { type: 'object' as const, properties: { path: { type: 'string' } }, required: ['path'] },
+        },
+      },
+    ];
+
+    it('sends the tool schemas and tool_choice in the request body', async () => {
+      const requests: RequestInit[] = [];
+      const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        requests.push(init ?? {});
+        return new Response(
+          ReadableStream.from([
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+            'data: [DONE]\n\n',
+          ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+          { status: 200 },
+        );
+      };
+
+      await streamChatCompletion(
+        profile,
+        [{ role: 'user', content: 'hello' }],
+        ignoreHandlers,
+        new AbortController().signal,
+        fetchImpl,
+        undefined,
+        undefined,
+        tools,
+      );
+
+      const body = JSON.parse(String(requests[0]?.body));
+      expect(body.tools).toEqual(tools);
+      expect(body.tool_choice).toBe('auto');
+    });
+
+    it('omits tools fields when no schemas are provided', async () => {
+      const requests: RequestInit[] = [];
+      const fetchImpl = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        requests.push(init ?? {});
+        return new Response(
+          ReadableStream.from([
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+            'data: [DONE]\n\n',
+          ].map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit,
+          { status: 200 },
+        );
+      };
+
+      await streamChatCompletion(
+        profile,
+        [{ role: 'user', content: 'hello' }],
+        ignoreHandlers,
+        new AbortController().signal,
+        fetchImpl,
+      );
+
+      const body = JSON.parse(String(requests[0]?.body));
+      expect(body.tools).toBeUndefined();
+      expect(body.tool_choice).toBeUndefined();
+    });
+
+    it('accumulates streamed tool_call argument fragments into complete calls', async () => {
+      const chunks = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\\"pa"}}]}}]}\n\n',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\\": \\"src/App.vue\\"}"}}]}}]}\n\n',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call-2","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        'data: [DONE]\n\n',
+      ];
+      const fetchImpl = async (): Promise<Response> =>
+        new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+      const delivered: unknown[] = [];
+
+      await streamChatCompletion(
+        profile,
+        [{ role: 'user', content: 'read the app' }],
+        {
+          ...ignoreHandlers,
+          onNativeToolCalls: (calls) => delivered.push(...calls),
+        },
+        new AbortController().signal,
+        fetchImpl,
+        undefined,
+        undefined,
+        tools,
+      );
+
+      expect(delivered).toEqual([
+        { id: 'call-1', name: 'read_file', arguments: { path: 'src/App.vue' } },
+        { id: 'call-2', name: 'git_status', arguments: {} },
+      ]);
+    });
+
+    it('keeps a tool-call-only stream from failing the final-answer assertion', async () => {
+      const chunks = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        'data: [DONE]\n\n',
+      ];
+      const fetchImpl = async (): Promise<Response> =>
+        new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+
+      await expect(streamChatCompletion(
+        profile,
+        [{ role: 'user', content: 'show git state' }],
+        ignoreHandlers,
+        new AbortController().signal,
+        fetchImpl,
+        undefined,
+        undefined,
+        tools,
+      )).resolves.toMatchObject({ finishReason: 'tool_calls' });
+    });
+
+    it('surfaces invalid tool-call argument JSON instead of dropping the call', async () => {
+      const chunks = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{broken"}}]}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        'data: [DONE]\n\n',
+      ];
+      const fetchImpl = async (): Promise<Response> =>
+        new Response(ReadableStream.from(chunks.map((chunk) => new TextEncoder().encode(chunk))) as unknown as BodyInit, { status: 200 });
+
+      await expect(streamChatCompletion(
+        profile,
+        [{ role: 'user', content: 'read the app' }],
+        ignoreHandlers,
+        new AbortController().signal,
+        fetchImpl,
+        undefined,
+        undefined,
+        tools,
+      )).rejects.toThrow('tool call');
+    });
+  });
 });
 
 describe('context compression for oversized prompts', () => {

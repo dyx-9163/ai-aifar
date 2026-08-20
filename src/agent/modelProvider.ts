@@ -4,10 +4,19 @@ import { safeErrorText } from '../shared/redaction.js';
 import { validateReasoningSelection } from './modelCapabilities.js';
 import { inspectModelConnection } from './modelConnection.js';
 import { createStreamTextNormalizer } from './streamTextNormalizer.js';
+import type { NativeToolSchema } from './tools/toolSchemas.js';
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: ChatMessageContent;
+  /** Assistant messages that invoked tools via native function calling. */
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  /** Tool-role results reference the originating assistant call. */
+  tool_call_id?: string;
 }
 
 export type ChatMessageContent = string | ChatContentPart[];
@@ -23,6 +32,17 @@ export interface ModelStreamHandlers {
   onRawReasoningDelta(text: string): Promise<void> | void;
   onReasoningSummaryDelta(text: string): Promise<void> | void;
   onPhase(phase: ModelRunPhase): Promise<void> | void;
+  /**
+   * Delivered once at stream end when the model answered with native
+   * function calls. Optional so text-only callers keep their handlers.
+   */
+  onNativeToolCalls?(calls: NativeStreamedToolCall[]): Promise<void> | void;
+}
+
+export interface NativeStreamedToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
 }
 
 type StreamedMetrics = Partial<ModelRunMetrics> & {
@@ -33,8 +53,16 @@ type ParsedStreamChunk = {
   answerDelta?: string;
   rawReasoningDelta?: string;
   reasoningSummaryDelta?: string;
+  toolCallDeltas?: NativeToolCallDelta[];
   finishReason?: string;
   usage?: StreamedMetrics;
+};
+
+type NativeToolCallDelta = {
+  index: number;
+  id?: string;
+  name?: string;
+  argumentsDelta?: string;
 };
 
 const BASE_MODEL_RUN_TIMEOUT_MS = 5 * 60 * 1_000;
@@ -65,6 +93,7 @@ export async function streamChatCompletion(
   fetchImpl: FetchLike = fetch,
   nowMs: () => number = () => Date.now(),
   timeoutMs?: number,
+  tools?: readonly NativeToolSchema[],
 ): Promise<ModelRunMetrics> {
   validateReasoningSelection(profile);
   const effectiveTimeoutMs = timeoutMs ?? defaultModelRunTimeoutMs(profile);
@@ -101,7 +130,7 @@ export async function streamChatCompletion(
           if (isContextCompactedMessages(attemptMessages)) {
             await handlers.onPhase('compressing');
           }
-          response = await requestChatCompletion(profile, attemptMessages, headers, requestSignal.signal, fetchImpl);
+          response = await requestChatCompletion(profile, attemptMessages, headers, requestSignal.signal, fetchImpl, tools);
         } catch (error) {
           if ((isContextLimitFailure(error) || isCompressedProviderFailure(error, attemptMessages)) && contextCompressionLevel < 3) {
             contextCompressionLevel += 1;
@@ -151,6 +180,7 @@ export async function streamChatCompletion(
               await handlers.onReasoningSummaryDelta(text);
             },
             onPhase: handlers.onPhase,
+            onNativeToolCalls: handlers.onNativeToolCalls,
           },
           requestSignal.signal,
           allAnswerText.length > 0,
@@ -621,6 +651,30 @@ async function readSseDeltas(
   const seenEventDataById = new Map<string, string>();
   let eventDataLines: string[] = [];
   let eventId: string | undefined;
+  const toolCallBuilders = new Map<number, { id: string; name: string; argumentsText: string }>();
+
+  const finishNativeToolCalls = async (): Promise<boolean> => {
+    if (toolCallBuilders.size === 0) return false;
+    const calls: NativeStreamedToolCall[] = [...toolCallBuilders.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, builder]) => {
+        let args: unknown;
+        try {
+          args = JSON.parse(builder.argumentsText.trim() || '{}');
+        } catch {
+          throw new Error(`Model returned tool call "${builder.name}" with invalid JSON arguments.`);
+        }
+        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+          throw new Error(`Model returned tool call "${builder.name}" with non-object arguments.`);
+        }
+        return { id: builder.id, name: builder.name, arguments: args as Record<string, unknown> };
+      });
+    toolCallBuilders.clear();
+    if (handlers.onNativeToolCalls) {
+      await handlers.onNativeToolCalls(calls);
+    }
+    return true;
+  };
 
   const dispatchEvent = async (): Promise<boolean> => {
     const data = eventDataLines.join('\n');
@@ -641,11 +695,22 @@ async function readSseDeltas(
     }
 
     if (data.trim() === '[DONE]') {
+      if (await finishNativeToolCalls()) return true;
       assertFinalAnswer(answer.value(), metrics.finishReason, allowLengthWithoutAnswer || Boolean(metrics.reasoningObserved));
       return true;
     }
 
     const chunk = parseStreamChunk(data);
+    if (chunk.toolCallDeltas) {
+      for (const toolCallDelta of chunk.toolCallDeltas) {
+        const builder = toolCallBuilders.get(toolCallDelta.index)
+          ?? { id: '', name: '', argumentsText: '' };
+        if (toolCallDelta.id) builder.id = toolCallDelta.id;
+        if (toolCallDelta.name) builder.name = toolCallDelta.name;
+        if (toolCallDelta.argumentsDelta) builder.argumentsText += toolCallDelta.argumentsDelta;
+        toolCallBuilders.set(toolCallDelta.index, builder);
+      }
+    }
     const answerDelta = chunk.answerDelta === undefined ? undefined : answer.push(chunk.answerDelta);
     const rawReasoningDelta = chunk.rawReasoningDelta === undefined
       ? undefined
@@ -703,6 +768,7 @@ async function readSseDeltas(
         buffer += decoder.decode();
         if (buffer && await consumeLine(buffer.replace(/\r$/, ''))) return metrics;
         if (eventDataLines.length > 0 && await dispatchEvent()) return metrics;
+        if (await finishNativeToolCalls()) return metrics;
         assertFinalAnswer(answer.value(), metrics.finishReason, allowLengthWithoutAnswer || Boolean(metrics.reasoningObserved));
         return metrics;
       }
@@ -809,13 +875,14 @@ async function requestChatCompletion(
   headers: Record<string, string>,
   signal: AbortSignal,
   fetchImpl: FetchLike,
+  tools?: readonly NativeToolSchema[],
 ): Promise<Response> {
   const send = (includeUsage: boolean) =>
     fetchImpl(`${profile.baseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers,
       signal,
-      body: JSON.stringify(buildChatCompletionBody(profile, messages, includeUsage)),
+      body: JSON.stringify(buildChatCompletionBody(profile, messages, includeUsage, tools)),
     });
 
   const first = await send(true);
@@ -842,6 +909,7 @@ function buildChatCompletionBody(
   profile: RuntimeModelProfile,
   messages: ChatMessage[],
   includeUsage: boolean,
+  tools?: readonly NativeToolSchema[],
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: profile.model,
@@ -850,6 +918,11 @@ function buildChatCompletionBody(
     temperature: 0.2,
     max_tokens: profile.maxOutputTokens,
   };
+
+  if (tools && tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = 'auto';
+  }
 
   if (includeUsage && profile.capabilities.usage.tokens) {
     body.stream_options = { include_usage: true };
@@ -896,6 +969,11 @@ function parseStreamChunk(data: string): ParsedStreamChunk {
         reasoning_content?: string;
         reasoning?: string;
         reasoning_summary?: string;
+        tool_calls?: Array<{
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
       };
       finish_reason?: string | null;
     }>;
@@ -918,6 +996,10 @@ function parseStreamChunk(data: string): ParsedStreamChunk {
   chunk.answerDelta = nonEmptyStreamText(delta?.content);
   chunk.rawReasoningDelta = nonEmptyStreamText(delta?.reasoning_content) ?? nonEmptyStreamText(delta?.reasoning);
   chunk.reasoningSummaryDelta = nonEmptyStreamText(delta?.reasoning_summary);
+  const toolCallDeltas = parseToolCallDeltas(delta?.tool_calls);
+  if (toolCallDeltas.length > 0) {
+    chunk.toolCallDeltas = toolCallDeltas;
+  }
   const finishReason = parsed.choices?.[0]?.finish_reason;
   if (typeof finishReason === 'string') {
     chunk.finishReason = finishReason;
@@ -939,6 +1021,23 @@ function parseStreamChunk(data: string): ParsedStreamChunk {
   }
   if (Object.keys(usage).length > 0) chunk.usage = usage;
   return chunk;
+}
+
+function parseToolCallDeltas(
+  toolCalls: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> | undefined,
+): NativeToolCallDelta[] {
+  if (!toolCalls) return [];
+  const deltas: NativeToolCallDelta[] = [];
+  for (const call of toolCalls) {
+    if (typeof call.index !== 'number') continue;
+    deltas.push({
+      index: call.index,
+      id: call.id,
+      name: call.function?.name,
+      argumentsDelta: call.function?.arguments,
+    });
+  }
+  return deltas;
 }
 
 async function modelRequestError(response: Response): Promise<Error> {

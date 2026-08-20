@@ -325,6 +325,7 @@ function canonicalCapabilities(): ModelCapabilities {
     concurrency: { defaultLimit: 1, configurable: true, maxLimit: 32 },
     streaming: true,
     usage: { tokens: true, reasoningTokens: true },
+    nativeTools: false,
   };
 }
 

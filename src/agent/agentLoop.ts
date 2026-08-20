@@ -13,8 +13,9 @@ import type { ModelRunMetrics, WorkspaceTrustLevel } from '../shared/domain.js';
 import type { AgentToolCall, AgentToolResult } from '../shared/toolProtocol.js';
 import { runAutoVerification } from './tools/autoVerify.js';
 import type { RuntimeModelProfile } from './database.js';
-import type { ChatMessage, ModelStreamHandlers } from './modelProvider.js';
+import type { ChatMessage, ModelStreamHandlers, NativeStreamedToolCall } from './modelProvider.js';
 import { classifyReply, steerKindsFor, STEER_RULES, type SteerKind } from './replyClassifier.js';
+import { buildNativeToolSchemas, type NativeToolSchema } from './tools/toolSchemas.js';
 import {
   executeAgentToolCall,
   READ_ONLY_TOOL_NAMES,
@@ -64,11 +65,14 @@ export interface AgentLoopOptions {
     messages: ChatMessage[],
     handlers: ModelStreamHandlers,
     signal: AbortSignal,
+    tools?: readonly NativeToolSchema[],
   ) => Promise<ModelRunMetrics>;
   emit: AgentLoopEmit;
   signal: AbortSignal;
   /** Caps tool round-trips per turn; omitted (the production default) is unlimited. */
   maxIterations?: number;
+  /** Use provider-native function calling instead of the fenced-JSON text protocol. */
+  nativeTools?: boolean;
   createCallId?: () => string;
   /** Stamped into every `AgentToolCall` for traceability. */
   turnId?: string;
@@ -320,6 +324,7 @@ export function stripToolFences(text: string): string {
 export function buildAgentSystemPrompt(
   workspaceDisplayName: string,
   trustLevel: WorkspaceTrustLevel = 'read-only',
+  nativeTools = false,
 ): string {
   const readOnly = trustLevel === 'read-only';
   const toolList = readOnly
@@ -330,17 +335,29 @@ export function buildAgentSystemPrompt(
     '',
     `The user has granted you ${readOnly ? 'read-only' : 'read-write'} access to the workspace "${workspaceDisplayName}".`,
     `You may inspect it with these tools: ${toolList}.`,
-    'To call tools, reply with fenced JSON blocks; independent calls may share one reply:',
-    '```tool',
-    '{"tool": "read_file", "input": {"path": "src/main.ts"}}',
-    '```',
-    'Tool inputs:',
+  ];
+  if (nativeTools) {
+    lines.push(
+      'Invoke tools through native function calling; independent calls may share one reply,',
+      'and the harness executes each call and returns its result.',
+      'Tool inputs:',
+    );
+  } else {
+    lines.push(
+      'To call tools, reply with fenced JSON blocks; independent calls may share one reply:',
+      '```tool',
+      '{"tool": "read_file", "input": {"path": "src/main.ts"}}',
+      '```',
+      'Tool inputs:',
+    );
+  }
+  lines.push(
     '- workspace_tree: {"path"?, "maxDepth"?, "maxEntries"?}',
     '- read_file: {"path", "startLine"?, "endLine"?}',
     '- search_code: {"query", "glob"?, "caseSensitive"?, "maxResults"?}',
     '- git_status: {} (working-tree state: branch, staged/unstaged/untracked entries)',
     '- git_diff: {"path"?, "staged"?} (unified diff of working tree or staged changes)',
-  ];
+  );
   if (!readOnly) {
     lines.push(
       '- apply_patch: {"path", "baseContentHash", "edits": [{"startLine", "endLine", "replacement"}]} or a batch {"files": [{...}, ...]} that changes several files in one atomic changeset,',
@@ -371,10 +388,12 @@ export function buildAgentSystemPrompt(
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopOutcome> {
   const maxIterations = Math.max(1, options.maxIterations ?? AGENT_LOOP_MAX_ITERATIONS);
   const createCallId = options.createCallId ?? (() => `call-${randomUUID()}`);
+  const nativeTools = options.nativeTools === true;
+  const toolSchemas = nativeTools ? buildNativeToolSchemas(options.toolContext.trustLevel) : undefined;
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content: buildAgentSystemPrompt(options.workspaceDisplayName, options.toolContext.trustLevel),
+      content: buildAgentSystemPrompt(options.workspaceDisplayName, options.toolContext.trustLevel, nativeTools),
     },
     ...options.initialMessages,
   ];
@@ -387,8 +406,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const readCounts = new Map<string, number>();
   let lastMetrics: ModelRunMetrics | undefined;
 
-  const runOnce = async (): Promise<{ text: string; metrics: ModelRunMetrics }> => {
+  const runOnce = async (
+    tools: readonly NativeToolSchema[] | undefined = toolSchemas,
+  ): Promise<{ text: string; metrics: ModelRunMetrics; nativeCalls: NativeStreamedToolCall[] }> => {
     let buffered = '';
+    const nativeCalls: NativeStreamedToolCall[] = [];
     const handlers: ModelStreamHandlers = {
       onAnswerDelta: (delta) => {
         buffered += delta;
@@ -396,20 +418,117 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       onRawReasoningDelta: options.reasoningHandlers?.onRawReasoningDelta ?? (() => undefined),
       onReasoningSummaryDelta: options.reasoningHandlers?.onReasoningSummaryDelta ?? (() => undefined),
       onPhase: options.reasoningHandlers?.onPhase ?? (() => undefined),
+      onNativeToolCalls: (calls) => {
+        nativeCalls.push(...calls);
+      },
     };
-    const metrics = await options.runModel(options.profile, messages, handlers, options.signal);
+    const metrics = await options.runModel(options.profile, messages, handlers, options.signal, tools);
     throwIfAborted(options.signal);
     lastMetrics = metrics;
-    return { text: buffered, metrics };
+    return { text: buffered, metrics, nativeCalls };
   };
 
   const steerLimitFor = (kind: SteerKind): number =>
     STEER_RULES.find((rule) => rule.kind === kind)?.limit ?? 0;
   const steersUsed = (kind: SteerKind): number => steerCounters.get(kind) ?? 0;
 
+  const executeToolCalls = async (
+    calls: Array<{ callId: string; tool: string; input: Record<string, unknown> }>,
+    deliverResult: (callId: string, feedback: string) => void,
+  ): Promise<void> => {
+    for (const parsed of calls) {
+      const call: AgentToolCall = {
+        callId: parsed.callId,
+        turnId: options.turnId ?? '',
+        toolName: parsed.tool as AgentToolCall['toolName'],
+        input: parsed.input,
+      };
+      await options.emit({ type: 'tool.started', toolId: parsed.callId, title: parsed.tool });
+      const result = await executeAgentToolCall(call, options.toolContext, {
+        signal: options.signal,
+        requestApproval: options.requestApproval,
+      });
+      throwIfAborted(options.signal);
+      toolCallsExecuted += 1;
+      let summary = summarizeToolResult(parsed.tool, result);
+      let feedback = toolResultMessage(parsed.callId, result);
+      if (parsed.tool === 'read_file' && result.status === 'success') {
+        const readPath = typeof parsed.input.path === 'string' ? parsed.input.path : '';
+        if (readPath) {
+          const count = (readCounts.get(readPath) ?? 0) + 1;
+          readCounts.set(readPath, count);
+          if (count % MAX_REPEAT_READS === 0) {
+            // Reading the same file over and over without writing burns the turn;
+            // force the model to act on the context it already has.
+            const note = `[harness] You have read "${readPath}" ${count} times without applying changes. Stop re-reading: apply the edits now with apply_patch (split large rewrites into ~120-line replacements), or answer with what you already know; use startLine/endLine only for a single missing range.`;
+            summary = `${summary}\n${note}`;
+            feedback = `${feedback}\n${note}`;
+          }
+        }
+      }
+      if (parsed.tool === 'apply_patch' && result.status === 'success') {
+        readCounts.clear();
+      }
+      if ((parsed.tool === 'apply_patch' || parsed.tool === 'run_command') && result.status === 'success') {
+        actingToolsExecuted += 1;
+      }
+      if (
+        parsed.tool === 'apply_patch' &&
+        result.status === 'success' &&
+        options.toolContext.trustLevel !== 'read-only' &&
+        autoVerificationsUsed < MAX_AUTO_VERIFICATIONS
+      ) {
+        // Deterministic safety net: build/typecheck the workspace right after a
+        // write so compile errors reach the model inside the same turn.
+        autoVerificationsUsed += 1;
+        const report = await runAutoVerification(options.toolContext.canonicalRootPath, options.signal);
+        if (report) {
+          summary = `${summary}\n${report}`;
+          feedback = `${feedback}\n${report}`;
+        }
+      }
+      await options.emit({ type: 'tool.output', toolId: parsed.callId, output: summary });
+      deliverResult(parsed.callId, feedback);
+    }
+  };
+
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     iterations = iteration;
-    const { text } = await runOnce();
+    const { text, nativeCalls } = await runOnce();
+
+    if (nativeTools) {
+      if (nativeCalls.length > 0) {
+        await options.emit({ type: 'loop.classified', kind: 'tool-calls', iteration });
+        messages.push({
+          role: 'assistant',
+          content: text,
+          tool_calls: nativeCalls.map((call) => ({
+            id: call.id,
+            type: 'function' as const,
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+          })),
+        });
+        await executeToolCalls(
+          nativeCalls.map((call) => ({ callId: call.id, tool: call.name, input: call.arguments })),
+          (callId, feedback) => {
+            messages.push({ role: 'tool', tool_call_id: callId, content: feedback });
+          },
+        );
+        continue;
+      }
+      await options.emit({ type: 'loop.classified', kind: 'answer', iteration });
+      const answer = stripToolFences(text);
+      if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
+      return {
+        metrics: lastMetrics,
+        iterations,
+        toolCallsExecuted,
+        budgetExhausted: false,
+        emptyAnswer: answer.length === 0,
+        falseCompletion: actingToolsExecuted === 0 && looksLikeUnverifiedCompletionClaim(answer),
+      };
+    }
+
     const parsedCalls = parseToolCalls(text);
     const answer = parsedCalls.length > 0 ? '' : stripToolFences(text);
     const classificationInput = {
@@ -453,61 +572,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     messages.push({ role: 'assistant', content: text });
-    for (const parsed of parsedCalls) {
-      const callId = createCallId();
-      const call: AgentToolCall = {
-        callId,
-        turnId: options.turnId ?? '',
-        toolName: parsed.tool as AgentToolCall['toolName'],
-        input: parsed.input,
-      };
-      await options.emit({ type: 'tool.started', toolId: callId, title: parsed.tool });
-      const result = await executeAgentToolCall(call, options.toolContext, {
-        signal: options.signal,
-        requestApproval: options.requestApproval,
-      });
-      throwIfAborted(options.signal);
-      toolCallsExecuted += 1;
-      let summary = summarizeToolResult(parsed.tool, result);
-      let feedback = toolResultMessage(callId, result);
-      if (parsed.tool === 'read_file' && result.status === 'success') {
-        const readPath = typeof parsed.input.path === 'string' ? parsed.input.path : '';
-        if (readPath) {
-          const count = (readCounts.get(readPath) ?? 0) + 1;
-          readCounts.set(readPath, count);
-          if (count % MAX_REPEAT_READS === 0) {
-            // Reading the same file over and over without writing burns the turn;
-            // force the model to act on the context it already has.
-            const note = `[harness] You have read "${readPath}" ${count} times without applying changes. Stop re-reading: apply the edits now with apply_patch (split large rewrites into ~120-line replacements), or answer with what you already know; use startLine/endLine only for a single missing range.`;
-            summary = `${summary}\n${note}`;
-            feedback = `${feedback}\n${note}`;
-          }
-        }
-      }
-      if (parsed.tool === 'apply_patch' && result.status === 'success') {
-        readCounts.clear();
-      }
-      if ((parsed.tool === 'apply_patch' || parsed.tool === 'run_command') && result.status === 'success') {
-        actingToolsExecuted += 1;
-      }
-      if (
-        parsed.tool === 'apply_patch' &&
-        result.status === 'success' &&
-        options.toolContext.trustLevel !== 'read-only' &&
-        autoVerificationsUsed < MAX_AUTO_VERIFICATIONS
-      ) {
-        // Deterministic safety net: build/typecheck the workspace right after a
-        // write so compile errors reach the model inside the same turn.
-        autoVerificationsUsed += 1;
-        const report = await runAutoVerification(options.toolContext.canonicalRootPath, options.signal);
-        if (report) {
-          summary = `${summary}\n${report}`;
-          feedback = `${feedback}\n${report}`;
-        }
-      }
-      await options.emit({ type: 'tool.output', toolId: callId, output: summary });
-      messages.push({ role: 'user', content: feedback });
-    }
+    await executeToolCalls(
+      parsedCalls.map((parsed) => ({ callId: createCallId(), tool: parsed.tool, input: parsed.input })),
+      (_callId, feedback) => {
+        messages.push({ role: 'user', content: feedback });
+      },
+    );
   }
 
   // Budget exhausted: force a closing answer that never falls back to pasted code.
@@ -515,7 +585,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     role: 'user',
     content: 'Iteration budget exhausted. Write the final answer now: summarize what was changed and what remains; never paste code blocks or ask the user to copy code manually.',
   });
-  const { text } = await runOnce();
+  const { text } = await runOnce(undefined);
   iterations += 1;
   const answer = stripToolFences(text);
   if (answer.length > 0) await options.emit({ type: 'answer.delta', text: answer });
