@@ -117,7 +117,11 @@ describe('AgentScope runtime manifest protocol', () => {
         '',
         '   ',
         '.',
+        './',
+        '.\\',
         'folder/..',
+        'folder/../',
+        'folder\\..\\',
         '../escape',
         'folder/../../escape',
         '/absolute/path',
@@ -135,6 +139,7 @@ describe('AgentScope runtime manifest protocol', () => {
 
   it.each([
     ['empty inventory path', { path: '' }],
+    ['root-equivalent inventory path', { path: 'folder/../' }],
     ['escaping inventory path', { path: '../escape' }],
     ['uppercase digest', { sha256: 'A'.repeat(64) }],
     ['short digest', { sha256: 'a'.repeat(63) }],

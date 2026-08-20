@@ -146,7 +146,12 @@ export function requireContainedRelativePath(value: unknown, label: string): str
   }
 
   const normalized = path.posix.normalize(portablePath);
-  if (normalized === '.' || normalized === '..' || normalized.startsWith('../')) {
+  const normalizedWithoutTrailingSeparators = normalized.replace(/\/+$/, '');
+  if (
+    normalizedWithoutTrailingSeparators === '.' ||
+    normalizedWithoutTrailingSeparators === '..' ||
+    normalizedWithoutTrailingSeparators.startsWith('../')
+  ) {
     throw new Error(`${label} must be a contained relative path.`);
   }
   return relativePath;
