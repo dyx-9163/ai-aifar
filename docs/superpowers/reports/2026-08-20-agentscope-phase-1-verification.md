@@ -111,8 +111,10 @@ The review contracts were exercised with repository-local Vitest:
 ## 6. Rollback
 
 Phase 1 introduced no database migration and performs no user-data conversion. Rollback therefore
-does not delete or rewrite a user's data directory. Revert every Phase 1 commit in this exact
-newest-to-oldest order:
+does not delete or rewrite a user's data directory. From a clean checkout of the Phase 1 release,
+revert the complete phase range with `git revert --no-edit 13e3c11..HEAD`; the range includes the
+documentation-only commit that contains these instructions. The fixed implementation commit set
+inside that range is, newest-to-oldest:
 
 ```text
 28c8a78 7612ff7 edb2d67 df07863 2db8321 06b299f 837187b 994bfcc 5748f6d 4bcbe6b 21b2856
