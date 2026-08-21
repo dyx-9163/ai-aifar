@@ -112,7 +112,7 @@ describe('sqlite app database', () => {
     const migrated = new DatabaseSync(path);
     try {
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 },
       ]);
     } finally {
       migrated.close();
@@ -318,7 +318,7 @@ describe('sqlite app database', () => {
         },
       ]);
       expect(migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 },
+        { version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 },
       ]);
     } finally {
       migrated.close();
@@ -381,6 +381,16 @@ describe('sqlite app database', () => {
     const first = openDatabase(path);
     const thread = first.createThread('Interrupted');
     first.createTurn(turnRecord('turn-1', thread.id, 'model-1', 'queued'));
+    first.upsertToolItem({
+      id: 'item-turn-1-tool-command',
+      threadId: thread.id,
+      turnId: 'turn-1',
+      kind: 'tool',
+      toolId: 'command',
+      title: 'run_command',
+      status: 'running',
+      createdAt: '2026-08-17T00:00:01.000Z',
+    });
     first.createTurn({ ...turnRecord('turn-completed', thread.id, 'model-1', 'completed'), incomplete: false });
     first.createTurn({ ...turnRecord('turn-failed', thread.id, 'model-1', 'failed'), incomplete: false });
     first.createTurn({ ...turnRecord('turn-cancelled', thread.id, 'model-1', 'cancelled'), incomplete: false });
@@ -389,6 +399,9 @@ describe('sqlite app database', () => {
     const second = openDatabase(path);
     expect(second.getSnapshot().turns).toContainEqual(expect.objectContaining({
       id: 'turn-1', status: 'interrupted', incomplete: true,
+    }));
+    expect(second.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+      id: 'item-turn-1-tool-command', status: 'interrupted',
     }));
     expect(second.getSnapshot().turns).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'turn-completed', status: 'completed', incomplete: false }),
@@ -1074,6 +1087,86 @@ describe('sqlite app database', () => {
     const second = openDatabase(dbPath);
     expect(second.getSnapshot().settings.language).toBe('zh-CN');
     second.close();
+  });
+
+  it('stores provider credentials outside snapshots and resolves joined runtime models', () => {
+    const db = openDatabase(createDbPath());
+    const provider = db.saveModelProvider({
+      name: 'DashScope',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      protocol: 'openai-chat-completions',
+      apiKey: 'provider-secret',
+      maxConcurrency: 3,
+      requestTimeoutMs: 300_000,
+      allowImages: true,
+      toolCallingMode: 'native',
+      thinkingMode: 'model-default',
+    });
+    const [model] = db.addProviderModels(provider.id, [{
+      modelId: 'deepseek-v4-pro',
+      contextWindowTokens: 65_536,
+      maxOutputTokens: 8192,
+      isDefault: true,
+    }]);
+
+    const snapshot = db.getSnapshot();
+    expect(snapshot.modelProviders).toContainEqual(expect.objectContaining({
+      id: provider.id,
+      apiKeyConfigured: true,
+      protocol: 'openai-chat-completions',
+    }));
+    expect(JSON.stringify(snapshot)).not.toContain('provider-secret');
+    expect(db.getModelProfileForRuntime(model.id)).toMatchObject({
+      providerId: provider.id,
+      providerName: 'DashScope',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      protocol: 'openai-chat-completions',
+      apiKey: 'provider-secret',
+      model: 'deepseek-v4-pro',
+      contextWindowTokens: 65_536,
+      maxOutputTokens: 8192,
+    });
+    db.close();
+  });
+
+  it('marks unadvertised configured models missing without deleting them', () => {
+    const db = openDatabase(createDbPath());
+    const provider = db.saveModelProvider({
+      name: 'Catalog provider',
+      baseUrl: 'https://example.test/v1',
+      protocol: 'openai-chat-completions',
+      maxConcurrency: 1,
+      requestTimeoutMs: 30_000,
+      allowImages: false,
+      toolCallingMode: 'text-fallback',
+      thinkingMode: 'model-default',
+    });
+    db.addProviderModels(provider.id, [{ modelId: 'model-a' }, { modelId: 'model-b' }]);
+
+    db.refreshProviderCatalogState(provider.id, ['model-a']);
+
+    expect(db.getSnapshot().modelProfiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerId: provider.id, model: 'model-a', catalogState: 'available' }),
+      expect.objectContaining({ providerId: provider.id, model: 'model-b', catalogState: 'missing' }),
+    ]));
+    db.close();
+  });
+
+  it('migrates legacy model rows to providers without changing model ids or keys', () => {
+    const path = createDbPath();
+    createV5ModelProfileDatabase(path);
+    const db = openDatabase(path);
+    const snapshot = db.getSnapshot();
+
+    expect(snapshot.modelProfiles.length).toBeGreaterThan(0);
+    expect(snapshot.modelProfiles.every((profile) => Boolean(profile.providerId))).toBe(true);
+    expect(snapshot.modelProviders?.length).toBeGreaterThan(0);
+    expect(db.getModelProfileForRuntime('legacy-local')).toMatchObject({
+      id: 'legacy-local',
+      apiKey: 'keep-this-secret',
+      protocol: 'openai-chat-completions',
+    });
+    db.close();
   });
 });
 

@@ -26,6 +26,7 @@ import { toToolError } from './toolInput.js';
 import { previewApplyPatch, runApplyPatch } from './applyPatch.js';
 import { classifyCommand, parseCommandInput, runRunCommand } from './runCommand.js';
 import { runGitDiff, runGitStatus } from './gitTools.js';
+import { runGetCurrentDatetime } from './getCurrentDatetime.js';
 import { runReadFile } from './readFile.js';
 import { runSearchCode } from './searchCode.js';
 import { runWorkspaceTree } from './workspaceTree.js';
@@ -60,6 +61,7 @@ export type ToolExecutor = (
 ) => Promise<{ output: unknown; truncated: boolean }>;
 
 const TOOL_REGISTRY: Record<AgentToolName, ToolExecutor> = {
+  get_current_datetime: runGetCurrentDatetime,
   workspace_tree: runWorkspaceTree,
   read_file: runReadFile,
   search_code: runSearchCode,
@@ -71,6 +73,7 @@ const TOOL_REGISTRY: Record<AgentToolName, ToolExecutor> = {
 
 /** Tools executable without approval in any workspace. */
 export const READ_ONLY_TOOL_NAMES: readonly AgentToolName[] = [
+  'get_current_datetime',
   'workspace_tree',
   'read_file',
   'search_code',

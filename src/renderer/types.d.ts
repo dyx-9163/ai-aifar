@@ -7,6 +7,11 @@ import type {
   ModelConnectionResult,
   ModelProfile,
   ModelProfileInput,
+  ModelProvider,
+  ModelProviderInput,
+  ModelCatalogResult,
+  ProviderConnectionResult,
+  ProviderModelInput,
   RuntimeSettingsInput,
   ThreadSummary,
   TurnAttachment,
@@ -36,6 +41,13 @@ declare global {
       saveModelProfile(profile: ModelProfileInput): Promise<ModelProfile>;
       deleteModelProfile(id: string): Promise<void>;
       testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult>;
+      saveModelProvider(provider: ModelProviderInput): Promise<ModelProvider>;
+      deleteModelProvider(id: string): Promise<void>;
+      discoverProviderModels(provider: ModelProviderInput): Promise<ModelCatalogResult>;
+      testModelProvider(provider: ModelProviderInput, modelId: string): Promise<ProviderConnectionResult>;
+      addProviderModels(providerId: string, models: ProviderModelInput[]): Promise<ModelProfile[]>;
+      updateProviderModel(providerId: string, model: ProviderModelInput & { id: string }): Promise<ModelProfile>;
+      deleteProviderModel(id: string): Promise<void>;
       registerWorkspace(path: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord>;
       deleteWorkspace(workspaceId: string): Promise<void>;
       setWorkspaceTrust(workspaceId: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord>;

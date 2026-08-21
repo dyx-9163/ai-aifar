@@ -6,7 +6,9 @@ import type {
   Item,
   LoopItem,
   MessageItem,
+  ModelCatalogResult,
   ModelConnectionResult,
+  ModelProviderInput,
   ModelProfileInput,
   ModelRunMetrics,
   ReasoningItem,
@@ -29,6 +31,7 @@ import { openDatabase, type AppDatabase, type RuntimeModelProfile } from './data
 import { normalizeWorkspacePath } from './workspace/pathSecurity.js';
 import { rollbackTurnFileChanges } from './workspace/fileCheckpoints.js';
 import { runAgentLoop } from './agentLoop.js';
+import { buildBaseAssistantSystemPrompt, runtimeContextSnapshot } from './runtimeContext.js';
 import { buildChatMessages } from './chatContext.js';
 import type { NativeToolSchema } from './tools/toolSchemas.js';
 import {
@@ -40,12 +43,14 @@ import {
   type EmitDemoEvent,
 } from './demoAgent.js';
 import {
-  streamChatCompletion,
+  streamModelResponse,
   testModelProfile,
   type ChatContentPart,
   type ChatMessage,
   type ModelStreamHandlers,
 } from './modelProvider.js';
+import { discoverProviderModels } from './providerCatalog.js';
+import { runtimeProviderFromInput, testProviderConnection } from './providerConnection.js';
 import {
   normalizeMaxConcurrency,
   normalizeMaxOutputTokens,
@@ -166,7 +171,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
   const postEvent = options.postEvent;
   const runModel: StreamModel = options.streamModel
     ?? ((modelProfile, messages, handlers, signal, tools) =>
-      streamChatCompletion(modelProfile, messages, handlers, signal, undefined, undefined, undefined, tools));
+      streamModelResponse(modelProfile, messages, handlers, signal, undefined, undefined, undefined, tools));
   const executeDemo = options.runDemo ?? runDemoTurn;
   const createTurnId = options.createTurnId ?? (() => `turn-${randomUUID()}`);
   const now = options.now ?? (() => new Date().toISOString());
@@ -180,9 +185,11 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
   };
 
   const scheduler = new ModelTurnScheduler(
-    (modelProfileId) => modelProfileId === DEMO_PROFILE_ID
+    (capacityKey) => capacityKey === DEMO_PROFILE_ID
       ? 1
-      : database.getModelProfileForRuntime(modelProfileId)?.maxConcurrency ?? 1,
+      : database.getModelProviderForRuntime(capacityKey)?.maxConcurrency
+        ?? database.getModelProfileForRuntime(capacityKey)?.maxConcurrency
+        ?? 1,
     {
       onQueued: async (turn, position) => {
         const context = active.get(turn.turnId);
@@ -208,6 +215,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         const context = active.get(turn.turnId);
         if (!context) return;
         settlePendingApproval(database, turn.turnId, 'rejected', now());
+        settleRunningToolItems(database, turn.threadId, turn.turnId);
         database.updateTurn(turn.turnId, {
           status: 'cancelled',
           completedAt: now(),
@@ -253,6 +261,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
     try {
       let outcome: 'completed' | 'awaiting-approval' = 'completed';
       if (profile) {
+        const runtimeContext = runtimeContextSnapshot({ now: new Date(now()) });
         await context.next({
           type: 'tool.started',
           toolId: `tool-${turn.turnId}-model`,
@@ -294,7 +303,9 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
             workspaceDisplayName: workspace.displayName,
             initialMessages: withVisionAttachments(history, attachments),
             runModel,
-            nativeTools: profile.capabilities.nativeTools,
+            nativeTools: profile.toolCallingMode
+              ? profile.toolCallingMode === 'native'
+              : profile.capabilities.nativeTools,
             emit: (payload) => context.next(payload),
             signal,
             turnId: turn.turnId,
@@ -305,6 +316,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
               onReasoningSummaryDelta: (delta) => context.next({ type: 'reasoning.summary.delta', text: delta }),
               onPhase: (phase) => context.next({ type: 'model.progress', phase }),
             },
+            runtimeContext,
           });
           finalMetrics = loopOutcome.metrics;
           budgetExhausted = loopOutcome.budgetExhausted;
@@ -322,7 +334,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
             [
               {
                 role: 'system',
-                content: 'You are a helpful private AI assistant. Keep answers clear, practical, and concise.',
+                content: buildBaseAssistantSystemPrompt(runtimeContext),
               },
               ...withVisionAttachments(history, attachments),
             ],
@@ -445,7 +457,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
       }
       const attachments = message.attachments ?? [];
       const selectedSupportsVision = Boolean(
-        selectedProfile?.capabilities.vision ||
+        (selectedProfile?.allowImages ?? selectedProfile?.capabilities.vision) ||
         (selectedProfile && isLocalQwenServiceProfile(selectedProfile)),
       );
       if (attachments.length > 0 && !selectedSupportsVision) {
@@ -483,6 +495,7 @@ export function createWorkerTurnRuntime(options: WorkerTurnRuntimeOptions): Work
         turnId,
         threadId: message.threadId,
         modelProfileId,
+        capacityKey: profile?.providerId ?? modelProfileId,
         title: profile ? `Chat with ${profile.name}` : demoTurnTitle(message.text),
         run: (signal) => execute(scheduled, message.text, profile, workspace, history, attachments, approvalResponse, signal),
       };
@@ -537,6 +550,20 @@ async function handlePortMessage(message: unknown): Promise<void> {
   }
 }
 
+export async function discoverRuntimeProviderModels(
+  input: ModelProviderInput,
+  appDatabase: AppDatabase,
+  fetchImpl: typeof fetch = fetch,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<ModelCatalogResult> {
+  const provider = runtimeProviderFromInput(input, appDatabase);
+  const result = await discoverProviderModels(provider, fetchImpl, signal);
+  if (input.id && result.status === 'available') {
+    appDatabase.refreshProviderCatalogState(input.id, result.models);
+  }
+  return result;
+}
+
 async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
   if (!database || !turnRuntime) throw new Error('Database is not ready.');
 
@@ -552,6 +579,26 @@ async function handleDesktopRequest(message: DesktopRequest): Promise<unknown> {
   }
   if (message.type === 'modelProfile.delete') return database.deleteModelProfile(message.id);
   if (message.type === 'modelProfile.test') return testRuntimeModelProfileConnection(message.profile, database);
+  if (message.type === 'modelProvider.save') {
+    const provider = database.saveModelProvider(message.provider);
+    turnRuntime.updateLimit(provider.id);
+    return provider;
+  }
+  if (message.type === 'modelProvider.delete') return database.deleteModelProvider(message.id);
+  if (message.type === 'modelProvider.discoverModels') {
+    return discoverRuntimeProviderModels(message.provider, database);
+  }
+  if (message.type === 'modelProvider.test') {
+    const provider = runtimeProviderFromInput(message.provider, database);
+    return testProviderConnection(provider, message.modelId, fetch, new AbortController().signal);
+  }
+  if (message.type === 'providerModel.addMany') {
+    return database.addProviderModels(message.providerId, message.models);
+  }
+  if (message.type === 'providerModel.update') {
+    return database.updateProviderModel(message.providerId, message.model);
+  }
+  if (message.type === 'providerModel.delete') return database.deleteProviderModel(message.id);
   if (message.type === 'language.set') return database.setLanguage(message.language);
   if (message.type === 'settings.update') return database.updateSettings(message.settings);
   if (message.type === 'approval.respond') {
@@ -659,6 +706,14 @@ function toolItemFromStartedEvent(
 
 function toolItemId(turnId: string, toolId: string): string {
   return `item-${turnId}-tool-${toolId}`;
+}
+
+function settleRunningToolItems(database: AppDatabase, threadId: string, turnId: string): void {
+  const items = database.getSnapshot().items[threadId] ?? [];
+  for (const item of items) {
+    if (item.kind !== 'tool' || item.turnId !== turnId || item.status !== 'running') continue;
+    database.upsertToolItem({ ...item, status: 'cancelled' });
+  }
 }
 
 export function testRuntimeModelProfileConnection(

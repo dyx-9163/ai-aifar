@@ -6,12 +6,6 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from 'playwright/test';
 import { openDatabase } from '../../src/agent/database';
-import { qwenCapabilities } from '../../src/agent/modelCapabilities';
-import {
-  LOCAL_QWEN_BASE_URL,
-  LOCAL_QWEN_MODEL,
-  LOCAL_QWEN_PROFILE_ID,
-} from '../../src/agent/localQwenProfile';
 import type { ReasoningDisplayMode, ReasoningOutputMode, ThreadSummary, TurnRecord } from '../../src/shared/domain';
 import type { AgentEvent } from '../../src/shared/protocol';
 import {
@@ -186,83 +180,61 @@ test('app completes a native tool calling turn end to end', async () => {
   }
 });
 
-test('shows output bounds and read-only direct-service diagnostics in Settings', async () => {
-  const userData = createUserData('settings-diagnostics');
-  const server = await startFakeModelServer(8080);
-  server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slots: 1 });
+test('manages a generic provider and its model catalog in Settings', async () => {
+  const userData = createUserData('provider-catalog');
+  const server = await startFakeModelServer();
+  server.setConnectionState({ modelIds: ['task-9-fake', 'deepseek-v4-pro'] });
   const seedDb = openDatabase(join(userData, 'app.sqlite'));
-  seedDb.saveModelProfile({
-    id: LOCAL_QWEN_PROFILE_ID,
-    name: 'Local Qwen3.5-9B',
-    provider: 'openai-compatible',
-    deploymentType: 'private',
-    runtimeType: 'llama.cpp',
-    baseUrl: LOCAL_QWEN_BASE_URL,
-    model: LOCAL_QWEN_MODEL,
-    capabilities: qwenCapabilities(),
-    reasoning: { mode: 'disabled', protocol: 'qwen', display: 'auto' },
-    maxConcurrency: 1,
-    maxOutputTokens: 2048,
-    isDefault: true,
+  const provider = seedDb.saveModelProvider({
+    name: 'Generic provider',
+    baseUrl: server.baseUrl,
+    protocol: 'openai-chat-completions',
+    apiKey: `catalog-${randomUUID()}`,
+    maxConcurrency: 2,
+    requestTimeoutMs: 30_000,
+    allowImages: false,
+    toolCallingMode: 'native',
+    thinkingMode: 'model-default',
   });
+  seedDb.addProviderModels(provider.id, [{
+    modelId: 'task-9-fake', displayName: 'Existing model', maxOutputTokens: 2048,
+    catalogState: 'available', isDefault: true,
+  }]);
   seedDb.close();
   let app: ElectronApplication | undefined;
-  let serverClosed = false;
   try {
     app = await launchPackagedApp(userData);
     const page = await app.firstWindow();
     await page.getByTitle('Open settings').click();
-    const maxOutputTokens = page.getByTestId('max-output-tokens-input');
-    const deploymentType = page.getByTestId('deployment-type-select');
-    const runtimeType = page.getByTestId('runtime-type-select');
-    const maxConcurrency = page.getByTestId('max-concurrency-input');
-    await expect(deploymentType).toHaveValue('private');
-    await expect(runtimeType).toHaveValue('llama.cpp');
-    await expect(maxConcurrency).toBeDisabled();
-    await expect(maxOutputTokens).toHaveValue('2048', { timeout: 2_000 });
-    for (const invalid of ['0', '1.5', '32769']) {
-      await maxOutputTokens.fill(invalid);
-      await expect(page.getByTestId('capability-validation-error')).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled();
-    }
-    await maxOutputTokens.fill('2048');
-    await expect(page.getByTestId('capability-validation-error')).toHaveCount(0);
 
-    const testConnection = page.getByRole('button', { name: 'Test connection' });
-    const status = page.getByTestId('capability-test-status');
-    const diagnostic = page.getByTestId('model-connection-diagnostic');
+    await expect(page.getByTestId('provider-protocol')).toHaveValue('openai-chat-completions');
+    await expect(page.locator('.provider-model-row')).toHaveCount(1);
+    await expect(page.locator('.provider-model-row')).toContainText('task-9-fake');
 
-    await testConnection.click();
-    await expect(status).toHaveAttribute('data-state', 'connected');
-    await expect(diagnostic).toContainText(LOCAL_QWEN_MODEL);
+    await page.getByRole('button', { name: 'Fetch models' }).click();
+    const catalog = page.getByTestId('model-catalog-dialog');
+    await expect(catalog).toBeVisible();
+    await catalog.getByRole('button', { name: 'Clear all' }).click();
+    await catalog.getByRole('button', { name: 'Select all' }).click();
+    await expect(catalog).toContainText('1 selected');
+    await catalog.getByPlaceholder('Search models').fill('deepseek');
+    await expect(catalog.locator('.catalog-model-option')).toHaveCount(1);
+    await captureEvidence(page, 'provider-model-catalog.png');
+    await catalog.getByRole('button', { name: 'Add selected' }).click();
 
-    server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slots: 3 });
-    await testConnection.click();
-    await expect(status).toHaveAttribute('data-state', 'connected');
-    await expect(diagnostic).toContainText('3');
-    await expect(maxConcurrency).toHaveValue('3');
+    await expect(page.locator('.provider-model-row')).toHaveCount(2);
+    await expect(page.locator('.provider-model-row').filter({ hasText: 'deepseek-v4-pro' })).toHaveCount(1);
+    await page.getByPlaceholder('Manual model IDs, comma or newline separated').fill('manual-model');
+    await page.getByRole('button', { name: 'Add manually' }).click();
+    await expect(page.locator('.provider-model-row')).toHaveCount(3);
 
-    server.setConnectionState({ modelIds: [LOCAL_QWEN_MODEL], slotsStatus: 404 });
-    await testConnection.click();
-    await expect(status).toHaveAttribute('data-state', 'slots-unverified');
-    await expect(maxConcurrency).toHaveValue('1');
-
-    server.setConnectionState({ modelIds: ['another-model'], slots: 1 });
-    await testConnection.click();
-    await expect(status).toHaveAttribute('data-state', 'model-mismatch');
-    await expect(diagnostic).toContainText(LOCAL_QWEN_MODEL);
-
-    await server.close();
-    serverClosed = true;
-    await testConnection.click();
-    await expect(status).toHaveAttribute('data-state', 'offline');
-    await expect(diagnostic).toContainText('model-runtime\\start-model.ps1');
-    await expect(diagnostic.locator('button')).toHaveCount(0);
-    await expect(diagnostic.locator('a')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: /^(Start|Stop|Restart|Status)$/ })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Test connection' }).click();
+    await expect.poll(() => server.requestCount()).toBe(1);
+    server.releaseNext([{ answer: 'OK' }]);
+    await expect(page.getByRole('status')).toContainText('Provider inference test succeeded.');
   } finally {
     await closeElectron(app);
-    if (!serverClosed) await server.close();
+    await server.close();
     removeUserData(userData);
   }
 });
@@ -565,7 +537,10 @@ test('redacts a provider failure secret from the failed turn event UI and SQLite
     });
 
     await expectThreadRuntime(page, thread.id, 'failed');
-    const visibleError = page.getByTestId('turn-error');
+    const operations = page.getByTestId('operation-panel');
+    await expect(operations).toBeVisible();
+    await operations.locator('summary').click();
+    const visibleError = operations.locator('.operation-row[data-operation-status="failed"]');
     await expect(visibleError).toBeVisible();
     for (const representation of secretRepresentations) {
       await expect(visibleError).not.toContainText(representation);

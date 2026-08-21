@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopHealth } from './main/appHealth.js';
-import type { LanguagePreference, ModelConnectionResult, ModelProfileInput, RuntimeSettingsInput, TurnAttachment, TurnRollbackReport, WorkspaceRecord, WorkspaceTrustLevel } from './shared/domain.js';
+import type { LanguagePreference, ModelConnectionResult, ModelProfileInput, ModelProviderInput, ProviderModelInput, RuntimeSettingsInput, TurnAttachment, TurnRollbackReport, WorkspaceRecord, WorkspaceTrustLevel } from './shared/domain.js';
 import type { AgentEvent } from './shared/protocol.js';
 
 contextBridge.exposeInMainWorld('desktop', {
@@ -25,6 +25,20 @@ contextBridge.exposeInMainWorld('desktop', {
   deleteModelProfile: (id: string) => ipcRenderer.invoke('desktop:request', { type: 'modelProfile.delete', id }),
   testModelProfile: (profile: ModelProfileInput): Promise<ModelConnectionResult> =>
     ipcRenderer.invoke('desktop:request', { type: 'modelProfile.test', profile }),
+  saveModelProvider: (provider: ModelProviderInput) =>
+    ipcRenderer.invoke('desktop:request', { type: 'modelProvider.save', provider }),
+  deleteModelProvider: (id: string) =>
+    ipcRenderer.invoke('desktop:request', { type: 'modelProvider.delete', id }),
+  discoverProviderModels: (provider: ModelProviderInput) =>
+    ipcRenderer.invoke('desktop:request', { type: 'modelProvider.discoverModels', provider }),
+  testModelProvider: (provider: ModelProviderInput, modelId: string) =>
+    ipcRenderer.invoke('desktop:request', { type: 'modelProvider.test', provider, modelId }),
+  addProviderModels: (providerId: string, models: ProviderModelInput[]) =>
+    ipcRenderer.invoke('desktop:request', { type: 'providerModel.addMany', providerId, models }),
+  updateProviderModel: (providerId: string, model: ProviderModelInput & { id: string }) =>
+    ipcRenderer.invoke('desktop:request', { type: 'providerModel.update', providerId, model }),
+  deleteProviderModel: (id: string) =>
+    ipcRenderer.invoke('desktop:request', { type: 'providerModel.delete', id }),
   registerWorkspace: (path: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord> =>
     ipcRenderer.invoke('desktop:request', { type: 'workspace.register', path, trustLevel }),
   deleteWorkspace: (workspaceId: string): Promise<void> =>

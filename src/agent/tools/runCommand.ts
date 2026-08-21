@@ -13,6 +13,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { requireToolString, toToolInteger, toolInputError } from './toolInput.js';
 import type { ToolExecutionExtras, WorkspaceToolContext } from './toolRouter.js';
 
@@ -36,6 +38,7 @@ export type CommandVerdict = 'allow' | 'approval' | 'forbidden';
 export const RUN_COMMAND_DEFAULT_TIMEOUT_MS = 60_000;
 export const RUN_COMMAND_MAX_TIMEOUT_MS = 180_000;
 export const RUN_COMMAND_MAX_OUTPUT_BYTES = 32 * 1024;
+const RUN_COMMAND_TERMINATION_GRACE_MS = 1_000;
 const RUN_COMMAND_MAX_ARGS = 32;
 const RUN_COMMAND_MAX_ARG_LENGTH = 500;
 const BARE_COMMAND_PATTERN = /^[A-Za-z0-9._+-]+$/;
@@ -57,6 +60,21 @@ const GIT_AUTO_ALLOWED_SUBCOMMANDS = new Set([
 
 /** Package manager script names considered verification work, auto-runnable. */
 const AUTO_ALLOWED_SCRIPT_NAMES = new Set(['test', 'tests', 'typecheck', 'type-check', 'lint', 'build', 'check']);
+const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn']);
+const PACKAGE_SCRIPT_SHORTHANDS = new Set([
+  'test',
+  'tests',
+  'start',
+  'dev',
+  'serve',
+  'watch',
+  'build',
+  'lint',
+  'check',
+  'typecheck',
+  'type-check',
+]);
+const LONG_RUNNING_SCRIPT_NAMES = new Set(['dev', 'start', 'serve', 'watch']);
 
 /**
  * Executables that are never executed, even after approval: shells, network
@@ -156,6 +174,7 @@ export async function runRunCommand(
   extras: ToolExecutionExtras = {},
 ): Promise<{ output: RunCommandOutput; truncated: boolean }> {
   const parsed = parseCommandInput(rawInput);
+  validateWorkspacePackageCommand(parsed, context.canonicalRootPath);
   const timeoutMs = toToolInteger(
     rawInput,
     'timeoutMs',
@@ -171,6 +190,17 @@ export async function runRunCommand(
     signal: extras.signal,
   });
 
+  if (extras.signal?.aborted) {
+    throw extras.signal.reason ?? new DOMException('The command was cancelled.', 'AbortError');
+  }
+  if (run.timedOut) {
+    throw toolInputError(
+      'command-timeout',
+      `Command "${parsed.command}" exceeded the ${timeoutMs}ms timeout and was stopped.`,
+      true,
+    );
+  }
+
   return {
     output: {
       command: parsed.command,
@@ -183,6 +213,73 @@ export async function runRunCommand(
     },
     truncated: run.truncated,
   };
+}
+
+interface PackageScriptInvocation {
+  manager: 'npm' | 'pnpm' | 'yarn';
+  script: string;
+}
+
+/** Rejects package commands that cannot safely complete as one-shot tool calls. */
+function validateWorkspacePackageCommand(command: ParsedCommand, cwd: string): void {
+  const invocation = parsePackageScriptInvocation(command);
+  if (!invocation) return;
+
+  if (LONG_RUNNING_SCRIPT_NAMES.has(invocation.script)) {
+    throw toolInputError(
+      'long-running-command',
+      `Package script "${invocation.script}" is a long-running process and cannot be started by run_command.`,
+    );
+  }
+
+  const expectedManager = detectWorkspacePackageManager(cwd);
+  if (!expectedManager || expectedManager === invocation.manager) return;
+
+  throw toolInputError(
+    'package-manager-mismatch',
+    `This workspace uses ${expectedManager}, not ${invocation.manager}. Run "${formatPackageScriptCommand(expectedManager, invocation.script)}" instead.`,
+  );
+}
+
+function parsePackageScriptInvocation(command: ParsedCommand): PackageScriptInvocation | undefined {
+  const manager = command.command.toLowerCase();
+  if (!PACKAGE_MANAGERS.has(manager)) return undefined;
+
+  const firstArg = command.args[0]?.toLowerCase();
+  const script = firstArg === 'run'
+    ? command.args[1]?.toLowerCase()
+    : firstArg && PACKAGE_SCRIPT_SHORTHANDS.has(firstArg)
+      ? firstArg
+      : undefined;
+  if (!script || script.startsWith('-')) return undefined;
+  return { manager: manager as PackageScriptInvocation['manager'], script };
+}
+
+function detectWorkspacePackageManager(cwd: string): PackageScriptInvocation['manager'] | undefined {
+  const packageJsonPath = join(cwd, 'package.json');
+  if (!existsSync(packageJsonPath)) return undefined;
+
+  try {
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as { packageManager?: unknown };
+    if (typeof packageJson.packageManager === 'string') {
+      const declared = /^(npm|pnpm|yarn)@/i.exec(packageJson.packageManager.trim())?.[1]?.toLowerCase();
+      if (declared && PACKAGE_MANAGERS.has(declared)) {
+        return declared as PackageScriptInvocation['manager'];
+      }
+    }
+  } catch {
+    // Let the selected package manager report malformed package.json content.
+  }
+
+  if (existsSync(join(cwd, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (existsSync(join(cwd, 'yarn.lock'))) return 'yarn';
+  if (existsSync(join(cwd, 'package-lock.json')) || existsSync(join(cwd, 'npm-shrinkwrap.json'))) return 'npm';
+  return 'npm';
+}
+
+function formatPackageScriptCommand(manager: PackageScriptInvocation['manager'], script: string): string {
+  if ((script === 'test' || script === 'start') && manager === 'npm') return `${manager} ${script}`;
+  return `${manager} run ${script}`;
 }
 
 interface SpawnOutcome {
@@ -241,6 +338,7 @@ function spawnCommand(
         cwd: cmdSafeCwd(options.cwd),
         shell: false,
         windowsHide: true,
+        detached: process.platform !== 'win32',
         ...(target.verbatim ? { windowsVerbatimArguments: true } : {}),
       });
     } catch (error) {
@@ -252,20 +350,27 @@ function spawnCommand(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let truncated = false;
-    let timedOut = false;
+    let terminationReason: 'timeout' | 'abort' | undefined;
+    let terminationFinished = false;
+    let closeCode: number | null = null;
+    let childClosed = false;
     let settled = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let terminationTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (outcome: SpawnOutcome) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (terminationTimer) clearTimeout(terminationTimer);
       options.signal?.removeEventListener('abort', onAbort);
       resolve(outcome);
     };
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (terminationTimer) clearTimeout(terminationTimer);
       options.signal?.removeEventListener('abort', onAbort);
       reject(error);
     };
@@ -288,17 +393,42 @@ function spawnCommand(
       }
     };
 
-    const killChild = (): void => {
-      timedOut = true;
-      child.kill();
+    const finishTerminatedChild = (): void => {
+      if (!terminationReason || !terminationFinished || !childClosed) return;
+      finish({
+        exitCode: closeCode,
+        stdout,
+        stderr,
+        timedOut: terminationReason === 'timeout',
+        truncated,
+      });
     };
-    const timer = setTimeout(killChild, options.timeoutMs);
+
+    const stopChild = (reason: 'timeout' | 'abort'): void => {
+      if (terminationReason || settled) return;
+      terminationReason = reason;
+      void terminateProcessTree(child, false).then(() => {
+        terminationFinished = true;
+        finishTerminatedChild();
+      });
+      terminationTimer = setTimeout(() => {
+        void terminateProcessTree(child, true);
+        finish({
+          exitCode: null,
+          stdout,
+          stderr,
+          timedOut: reason === 'timeout',
+          truncated,
+        });
+      }, RUN_COMMAND_TERMINATION_GRACE_MS);
+    };
+    timeoutTimer = setTimeout(() => stopChild('timeout'), options.timeoutMs);
     const onAbort = (): void => {
-      killChild();
+      stopChild('abort');
     };
     if (options.signal) {
       if (options.signal.aborted) {
-        killChild();
+        stopChild('abort');
       } else {
         options.signal.addEventListener('abort', onAbort, { once: true });
       }
@@ -307,9 +437,92 @@ function spawnCommand(
     child.stdout?.on('data', (chunk: Buffer) => append(chunk, 'stdout'));
     child.stderr?.on('data', (chunk: Buffer) => append(chunk, 'stderr'));
     child.on('error', fail);
-    child.on('close', (code, signalName) => {
-      if (signalName && !timedOut) timedOut = options.signal?.aborted === true;
-      finish({ exitCode: code, stdout, stderr, timedOut, truncated });
+    child.on('close', (code) => {
+      closeCode = code;
+      childClosed = true;
+      if (terminationReason) {
+        finishTerminatedChild();
+      } else {
+        finish({ exitCode: code, stdout, stderr, timedOut: false, truncated });
+      }
+    });
+  });
+}
+
+/** Stops the process group on POSIX and the complete PID tree on Windows. */
+function terminateProcessTree(child: ChildProcess, force: boolean): Promise<void> {
+  if (!child.pid) {
+    child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    return Promise.resolve();
+  }
+
+  if (process.platform === 'win32') {
+    return stopWindowsProcessTree(child.pid).catch(() => {
+      child.kill();
+    });
+  }
+
+  try {
+    process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM');
+  } catch {
+    child.kill(force ? 'SIGKILL' : 'SIGTERM');
+  }
+  return Promise.resolve();
+}
+
+const WINDOWS_STOP_TREE_SCRIPT = [
+  '$rootProcessId = [int]$env:PRIVATE_AI_PROCESS_TREE_ROOT_PID',
+  '$processes = @(Get-Process -ErrorAction SilentlyContinue)',
+  '$childrenByParent = @{}',
+  'foreach ($process in $processes) {',
+  '  try { $parent = $process.Parent } catch { continue }',
+  '  if ($null -eq $parent) { continue }',
+  '  $parentId = $parent.Id',
+  '  if (-not $childrenByParent.ContainsKey($parentId)) { $childrenByParent[$parentId] = @() }',
+  '  $childrenByParent[$parentId] += $process.Id',
+  '}',
+  'function Stop-Tree([int]$processId) {',
+  '  if ($childrenByParent.ContainsKey($processId)) {',
+  '    foreach ($childId in $childrenByParent[$processId]) { Stop-Tree $childId }',
+  '  }',
+  '  Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue',
+  '}',
+  'Stop-Tree $rootProcessId',
+].join('; ');
+
+function stopWindowsProcessTree(rootProcessId: number): Promise<void> {
+  return runWindowsTreeKiller('pwsh.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    WINDOWS_STOP_TREE_SCRIPT,
+  ], rootProcessId).catch(() => runWindowsTreeKiller('taskkill.exe', [
+    '/pid',
+    String(rootProcessId),
+    '/t',
+    '/f',
+  ], rootProcessId));
+}
+
+function runWindowsTreeKiller(command: string, args: string[], rootProcessId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let killer: ChildProcess;
+    try {
+      killer = spawn(command, args, {
+        env: { ...process.env, PRIVATE_AI_PROCESS_TREE_ROOT_PID: String(rootProcessId) },
+        shell: false,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    killer.once('error', reject);
+    killer.once('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Process-tree termination failed with exit code ${code ?? 'unknown'}.`));
     });
   });
 }

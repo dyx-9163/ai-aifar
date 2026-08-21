@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { AgentEvent } from '../src/shared/protocol';
 import type { AppSnapshot, Item, ModelCapabilities, ModelConnectionResult, ModelProfile, ReasoningItem } from '../src/shared/domain';
 import { openAiCapabilities, qwenCapabilities } from '../src/agent/modelCapabilities';
@@ -31,7 +32,10 @@ import {
   maxOutputTokensIsValid,
   modelConnectionDiagnostic,
   modelProfileFormFingerprint,
+  normalizeReasoningControlConfiguration,
   recommendedReasoningControlForProtocol,
+  reasoningControlConfiguration,
+  reasoningControlKind,
   reasoningConfigurationValidationIssue,
   reconcileEffortSelection,
   runModelProfileSave,
@@ -42,6 +46,7 @@ import {
   copyTextWithFeedback,
   groupReasoningItems,
   reasoningControls,
+  reasoningGroupForDisplay,
   reasoningMenuCommand,
   reasoningProfileForRuntime,
   selectReasoningContent,
@@ -262,7 +267,8 @@ describe('renderer state reducer', () => {
     let state = emptyState();
     let listener: ((event: AgentEvent) => void) | undefined;
     const unsubscribe = vi.fn();
-    const sync = startInitialAgentSync({
+    const failures: string[] = [];
+    const options = {
       readState: () => state,
       writeState: (next) => { state = next; },
       getSnapshot: async () => { throw new Error('snapshot unavailable'); },
@@ -271,9 +277,12 @@ describe('renderer state reducer', () => {
         return unsubscribe;
       },
       onReady: () => undefined,
-    });
+      onFailure: (error: unknown) => failures.push(error instanceof Error ? error.message : 'unknown'),
+    };
+    const sync = startInitialAgentSync(options);
 
     await expect(sync.ready).rejects.toThrow('snapshot unavailable');
+    expect(failures).toEqual(['snapshot unavailable']);
     expect(unsubscribe).toHaveBeenCalledTimes(1);
     const failedState = state;
     listener?.(approvalEvent());
@@ -318,8 +327,6 @@ describe('renderer state reducer', () => {
       reasoningInputMode: 'custom',
       effortOptions: ['vendor-low', 'vendor-max'],
       defaultEffort: 'vendor-low',
-      rawOutput: true,
-      summaryOutput: true,
       maxConcurrency: 4,
       maxOutputTokens: 2048,
     };
@@ -337,7 +344,7 @@ describe('renderer state reducer', () => {
         reasoning: {
           inputMode: 'custom',
           effortOptions: ['vendor-low', 'vendor-max'],
-          outputModes: ['raw', 'summary'],
+          outputModes: ['raw'],
           defaultEffort: 'vendor-low',
         },
         concurrency: { defaultLimit: 3, configurable: false, maxLimit: 9 },
@@ -368,8 +375,6 @@ describe('renderer state reducer', () => {
       reasoningInputMode: 'unsupported',
       effortOptions: [],
       defaultEffort: '',
-      rawOutput: false,
-      summaryOutput: false,
       maxConcurrency: 1,
       maxOutputTokens: 2048,
     });
@@ -493,11 +498,92 @@ describe('renderer state reducer', () => {
     })).toBeUndefined();
   });
 
+  it('maps one reasoning control atomically to the persisted request shape', () => {
+    expect(reasoningControlKind('none', 'unsupported')).toBe('unsupported');
+    expect(reasoningControlKind('qwen', 'toggle')).toBe('toggle');
+    expect(reasoningControlKind('openai', 'effort')).toBe('effort');
+    expect(reasoningControlKind('custom', 'custom')).toBe('unsupported');
+
+    expect(reasoningControlConfiguration('unsupported')).toEqual({
+      protocol: 'none', inputMode: 'unsupported', effortOptions: [], currentEffort: '', defaultEffort: '',
+    });
+    expect(reasoningControlConfiguration('toggle')).toEqual({
+      protocol: 'qwen', inputMode: 'toggle', effortOptions: [], currentEffort: '', defaultEffort: '',
+    });
+    expect(reasoningControlConfiguration('effort')).toEqual({
+      protocol: 'openai', inputMode: 'effort', effortOptions: ['high', 'max'], currentEffort: 'high', defaultEffort: 'high',
+    });
+
+    expect(normalizeReasoningControlConfiguration('custom', 'custom', {
+      effortOptions: ['vendor-value'], currentEffort: 'vendor-value', defaultEffort: 'vendor-value',
+    })).toEqual({
+      protocol: 'none', inputMode: 'unsupported', effortOptions: [], currentEffort: '', defaultEffort: '',
+    });
+    expect(normalizeReasoningControlConfiguration('openai', 'effort', {
+      effortOptions: ['low', 'high'], currentEffort: 'low', defaultEffort: 'high',
+    })).toEqual({
+      protocol: 'openai', inputMode: 'effort', effortOptions: ['low', 'high'], currentEffort: 'low', defaultEffort: 'high',
+    });
+  });
+
+  it('exposes provider protocols and removes per-model reasoning transport controls', () => {
+    const source = readFileSync(new URL('../src/renderer/components/SettingsView.vue', import.meta.url), 'utf-8');
+    const conversationSource = readFileSync(new URL('../src/renderer/components/Conversation.vue', import.meta.url), 'utf-8');
+
+    expect(source).toContain('data-testid="provider-protocol"');
+    expect(source).toContain('openai-chat-completions');
+    expect(source).toContain('openai-responses');
+    expect(source).toContain('anthropic-messages');
+    expect(source).not.toContain('data-testid="reasoning-control-select"');
+    expect(source).not.toContain('data-testid="reasoning-protocol-select"');
+    expect(source).not.toContain('data-testid="reasoning-input-mode"');
+    expect(source).not.toContain('data-testid="raw-output-toggle"');
+    expect(source).not.toContain('data-testid="summary-output-toggle"');
+    expect(conversationSource).not.toContain('data-testid="reasoning-runtime-menu"');
+    expect(conversationSource).not.toContain('updateModelRuntime');
+  });
+
+  it('reloads the snapshot after discovering models for a saved provider', async () => {
+    const originalWindow = globalThis.window;
+    const snapshot = {
+      ...emptyState().snapshot,
+      modelProfiles: [{
+        ...modelProfileFixture(openAiCapabilities([])),
+        providerId: 'provider-1',
+        catalogState: 'missing' as const,
+      }],
+    };
+    const getSnapshot = vi.fn(async () => snapshot);
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        desktop: {
+          discoverProviderModels: async () => ({ status: 'available' as const, models: [] }),
+          getSnapshot,
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const app = useApp();
+      await app.discoverProviderModels({
+        id: 'provider-1', name: 'Provider', baseUrl: 'https://example.test/v1',
+        protocol: 'openai-chat-completions', maxConcurrency: 1, requestTimeoutMs: 30_000,
+        allowImages: false, toolCallingMode: 'native', thinkingMode: 'model-default',
+      });
+
+      expect(getSnapshot).toHaveBeenCalledOnce();
+      expect(app.state.value.snapshot.modelProfiles[0]?.catalogState).toBe('missing');
+    } finally {
+      Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true });
+    }
+  });
+
   it('awaits model profile persistence and converts rejection into an explicit result', async () => {
     const input = buildModelProfileInput({
       name: 'New endpoint', baseUrl: 'http://localhost/v1', model: 'm', apiKey: '', isDefault: true,
       reasoningMode: 'disabled', reasoningProtocol: 'none', reasoningEffort: '', profileReasoningDisplay: 'auto',
-      reasoningInputMode: 'unsupported', effortOptions: [], defaultEffort: '', rawOutput: false, summaryOutput: false,
+      reasoningInputMode: 'unsupported', effortOptions: [], defaultEffort: '',
       maxConcurrency: 1, maxOutputTokens: 2048,
     });
     const saved = modelProfileFixture(openAiCapabilities([]));
@@ -534,8 +620,6 @@ describe('renderer state reducer', () => {
       reasoningInputMode: existing.capabilities.reasoning.inputMode,
       effortOptions: [],
       defaultEffort: '',
-      rawOutput: false,
-      summaryOutput: false,
       maxConcurrency: existing.maxConcurrency,
       maxOutputTokens: 2048,
     };
@@ -725,20 +809,25 @@ describe('renderer state reducer', () => {
     expect(createTranslator('zh-CN')('copyReasoningFailed')).toBe('复制思考内容失败，请重试。');
   });
 
-  it('keeps an unavailable explicit reasoning choice visible and auto mode phase-only while running', () => {
-    expect(shouldShowReasoningPanel('summary', [], false)).toBe(true);
-    expect(shouldShowReasoningPanel('raw', [], false)).toBe(true);
+  it('shows native reasoning only after matching output is observed', () => {
+    expect(shouldShowReasoningPanel('summary', [], false)).toBe(false);
+    expect(shouldShowReasoningPanel('raw', [], false)).toBe(false);
+    expect(shouldShowReasoningPanel('summary', [], true)).toBe(false);
     expect(shouldShowReasoningPanel('auto', [], true)).toBe(true);
     expect(shouldShowReasoningPanel('auto', [], false)).toBe(false);
+    expect(shouldShowReasoningPanel('summary', [summaryReasoning], false)).toBe(true);
+    expect(shouldShowReasoningPanel('summary', [rawReasoning], false)).toBe(false);
   });
 
-  it('keeps declared explicit reasoning pending until a running turn can emit its first delta', () => {
-    expect(selectReasoningContent('summary', [], { running: true, outputModes: ['summary'] })).toEqual({
-      availability: 'empty',
-      mode: 'summary',
-      text: '',
-    });
-    expect(selectReasoningContent('summary', [], { running: false, outputModes: ['summary'] })).toEqual({
+  it('does not render a raw-only group when native summary display is selected', () => {
+    const rawOnlyGroup = { turnId: 'turn-1', anchorId: rawReasoning.id, raw: rawReasoning };
+
+    expect(reasoningGroupForDisplay('summary', rawOnlyGroup, true)).toBeUndefined();
+    expect(reasoningGroupForDisplay('raw', rawOnlyGroup, true)).toBe(rawOnlyGroup);
+  });
+
+  it('does not invent observed native reasoning from profile declarations', () => {
+    expect(selectReasoningContent('summary', [])).toEqual({
       availability: 'unsupported',
       mode: 'summary',
       text: '',
@@ -755,10 +844,6 @@ describe('renderer state reducer', () => {
     );
 
     expect(resolved?.id).toBe('model-a');
-    expect(selectReasoningContent('summary', [], {
-      running: true,
-      outputModes: resolved?.capabilities.reasoning.outputModes ?? [],
-    })).toEqual({ availability: 'empty', mode: 'summary', text: '' });
   });
 
   it('closes the effort menu only for explicit close commands', () => {

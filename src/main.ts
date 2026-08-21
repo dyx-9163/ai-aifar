@@ -4,6 +4,10 @@ import path from 'node:path';
 import { AgentRequestBroker, type AgentReply } from './main/agentRequestBroker.js';
 import { buildAppHealth } from './main/appHealth.js';
 import {
+  loadAndRevealWindow,
+  startDesktopRuntimes,
+} from './main/appStartup.js';
+import {
   AgentScopeLifecycle,
   completeQuitAfterShutdown,
   type AgentScopeManagedRuntime,
@@ -84,6 +88,7 @@ function startAgentRuntime(): void {
 
 async function createWindow(): Promise<void> {
   const window = new BrowserWindow({
+    show: false,
     width: 1280,
     height: 820,
     minWidth: 980,
@@ -111,17 +116,11 @@ async function createWindow(): Promise<void> {
 
   mainWindow = window;
 
-  try {
-    startAgentRuntime();
-  } catch (error) {
-    console.error('Failed to start agent runtime:', error);
-  }
-
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-  } else {
-    await window.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
-  }
+  await loadAndRevealWindow(window, () => (
+    MAIN_WINDOW_VITE_DEV_SERVER_URL
+      ? window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL)
+      : window.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`))
+  ));
 }
 
 ipcMain.handle('app:health', () => ({
@@ -136,16 +135,27 @@ ipcMain.handle('desktop:request', async (_event, request: unknown) => {
 });
 
 app.whenReady().then(async () => {
-  void agentScopeLifecycle.start(loadAgentScopeRuntime).catch(() => {
-    if (agentScopeState.state !== 'stopped') {
-      agentScopeState = {
-        state: 'degraded',
-        reason: 'exited',
-        detail: 'AgentScope runtime exited unexpectedly.',
-      };
-    }
+  await startDesktopRuntimes({
+    openWindow: createWindow,
+    deferBackgroundStart: () => new Promise((resolve) => setTimeout(resolve, 0)),
+    startAgentRuntime: () => {
+      try {
+        startAgentRuntime();
+      } catch (error) {
+        console.error('Failed to start agent runtime:', error);
+      }
+    },
+    startAgentScope: () => agentScopeLifecycle.start(loadAgentScopeRuntime),
+    onAgentScopeFailure: () => {
+      if (agentScopeState.state !== 'stopped') {
+        agentScopeState = {
+          state: 'degraded',
+          reason: 'exited',
+          detail: 'AgentScope runtime exited unexpectedly.',
+        };
+      }
+    },
   });
-  await createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

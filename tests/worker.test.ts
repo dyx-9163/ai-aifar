@@ -9,6 +9,7 @@ import { openDatabase, type AppDatabase, type RuntimeModelProfile } from '../src
 import { streamChatCompletion, type ModelStreamHandlers } from '../src/agent/modelProvider';
 import {
   createWorkerTurnRuntime,
+  discoverRuntimeProviderModels,
   registerWorkspaceFromPath,
   requireAcceptedApprovalResponse,
   testRuntimeModelProfileConnection,
@@ -35,6 +36,61 @@ afterEach(() => {
 });
 
 describe('worker turn runtime', () => {
+  it('refreshes saved child model catalog state after provider discovery', async () => {
+    const harness = createHarness(async () => metrics());
+    const provider = harness.database.saveModelProvider({
+      name: 'Catalog provider',
+      baseUrl: 'https://models.example/v1',
+      protocol: 'openai-chat-completions',
+      apiKey: 'secret',
+      maxConcurrency: 1,
+      requestTimeoutMs: 30_000,
+      allowImages: false,
+      toolCallingMode: 'none',
+      thinkingMode: 'model-default',
+    });
+    harness.database.addProviderModels(provider.id, [
+      { modelId: 'available-model', catalogState: 'available' },
+      { modelId: 'removed-model', catalogState: 'available' },
+    ]);
+
+    const result = await discoverRuntimeProviderModels(
+      { ...provider, apiKey: 'secret' },
+      harness.database,
+      async () => Response.json({ data: [{ id: 'available-model' }] }),
+      new AbortController().signal,
+    );
+
+    expect(result.status).toBe('available');
+    expect(harness.database.getSnapshot().modelProfiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ model: 'available-model', catalogState: 'available' }),
+      expect.objectContaining({ model: 'removed-model', catalogState: 'missing' }),
+    ]));
+    harness.database.close();
+  });
+
+  it('injects trusted local time into direct chats without a workspace', async () => {
+    let systemPrompt = '';
+    const harness = createHarness(async (_profile, messages, handlers) => {
+      systemPrompt = messages[0]?.content ?? '';
+      await handlers.onAnswerDelta('今天是 2026-08-20。');
+      return metrics();
+    });
+    const thread = harness.database.createThread('Direct time question');
+
+    const { turnId } = harness.runtime.startTurn({
+      type: 'turn.start',
+      threadId: thread.id,
+      text: '今天是好久？',
+      modelProfileId: harness.profile.id,
+    });
+
+    await eventually(() => expect(typesFor(harness.events, turnId).at(-1)).toBe('turn.completed'));
+    expect(systemPrompt).toContain('2026-08-17');
+    expect(systemPrompt).toContain('never use a workspace command tool or shell command');
+    harness.database.close();
+  });
+
   it('routes a transient profile through the typed connection result without losing output bounds', async () => {
     const harness = createHarness(async () => metrics());
     const expected: ModelConnectionResult = {
@@ -486,6 +542,16 @@ describe('worker turn runtime', () => {
     const thread = harness.database.createThread('Running');
     const { turnId } = harness.runtime.startTurn({ type: 'turn.start', threadId: thread.id, text: 'run', modelProfileId: harness.profile.id });
     await eventually(() => expect(typesFor(harness.events, turnId)).toContain('answer.delta'));
+    harness.database.upsertToolItem({
+      id: `item-${turnId}-tool-command`,
+      threadId: thread.id,
+      turnId,
+      kind: 'tool',
+      toolId: 'command',
+      title: 'run_command',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+    });
 
     expect(harness.runtime.cancelTurn(turnId)).toBe(true);
     expect(harness.runtime.cancelTurn(turnId)).toBe(false);
@@ -497,6 +563,9 @@ describe('worker turn runtime', () => {
     expect(harness.database.getSnapshot().turns.find((turn) => turn.id === turnId)).toMatchObject({ status: 'cancelled', incomplete: true });
     expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
       id: `item-${turnId}-assistant`, text: 'partial', incomplete: true,
+    }));
+    expect(harness.database.getSnapshot().items[thread.id]).toContainEqual(expect.objectContaining({
+      id: `item-${turnId}-tool-command`, status: 'cancelled',
     }));
     harness.database.close();
   });

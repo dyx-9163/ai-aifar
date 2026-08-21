@@ -5,6 +5,7 @@ import { validateReasoningSelection } from './modelCapabilities.js';
 import { inspectModelConnection } from './modelConnection.js';
 import { createStreamTextNormalizer } from './streamTextNormalizer.js';
 import type { NativeToolSchema } from './tools/toolSchemas.js';
+import { providerAdapterFor } from './providerAdapters/registry.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -45,7 +46,7 @@ export interface NativeStreamedToolCall {
   arguments: Record<string, unknown>;
 }
 
-type StreamedMetrics = Partial<ModelRunMetrics> & {
+export type StreamedMetrics = Partial<ModelRunMetrics> & {
   serverTokensPerSecond?: number;
 };
 
@@ -76,7 +77,6 @@ const CONTINUE_AFTER_LENGTH_PROMPT =
 const CONTEXT_COMPRESSION_NOTICE = '[Local context compaction active]';
 const APPROX_CONTEXT_CHARS_PER_TOKEN = 4;
 const DEFAULT_CONTEXT_TOKEN_WINDOW = 32_768;
-const LONG_CONTEXT_TOKEN_WINDOW = 131_072;
 const CONTEXT_COMPRESSION_THRESHOLD = 0.75;
 const MIN_CONTINUATION_SECTION_TOKENS = 768;
 const MAX_REASONING_RECOVERY_ATTEMPTS = 1;
@@ -85,7 +85,7 @@ const OUTPUT_LIMIT_GUIDANCE =
 const REASONING_RECOVERY_PROMPT =
   'A previous attempt used its entire output budget on internal reasoning and never wrote the answer. Answer the latest user request directly and concisely now; keep any reasoning minimal and always finish with the concrete answer.';
 
-export async function streamChatCompletion(
+export async function streamModelResponse(
   profile: RuntimeModelProfile,
   messages: ChatMessage[],
   handlers: ModelStreamHandlers,
@@ -96,7 +96,7 @@ export async function streamChatCompletion(
   tools?: readonly NativeToolSchema[],
 ): Promise<ModelRunMetrics> {
   validateReasoningSelection(profile);
-  const effectiveTimeoutMs = timeoutMs ?? defaultModelRunTimeoutMs(profile);
+  const effectiveTimeoutMs = timeoutMs ?? profile.requestTimeoutMs ?? defaultModelRunTimeoutMs(profile);
   const startedAt = nowMs();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -125,12 +125,41 @@ export async function streamChatCompletion(
         throwIfAborted(requestSignal.signal);
         const answerLengthAtAttemptStart = allAnswerText.length;
         let answerDeltasInAttempt = 0;
-        let response: Response;
+        let attemptMetrics: StreamedMetrics;
         try {
           if (isContextCompactedMessages(attemptMessages)) {
             await handlers.onPhase('compressing');
           }
-          response = await requestChatCompletion(profile, attemptMessages, headers, requestSignal.signal, fetchImpl, tools);
+          attemptMetrics = await providerAdapterFor(profile.protocol ?? 'openai-chat-completions').stream({
+            profile,
+            messages: attemptMessages,
+            handlers: {
+              onAnswerDelta: async (text) => {
+                trackFirstToken();
+                const update = attemptIndex > 0 && answerDeltasInAttempt === 0
+                  ? appendContinuationAnswerDelta(allAnswerText, text)
+                  : appendAnswerDelta(allAnswerText, text);
+                answerDeltasInAttempt += 1;
+                allAnswerText = update.text;
+                if (update.delta) await handlers.onAnswerDelta(update.delta);
+              },
+              onRawReasoningDelta: async (text) => {
+                trackFirstToken();
+                await handlers.onRawReasoningDelta(text);
+              },
+              onReasoningSummaryDelta: async (text) => {
+                trackFirstToken();
+                await handlers.onReasoningSummaryDelta(text);
+              },
+              onPhase: handlers.onPhase,
+              onNativeToolCalls: handlers.onNativeToolCalls,
+            },
+            signal: requestSignal.signal,
+            fetchImpl,
+            headers,
+            tools,
+            allowLengthWithoutAnswer: allAnswerText.length > 0,
+          });
         } catch (error) {
           if ((isContextLimitFailure(error) || isCompressedProviderFailure(error, attemptMessages)) && contextCompressionLevel < 3) {
             contextCompressionLevel += 1;
@@ -152,39 +181,6 @@ export async function streamChatCompletion(
           }
           throw error;
         }
-
-        if (!response.body) {
-          throw new Error('Model response did not include a readable stream.');
-        }
-
-        const attemptMetrics = await readSseDeltas(
-          response.body,
-          {
-            onAnswerDelta: async (text) => {
-              trackFirstToken();
-              const update = attemptIndex > 0 && answerDeltasInAttempt === 0
-                ? appendContinuationAnswerDelta(allAnswerText, text)
-                : appendAnswerDelta(allAnswerText, text);
-              answerDeltasInAttempt += 1;
-              allAnswerText = update.text;
-              if (update.delta) {
-                await handlers.onAnswerDelta(update.delta);
-              }
-            },
-            onRawReasoningDelta: async (text) => {
-              trackFirstToken();
-              await handlers.onRawReasoningDelta(text);
-            },
-            onReasoningSummaryDelta: async (text) => {
-              trackFirstToken();
-              await handlers.onReasoningSummaryDelta(text);
-            },
-            onPhase: handlers.onPhase,
-            onNativeToolCalls: handlers.onNativeToolCalls,
-          },
-          requestSignal.signal,
-          allAnswerText.length > 0,
-        );
         streamedMetrics = mergeStreamMetrics(streamedMetrics, attemptMetrics);
         if (attemptMetrics.finishReason !== 'length') {
           break;
@@ -249,6 +245,20 @@ export async function streamChatCompletion(
   } finally {
     requestSignal.dispose();
   }
+}
+
+/** Compatibility entry point for existing callers while protocols are provider-selected. */
+export function streamChatCompletion(
+  profile: RuntimeModelProfile,
+  messages: ChatMessage[],
+  handlers: ModelStreamHandlers,
+  signal: AbortSignal,
+  fetchImpl: FetchLike = fetch,
+  nowMs: () => number = () => Date.now(),
+  timeoutMs?: number,
+  tools?: readonly NativeToolSchema[],
+): Promise<ModelRunMetrics> {
+  return streamModelResponse(profile, messages, handlers, signal, fetchImpl, nowMs, timeoutMs, tools);
 }
 
 function defaultModelRunTimeoutMs(profile: RuntimeModelProfile): number {
@@ -405,8 +415,14 @@ function compressedContinuationMessages(
   ];
 }
 
+export function contextTokenWindow(profile: RuntimeModelProfile): number {
+  return Number.isInteger(profile.contextWindowTokens) && (profile.contextWindowTokens ?? 0) > 0
+    ? profile.contextWindowTokens!
+    : DEFAULT_CONTEXT_TOKEN_WINDOW;
+}
+
 function contextCompressionSoftLimit(profile: RuntimeModelProfile): number {
-  const contextWindow = profile.capabilities.longContext ? LONG_CONTEXT_TOKEN_WINDOW : DEFAULT_CONTEXT_TOKEN_WINDOW;
+  const contextWindow = contextTokenWindow(profile);
   const reservedForOutput = Math.max(1_024, profile.maxOutputTokens);
   const usableInputWindow = Math.max(2_048, contextWindow - reservedForOutput - 512);
   return Math.floor(usableInputWindow * CONTEXT_COMPRESSION_THRESHOLD);
@@ -628,13 +644,17 @@ export async function testModelProfile(
     ]);
   } catch (error) {
     if (timedOut) return connectionTimeoutResult(profile, timeoutMs);
-    throw new Error(safeErrorText(error, profile.apiKey ? [profile.apiKey] : [], 500));
+    throw new Error(safeErrorText(
+      error,
+      [profile.apiKey ?? '', ...Object.values(profile.customHeaders ?? {})],
+      500,
+    ));
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
-async function readSseDeltas(
+export async function readSseDeltas(
   body: ReadableStream<Uint8Array>,
   handlers: ModelStreamHandlers,
   signal: AbortSignal,
@@ -869,7 +889,7 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('Turn was cancelled.', 'AbortError');
 }
 
-async function requestChatCompletion(
+export async function requestChatCompletion(
   profile: RuntimeModelProfile,
   messages: ChatMessage[],
   headers: Record<string, string>,
@@ -928,17 +948,20 @@ function buildChatCompletionBody(
     body.stream_options = { include_usage: true };
   }
 
-  if (profile.capabilities.reasoning.inputMode === 'toggle') {
-    body.chat_template_kwargs = { enable_thinking: profile.reasoning.mode !== 'disabled' };
-  }
-  if (
-    profile.capabilities.reasoning.inputMode === 'effort'
-    && profile.reasoning.mode !== 'disabled'
-  ) {
-    body.reasoning_effort = profile.reasoning.effort;
-  }
-  if (profile.capabilities.reasoning.inputMode === 'custom') {
-    mergeCustomRequestBody(body, profile.capabilities.reasoning.customRequestBody);
+  if (profile.thinkingMode === 'custom') {
+    mergeCustomRequestBody(body, profile.customRequestBody);
+  } else if (profile.thinkingMode === undefined) {
+    // Legacy profiles retain their declared behavior until migration joins
+    // them to a provider. New providers never infer fields from model names.
+    if (profile.capabilities.reasoning.inputMode === 'toggle') {
+      body.chat_template_kwargs = { enable_thinking: profile.reasoning.mode !== 'disabled' };
+    }
+    if (profile.capabilities.reasoning.inputMode === 'effort' && profile.reasoning.mode !== 'disabled') {
+      body.reasoning_effort = profile.reasoning.effort;
+    }
+    if (profile.capabilities.reasoning.inputMode === 'custom') {
+      mergeCustomRequestBody(body, profile.capabilities.reasoning.customRequestBody);
+    }
   }
 
   return body;
@@ -947,7 +970,10 @@ function buildChatCompletionBody(
 function mergeCustomRequestBody(body: Record<string, unknown>, custom: Record<string, unknown> | undefined): void {
   if (!custom) return;
   for (const [key, value] of Object.entries(custom)) {
-    if (key === 'model' || key === 'messages' || key === 'stream') {
+    if (
+      key === 'model' || key === 'messages' || key === 'stream' || key === 'max_tokens'
+      || key === 'tools' || key === 'tool_choice' || key === 'stream_options'
+    ) {
       continue;
     }
     const existing = body[key];

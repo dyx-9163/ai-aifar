@@ -7,6 +7,8 @@ export type AgentReply =
   | { type: 'agent.reply'; requestId: string; ok: false; error: string };
 
 interface PendingRequest {
+  request: unknown;
+  sent: boolean;
   resolve(value: unknown): void;
   reject(reason?: unknown): void;
   deadline: ReturnType<typeof setTimeout>;
@@ -28,25 +30,24 @@ export class AgentRequestBroker {
       this.disconnect('Agent runtime connection was replaced.');
     }
     this.port = port;
+    for (const [requestId, pending] of this.pending) {
+      if (!pending.sent) {
+        this.sendPendingRequest(requestId, pending, port);
+      }
+    }
   }
 
   request(request: unknown): Promise<unknown> {
-    const port = this.port;
-    if (!port) {
-      return Promise.reject(new Error('Agent runtime is not ready.'));
-    }
-
     const requestId = `request-${this.nextRequestId++}`;
     return new Promise((resolve, reject) => {
       const deadline = setTimeout(() => {
         if (!this.pending.delete(requestId)) return;
         reject(new Error(`Agent request timed out after ${this.deadlineMs}ms.`));
       }, this.deadlineMs);
-      this.pending.set(requestId, { resolve, reject, deadline });
-      try {
-        port.postMessage({ type: 'agent.request', requestId, request });
-      } catch (error) {
-        this.rejectRequest(requestId, error);
+      const pending = { request, sent: false, resolve, reject, deadline };
+      this.pending.set(requestId, pending);
+      if (this.port) {
+        this.sendPendingRequest(requestId, pending, this.port);
       }
     });
   }
@@ -81,5 +82,18 @@ export class AgentRequestBroker {
   private rejectRequest(requestId: string, reason: unknown): void {
     const pending = this.takeRequest(requestId);
     pending?.reject(reason);
+  }
+
+  private sendPendingRequest(
+    requestId: string,
+    pending: PendingRequest,
+    port: AgentRequestPort,
+  ): void {
+    pending.sent = true;
+    try {
+      port.postMessage({ type: 'agent.request', requestId, request: pending.request });
+    } catch (error) {
+      this.rejectRequest(requestId, error);
+    }
   }
 }

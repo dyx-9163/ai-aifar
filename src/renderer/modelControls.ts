@@ -19,11 +19,6 @@ export interface ReasoningContentSelection {
   text: string;
 }
 
-export interface ReasoningSelectionContext {
-  running: boolean;
-  outputModes: ReasoningOutputMode[];
-}
-
 export type ComposerAction = 'send' | 'cancel' | 'stop';
 
 export interface ReasoningItemGroup {
@@ -67,7 +62,6 @@ export function reasoningControls(profile: ModelProfile): ReasoningControl {
 export function selectReasoningContent(
   preference: ReasoningDisplayMode,
   items: ReasoningItem[],
-  context?: ReasoningSelectionContext,
 ): ReasoningContentSelection {
   const itemByMode = (mode: ReasoningOutputMode) => items.find((item) => item.mode === mode && item.text.length > 0);
   const selected = preference === 'auto'
@@ -78,9 +72,6 @@ export function selectReasoningContent(
     return { availability: 'available', mode: selected.mode, text: selected.text };
   }
   if (preference !== 'auto') {
-    if (context?.running && context.outputModes.includes(preference)) {
-      return { availability: 'empty', mode: preference, text: '' };
-    }
     return { availability: 'unsupported', mode: preference, text: '' };
   }
   return { availability: 'empty', text: '' };
@@ -107,7 +98,19 @@ export function shouldShowReasoningPanel(
   items: ReasoningItem[],
   running: boolean,
 ): boolean {
-  return items.length > 0 || running || preference !== 'auto';
+  if (preference === 'auto') {
+    return items.length > 0 || running;
+  }
+  return items.some((item) => item.mode === preference && item.text.length > 0);
+}
+
+export function reasoningGroupForDisplay(
+  preference: ReasoningDisplayMode,
+  group: ReasoningItemGroup,
+  running: boolean,
+): ReasoningItemGroup | undefined {
+  const items = [group.raw, group.summary].filter((item): item is ReasoningItem => Boolean(item));
+  return shouldShowReasoningPanel(preference, items, running) ? group : undefined;
 }
 
 export function composerAction(runtime?: ThreadRuntimeState): ComposerAction {

@@ -11,16 +11,18 @@ import { WorkspaceSecurityError } from '../workspace/pathSecurity.js';
 
 export class ToolInputError extends Error {
   readonly code: string;
+  readonly retryable: boolean;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, retryable = false) {
     super(message);
     this.name = 'ToolInputError';
     this.code = code;
+    this.retryable = retryable;
   }
 }
 
-export function toolInputError(code: string, message: string): ToolInputError {
-  return new ToolInputError(code, message);
+export function toolInputError(code: string, message: string, retryable = false): ToolInputError {
+  return new ToolInputError(code, message, retryable);
 }
 
 interface ToolStringOptions {
@@ -95,7 +97,7 @@ export function securityErrorCode(error: WorkspaceSecurityError): string {
 /** Normalizes any thrown failure into the structured tool error shape. */
 export function toToolError(error: unknown): AgentToolError {
   if (error instanceof ToolInputError) {
-    return { code: error.code, message: error.message, retryable: false };
+    return { code: error.code, message: error.message, retryable: error.retryable };
   }
   if (error instanceof WorkspaceSecurityError) {
     return { code: error.code, message: error.message, retryable: false };

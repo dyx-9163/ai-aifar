@@ -380,9 +380,10 @@ describe('run_command execution', () => {
     ['yarn', ['watch']],
   ])('rejects the long-running package script %s %s', async (command, args) => {
     writeFileSync(join(workspaceRoot, 'package.json'), JSON.stringify({
-      packageManager: `${command}@1.0.0`,
       scripts: { dev: 'node --version', start: 'node --version', serve: 'node --version', watch: 'node --version' },
     }));
+    const lockfile = command === 'pnpm' ? 'pnpm-lock.yaml' : command === 'yarn' ? 'yarn.lock' : 'package-lock.json';
+    writeFileSync(join(workspaceRoot, lockfile), command === 'pnpm' ? 'lockfileVersion: 9\n' : '{}');
 
     const result = await runTool('run_command', { command, args });
 
@@ -440,15 +441,15 @@ describe('run_command execution', () => {
       'run_command',
       { command: 'node', args: ['-e', 'setTimeout(function keepAlive() {}, 30000)'], timeoutMs: 300 },
     );
-    expect(result).toEqual(expect.objectContaining({ status: 'success' }));
-    const output = result.output as RunCommandOutput;
-    expect(output.timedOut).toBe(true);
-    expect(output.exitCode).toBeNull();
+    expect(result.status).toBe('error');
+    expect(result.error).toMatchObject({
+      code: 'command-timeout',
+      retryable: true,
+    });
   }, 15_000);
 
   it('cancels the whole package-manager process tree without leaving a descendant running', async () => {
     writeFileSync(join(workspaceRoot, 'package.json'), JSON.stringify({
-      packageManager: 'pnpm@10.0.0',
       scripts: { hold: 'node hold.js' },
     }));
     writeFileSync(join(workspaceRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');

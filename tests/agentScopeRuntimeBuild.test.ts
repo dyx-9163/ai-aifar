@@ -36,6 +36,10 @@ import {
   parseBundledInterpreterVerificationOutput,
   verifyRuntimeArtifact,
 } from '../scripts/agentscope-runtime/verify.mjs';
+import {
+  createSimpleBuildInvocations,
+  resolveBuildUvExecutable,
+} from '../scripts/simple-build.mjs';
 
 const manifestFile = (filePath: string, overrides: Record<string, unknown> = {}) => ({
   path: filePath,
@@ -87,6 +91,78 @@ const createRuntimeFixture = async (runtimeRoot: string) => {
   await writeFile(manifestPath, `${JSON.stringify(manifest({ files }), null, 2)}\n`, 'utf8');
   return manifestPath;
 };
+
+describe('simple Windows build entrypoint', () => {
+  it('selects the repository uv and reuses a verified AgentScope runtime', async () => {
+    const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), 'private-ai-simple-build-'));
+    try {
+      const localUv = path.join(repositoryRoot, '.tmp-uv', 'uv.exe');
+      await mkdir(path.dirname(localUv), { recursive: true });
+      await writeFile(localUv, 'valid-uv-binary', 'utf8');
+
+      await expect(resolveBuildUvExecutable({
+        repositoryRoot,
+        environment: {},
+      })).resolves.toBe(localUv);
+
+      expect(createSimpleBuildInvocations(repositoryRoot, 'node.exe')).toEqual({
+        verifyRuntime: {
+          command: 'node.exe',
+          args: [path.join(repositoryRoot, 'scripts', 'agentscope-runtime', 'verify.mjs')],
+        },
+        buildRuntime: {
+          command: 'node.exe',
+          args: [path.join(repositoryRoot, 'scripts', 'agentscope-runtime', 'build.mjs')],
+        },
+        packageApplication: {
+          command: 'node.exe',
+          args: [
+            path.join(repositoryRoot, 'node_modules', '@electron-forge', 'cli', 'dist', 'electron-forge.js'),
+            'package',
+          ],
+        },
+        verifyPackage: {
+          command: 'node.exe',
+          args: [path.join(repositoryRoot, 'scripts', 'verify-package-contents.mjs')],
+        },
+        makeZip: {
+          command: 'node.exe',
+          args: [
+            path.join(repositoryRoot, 'node_modules', '@electron-forge', 'cli', 'dist', 'electron-forge.js'),
+            'make',
+            '--skip-package',
+          ],
+        },
+      });
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an explicitly configured empty uv executable', async () => {
+    const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), 'private-ai-simple-build-'));
+    try {
+      const emptyUv = path.join(repositoryRoot, 'empty-uv.exe');
+      await writeFile(emptyUv, '');
+
+      await expect(resolveBuildUvExecutable({
+        repositoryRoot,
+        environment: { UV_BINARY: emptyUv },
+      })).rejects.toThrow(/empty/i);
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the user-facing build command as one script that produces the distributable', async () => {
+    const packageJson = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(packageJson.scripts.build).toBe('node scripts/simple-build.mjs');
+    expect(packageJson.scripts.make).toBe('pnpm package && electron-forge make --skip-package');
+  });
+});
 
 describe('AgentScope embedded runtime build policy', () => {
   it('matches Windows CLI entry paths canonically and case-insensitively', () => {

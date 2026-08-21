@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import type {
   Item,
   ModelProfile,
+  ModelProvider,
   ReasoningDisplayMode,
   ReasoningItem,
   ThreadRuntimeState,
@@ -18,10 +19,7 @@ import { renderMarkdown } from '../markdown';
 import {
   copyTextWithFeedback,
   groupReasoningItems,
-  reasoningControls,
-  reasoningMenuCommand,
-  reasoningProfileForRuntime,
-  shouldShowReasoningPanel,
+  reasoningGroupForDisplay,
   type ReasoningItemGroup,
 } from '../modelControls';
 import { isNearBottom } from '../scrolling';
@@ -40,6 +38,7 @@ const props = defineProps<{
   reasoningDisplayMode: ReasoningDisplayMode;
   loading: boolean;
   modelProfiles: ModelProfile[];
+  modelProviders: ModelProvider[];
   activeModelProfileId?: string;
   activeModelProfile?: ModelProfile;
   /** Display name of the workspace the active thread belongs to. */
@@ -55,7 +54,6 @@ const emit = defineEmits<{
   openSettings: [];
   selectModel: [modelProfileId?: string];
   undoTurn: [turnId: string];
-  updateModelRuntime: [patch: { reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string } }];
 }>();
 
 const timelineGroups = computed(() => createTurnTimelineGroups(props.items, props.events, props.turns, props.t));
@@ -63,19 +61,23 @@ const reasoningGroups = computed(() => groupReasoningItems(
   props.items.filter((item): item is ReasoningItem => item.kind === 'reasoning'),
 ));
 const reasoningGroupByTurn = computed(() => new Map(reasoningGroups.value.map((group) => [group.turnId, group])));
+const activeModelProvider = computed(() => props.modelProviders.find(
+  (provider) => provider.id === props.activeModelProfile?.providerId,
+));
 const supportsVision = computed(() => Boolean(
-  props.activeModelProfile?.capabilities.vision ||
+  (activeModelProvider.value?.allowImages ?? props.activeModelProfile?.capabilities.vision) ||
   (props.activeModelProfile && isLocalQwenServiceProfile(props.activeModelProfile)),
 ));
+const providerModelGroups = computed(() => props.modelProviders.map((provider) => ({
+  provider,
+  models: props.modelProfiles.filter((model) => model.providerId === provider.id && model.enabled !== false),
+})).filter((group) => group.models.length > 0));
+const legacyModels = computed(() => props.modelProfiles.filter((model) => !model.providerId && model.enabled !== false));
 const timelineRef = ref<HTMLElement>();
 const isPinnedToBottom = ref(true);
 const hasUnreadBelow = ref(false);
 const isAutoScrolling = ref(false);
 const messageCopyState = ref<Record<string, 'idle' | 'copied' | 'failed'>>({});
-const reasoningMenuOpen = ref(false);
-const reasoningMenuRef = ref<HTMLElement>();
-const reasoningTriggerRef = ref<HTMLButtonElement>();
-const reasoningMenuId = 'reasoning-effort-menu';
 const copyResetTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const scrollSignature = computed(() =>
@@ -95,10 +97,8 @@ const scrollSignature = computed(() =>
 function reasoningGroupForTurn(group: TurnTimelineGroup): ReasoningItemGroup | undefined {
   if (!group.turnId) return undefined;
   const existing = reasoningGroupByTurn.value.get(group.turnId);
-  if (existing) return existing;
-  return shouldShowReasoningPanel(props.reasoningDisplayMode, [], group.running)
-    ? { turnId: group.turnId, anchorId: `reasoning-${group.turnId}` }
-    : undefined;
+  const candidate = existing ?? { turnId: group.turnId, anchorId: `reasoning-${group.turnId}` };
+  return reasoningGroupForDisplay(props.reasoningDisplayMode, candidate, group.running);
 }
 
 function handleModelChange(event: Event): void {
@@ -106,27 +106,6 @@ function handleModelChange(event: Event): void {
   emit('selectModel', value || undefined);
 }
 
-const reasoningControl = computed(() =>
-  props.activeModelProfile ? reasoningControls(props.activeModelProfile) : { kind: 'hidden' as const },
-);
-const runtimeReasoningProfile = computed(() => reasoningProfileForRuntime(
-  props.modelProfiles,
-  props.activeModelProfile,
-  props.activeRuntime,
-));
-const activeReasoningEffort = computed(() =>
-  props.activeModelProfile?.reasoning.effort
-    ?? props.activeModelProfile?.capabilities.reasoning.defaultEffort,
-);
-const reasoningSummary = computed(() => {
-  if (!props.activeModelProfile || props.activeModelProfile.reasoning.mode === 'disabled') {
-    return props.t('disabled');
-  }
-  if (reasoningControl.value.kind === 'toggle') {
-    return props.t('enabled');
-  }
-  return activeReasoningEffort.value ?? props.t('enabled');
-});
 const runtimeStatus = computed(() => {
   const runtime = props.activeRuntime;
   if (!runtime || runtime.status === 'idle') {
@@ -160,54 +139,7 @@ function imageAttachments(entry: { attachments?: TurnAttachment[] }): TurnAttach
   return entry.attachments?.filter((attachment) => attachment.kind === 'image') ?? [];
 }
 
-function setReasoningEffort(effort: string): void {
-  reasoningMenuOpen.value = false;
-  emit('updateModelRuntime', { reasoning: { mode: 'enabled', effort } });
-}
-
-function toggleReasoning(): void {
-  const enabled = props.activeModelProfile?.reasoning.mode !== 'disabled';
-  emit('updateModelRuntime', { reasoning: { mode: enabled ? 'disabled' : 'enabled' } });
-}
-
-function toggleReasoningMenu(): void {
-  if (reasoningControl.value.kind !== 'effort') {
-    return;
-  }
-  reasoningMenuOpen.value = !reasoningMenuOpen.value;
-}
-
-function closeReasoningMenu(): void {
-  reasoningMenuOpen.value = false;
-}
-
-function handleReasoningMenuKeydown(event: KeyboardEvent): void {
-  if (reasoningMenuCommand(event.key) !== 'close') {
-    return;
-  }
-  event.preventDefault();
-  event.stopPropagation();
-  closeReasoningMenu();
-  void nextTick(() => reasoningTriggerRef.value?.focus());
-}
-
-function handleReasoningFocusOut(event: FocusEvent): void {
-  const next = event.relatedTarget;
-  if (!(next instanceof Node) || !reasoningMenuRef.value?.contains(next)) {
-    closeReasoningMenu();
-  }
-}
-
-function handleDocumentPointerDown(event: PointerEvent): void {
-  const target = event.target;
-  if (reasoningMenuOpen.value && target instanceof Node && !reasoningMenuRef.value?.contains(target)) {
-    closeReasoningMenu();
-  }
-}
-
-onMounted(() => document.addEventListener('pointerdown', handleDocumentPointerDown));
 onUnmounted(() => {
-  document.removeEventListener('pointerdown', handleDocumentPointerDown);
   for (const timer of copyResetTimers.values()) clearTimeout(timer);
   copyResetTimers.clear();
 });
@@ -340,69 +272,14 @@ function nextAnimationFrame(): Promise<void> {
           <span>{{ t('model') }}</span>
           <select :value="activeModelProfileId ?? ''" class="model-select" @change="handleModelChange">
             <option value="">{{ t('demoMode') }}</option>
-            <option v-for="profile in modelProfiles" :key="profile.id" :value="profile.id">
-              {{ profile.name }}
-            </option>
+            <optgroup v-for="group in providerModelGroups" :key="group.provider.id" :label="group.provider.name">
+              <option v-for="profile in group.models" :key="profile.id" :value="profile.id">
+                {{ profile.name }}{{ profile.catalogState === 'missing' ? ` · ${t('offline')}` : '' }}
+              </option>
+            </optgroup>
+            <option v-for="profile in legacyModels" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
           </select>
         </label>
-        <div v-if="reasoningControl.kind === 'toggle'" class="runtime-menu" data-testid="reasoning-runtime-menu">
-          <button
-            type="button"
-            class="runtime-menu-trigger"
-            data-testid="reasoning-runtime-trigger"
-            @click="toggleReasoning"
-          >
-            <span>{{ t('thinkingMode') }}</span>
-            <strong>{{ reasoningSummary }}</strong>
-          </button>
-        </div>
-        <div
-          v-else-if="reasoningControl.kind === 'effort'"
-          ref="reasoningMenuRef"
-          class="runtime-menu"
-          data-testid="reasoning-runtime-menu"
-          @keydown="handleReasoningMenuKeydown"
-          @focusout="handleReasoningFocusOut"
-        >
-          <button
-            :id="`${reasoningMenuId}-trigger`"
-            ref="reasoningTriggerRef"
-            type="button"
-            class="runtime-menu-trigger"
-            data-testid="reasoning-runtime-trigger"
-            aria-haspopup="menu"
-            :aria-expanded="reasoningMenuOpen"
-            :aria-controls="reasoningMenuId"
-            @click="toggleReasoningMenu"
-          >
-            <span>{{ t('reasoningEffort') }}</span>
-            <strong>{{ reasoningSummary }}</strong>
-          </button>
-          <div v-if="reasoningMenuOpen" :id="reasoningMenuId" class="runtime-menu-panel" role="menu" :aria-labelledby="`${reasoningMenuId}-trigger`">
-            <button
-              v-for="effort in reasoningControl.options"
-              :key="effort"
-              type="button"
-              role="menuitemradio"
-              :aria-checked="activeModelProfile?.reasoning.mode !== 'disabled' && activeReasoningEffort === effort"
-              :data-testid="`reasoning-runtime-${effort}`"
-              :class="{ active: activeModelProfile?.reasoning.mode !== 'disabled' && activeReasoningEffort === effort }"
-              :disabled="!activeModelProfile"
-              @click="setReasoningEffort(effort)"
-            >
-              {{ effort }}
-            </button>
-          </div>
-        </div>
-        <button
-          v-else-if="reasoningControl.kind === 'custom'"
-          type="button"
-          class="capability-warning"
-          data-testid="reasoning-custom-warning"
-          @click="emit('openSettings')"
-        >
-          {{ t('customReasoningWarning') }}
-        </button>
         <span
           class="runtime-pill"
           data-testid="active-runtime-status"
@@ -455,7 +332,6 @@ function nextAnimationFrame(): Promise<void> {
             :summary="reasoningGroupForTurn(group)?.summary"
             :preference="reasoningDisplayMode"
             :running="group.running"
-            :output-modes="runtimeReasoningProfile?.capabilities.reasoning.outputModes"
             :turn-id="group.turnId"
             :t="t"
           />

@@ -39,6 +39,22 @@ describe('ModelTurnScheduler', () => {
     await flushMicrotasks();
   });
 
+  it('shares one capacity limit across different models from the same provider', async () => {
+    const first = deferred<void>();
+    const harness = createHarness(() => 1);
+
+    harness.scheduler.enqueue(task('turn-1', 'thread-1', 'model-a', () => first.promise, 'provider-1'));
+    harness.scheduler.enqueue(task('turn-2', 'thread-2', 'model-b', async () => undefined, 'provider-1'));
+    await flushMicrotasks();
+
+    expect(harness.started).toEqual(['turn-1']);
+    expect(harness.queued).toContainEqual(['turn-2', 1]);
+
+    first.resolve();
+    await flushMicrotasks();
+    expect(harness.started).toEqual(['turn-1', 'turn-2']);
+  });
+
   it('cancels a queued turn before it starts and releases its thread', async () => {
     const first = deferred<void>();
     let secondRan = false;
@@ -745,8 +761,9 @@ function task(
   threadId: string,
   modelProfileId: string,
   run: (signal: AbortSignal) => Promise<void>,
+  capacityKey = modelProfileId,
 ): ScheduledTurn {
-  return { turnId, threadId, modelProfileId, title: turnId, run };
+  return { turnId, threadId, modelProfileId, capacityKey, title: turnId, run };
 }
 
 function abortableRun(turnId: string, ran: string[]): (signal: AbortSignal) => Promise<void> {

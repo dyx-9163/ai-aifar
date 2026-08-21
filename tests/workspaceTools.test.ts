@@ -184,6 +184,20 @@ describe('search_code tool', () => {
 });
 
 describe('tool router', () => {
+  it('returns the current trusted system time without invoking a shell', async () => {
+    const result = await runTool('get_current_datetime', {});
+
+    expect(result.status).toBe('success');
+    expect(result.output).toMatchObject({
+      source: 'system-clock',
+      date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      time: expect.stringMatching(/^\d{2}:\d{2}:\d{2}$/),
+      timeZone: expect.any(String),
+      utcOffset: expect.stringMatching(/^[+-]\d{2}:\d{2}$/),
+      platform: expect.any(String),
+    });
+  });
+
   it('rejects unknown tool names with a structured error', async () => {
     const result = await runTool('delete_file', {});
     expect(result.status).toBe('error');

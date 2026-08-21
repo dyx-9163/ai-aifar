@@ -28,7 +28,7 @@ export type TimelineEntry =
       toolId?: string;
       title?: string;
       text: string;
-      status: 'running' | 'completed' | 'failed';
+      status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
       sequence?: number;
     }
   | {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import type { ModelConnectionResult, ModelProfileInput, TurnAttachment, TurnRecord, UndoableTurnSummary } from '../shared/domain';
+import type { TurnAttachment, TurnRecord, UndoableTurnSummary } from '../shared/domain';
 import Conversation from './components/Conversation.vue';
 import Inspector from './components/Inspector.vue';
 import SettingsView from './components/SettingsView.vue';
@@ -90,21 +90,6 @@ function toggleTheme(): void {
   document.documentElement.dataset.theme = theme.value;
 }
 
-async function testModelProfile(profile: ModelProfileInput): Promise<ModelConnectionResult> {
-  return app.testModelProfile(profile);
-}
-
-async function updateModelRuntime(patch: {
-  reasoning?: { mode?: 'enabled' | 'disabled'; effort?: string };
-}): Promise<void> {
-  runtimeError.value = '';
-  try {
-    await app.updateActiveModelRuntime(patch);
-  } catch (error) {
-    runtimeError.value = error instanceof Error ? error.message : t.value('modelConnectionFailed');
-  }
-}
-
 async function startTurn(text: string, attachments?: TurnAttachment[]): Promise<void> {
   runtimeError.value = '';
   try {
@@ -146,7 +131,47 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
 </script>
 
 <template>
-  <main class="desktop-shell" :class="{ 'settings-shell': view === 'settings' }">
+  <section
+    v-if="app.loading.value || app.startupError.value"
+    class="startup-surface"
+    :aria-busy="app.loading.value"
+  >
+    <div class="startup-brand" aria-label="Private AI">
+      <span class="startup-brand-mark">AI</span>
+      <strong>Private AI</strong>
+    </div>
+
+    <div v-if="app.loading.value" class="startup-skeleton" data-testid="startup-skeleton">
+      <aside class="startup-skeleton-sidebar">
+        <span class="skeleton-line skeleton-line-wide"></span>
+        <span class="skeleton-block skeleton-action"></span>
+        <span class="skeleton-line"></span>
+        <span class="skeleton-block"></span>
+        <span class="skeleton-block"></span>
+      </aside>
+      <div class="startup-skeleton-main">
+        <span class="skeleton-line skeleton-title"></span>
+        <span class="skeleton-panel"></span>
+        <span class="skeleton-panel skeleton-panel-short"></span>
+      </div>
+      <aside class="startup-skeleton-inspector">
+        <span class="skeleton-line"></span>
+        <span class="skeleton-block skeleton-card"></span>
+        <span class="skeleton-block skeleton-card"></span>
+      </aside>
+      <p class="startup-message">正在加载最新工作区…</p>
+    </div>
+
+    <div v-else class="startup-failure" data-testid="startup-failure" role="alert">
+      <h1>工作区初始化失败</h1>
+      <p>{{ app.startupError.value }}</p>
+      <button class="primary-action compact" type="button" @click="app.retryInitialWorkspace">
+        重试
+      </button>
+    </div>
+  </section>
+
+  <main v-else class="desktop-shell" :class="{ 'settings-shell': view === 'settings' }">
     <Sidebar
       :workspaces="app.state.value.snapshot.workspaces"
       :threads="app.state.value.snapshot.threads"
@@ -179,6 +204,7 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
       :reasoning-display-mode="app.state.value.snapshot.settings.reasoningDisplayMode"
       :loading="app.loading.value"
       :model-profiles="app.state.value.snapshot.modelProfiles"
+      :model-providers="app.state.value.snapshot.modelProviders ?? []"
       :active-model-profile-id="app.activeModelProfileId.value"
       :active-model-profile="app.activeModelProfile.value"
       :thread-workspace-name="threadWorkspaceName"
@@ -190,7 +216,6 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
       @open-settings="view = 'settings'"
       @select-model="app.selectModelProfile"
       @undo-turn="undoTurnFileChanges"
-      @update-model-runtime="updateModelRuntime"
     />
 
     <Inspector
@@ -210,15 +235,20 @@ async function undoTurnFileChanges(turnId: string): Promise<void> {
     <SettingsView
       v-else
       :model-profiles="app.state.value.snapshot.modelProfiles"
+      :model-providers="app.state.value.snapshot.modelProviders ?? []"
       :active-model-profile-id="app.activeModelProfileId.value"
       :language="app.state.value.snapshot.settings.language"
       :settings="app.state.value.snapshot.settings"
       :workspaces="app.state.value.snapshot.workspaces"
       :t="t"
-      :save-model-profile="app.saveModelProfile"
-      :test-model-profile="testModelProfile"
+      :save-model-provider="app.saveModelProvider"
+      :delete-model-provider="app.deleteModelProvider"
+      :discover-provider-models="app.discoverProviderModels"
+      :test-model-provider="app.testModelProvider"
+      :add-provider-models="app.addProviderModels"
+      :update-provider-model="app.updateProviderModel"
+      :delete-provider-model="app.deleteProviderModel"
       @back="view = 'chat'"
-      @delete-model-profile="app.deleteModelProfile"
       @delete-workspace="app.deleteWorkspace"
       @set-workspace-trust="app.updateWorkspaceTrust"
       @add-workspace="openWorkspaceDialog"

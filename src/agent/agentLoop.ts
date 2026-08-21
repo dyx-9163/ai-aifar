@@ -23,6 +23,11 @@ import {
   type NormalizedToolCall,
 } from './providerAdapters/textToolCallAdapter.js';
 import { classifyReply, steerKindsFor, STEER_RULES, type SteerKind } from './replyClassifier.js';
+import {
+  buildBaseAssistantSystemPrompt,
+  runtimeContextSnapshot,
+  type RuntimeContextSnapshot,
+} from './runtimeContext.js';
 import { buildNativeToolSchemas, type NativeToolSchema } from './tools/toolSchemas.js';
 import {
   executeAgentToolCall,
@@ -77,6 +82,8 @@ export interface AgentLoopOptions {
   requestApproval?: (request: ToolApprovalRequest) => Promise<boolean>;
   /** Forwards reasoning/progress events live during every iteration. */
   reasoningHandlers?: Pick<ModelStreamHandlers, 'onRawReasoningDelta' | 'onReasoningSummaryDelta' | 'onPhase'>;
+  /** One trusted time snapshot shared by every model iteration in this turn. */
+  runtimeContext?: RuntimeContextSnapshot;
 }
 
 export interface AgentLoopOutcome {
@@ -178,13 +185,14 @@ export function buildAgentSystemPrompt(
   workspaceDisplayName: string,
   trustLevel: WorkspaceTrustLevel = 'read-only',
   nativeTools = false,
+  runtimeContext: RuntimeContextSnapshot = runtimeContextSnapshot(),
 ): string {
   const readOnly = trustLevel === 'read-only';
   const toolList = readOnly
     ? READ_ONLY_TOOL_NAMES.join(', ')
     : [...READ_ONLY_TOOL_NAMES, ...WRITE_TOOL_NAMES].join(', ');
   const lines = [
-    'You are a helpful private AI assistant. Keep answers clear, practical, and concise.',
+    buildBaseAssistantSystemPrompt(runtimeContext),
     '',
     `The user has granted you ${readOnly ? 'read-only' : 'read-write'} access to the workspace "${workspaceDisplayName}".`,
     `You may inspect it with these tools: ${toolList}.`,
@@ -205,6 +213,7 @@ export function buildAgentSystemPrompt(
     );
   }
   lines.push(
+    '- get_current_datetime: {} (trusted current date, time, time zone, locale and platform; never use a shell for this)',
     '- workspace_tree: {"path"?, "maxDepth"?, "maxEntries"?}',
     '- read_file: {"path", "startLine"?, "endLine"?}',
     '- search_code: {"query", "glob"?, "caseSensitive"?, "maxResults"?}',
@@ -220,7 +229,7 @@ export function buildAgentSystemPrompt(
       '  {"tool": "apply_patch", "input": {"path": "src/new.ts", "baseContentHash": "", "edits": [{"startLine": 1, "endLine": 0, "replacement": "file contents here"}]}}',
       '- For existing files, apply_patch requires the contentHash of a fresh read_file of the same file; re-read if it reports stale-content.',
       '- Edit lines are 1-based; "endLine": startLine - 1 inserts before "startLine".',
-      '- run_command runs only inside the workspace directory; every command executes automatically in read-write workspaces except forbidden ones, which are blocked.',
+      '- run_command is only for finite build, test, and diagnostic work inside the workspace. Use the package manager declared by package.json/lockfiles; mismatches and long-running dev/start/serve/watch scripts are blocked.',
       '- After each successful apply_patch the harness automatically runs the project verification script (typecheck/check/build from package.json) and appends an [auto-verify] report to the tool result; when it reports errors, fix them with follow-up apply_patch edits before answering.',
       '- When several files change together, prefer one apply_patch with a "files" array so related files change together in a single changeset.',
       '- Keep every reply within the output limit: for large rewrites, split the work into several apply_patch edits with replacements of at most ~120 lines instead of one huge edit.',
@@ -246,7 +255,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content: buildAgentSystemPrompt(options.workspaceDisplayName, options.toolContext.trustLevel, nativeTools),
+      content: buildAgentSystemPrompt(
+        options.workspaceDisplayName,
+        options.toolContext.trustLevel,
+        nativeTools,
+        options.runtimeContext,
+      ),
     },
     ...options.initialMessages,
   ];

@@ -7,6 +7,8 @@ import type {
   ModelResponseSpeed,
   ModelRunPhase,
   ModelProfileInput,
+  ModelProviderInput,
+  ProviderModelInput,
   ModelRunMetrics,
   ReasoningDisplayMode,
   ReasoningInputMode,
@@ -33,6 +35,13 @@ export type DesktopRequest =
   | { type: 'modelProfile.save'; profile: ModelProfileInput }
   | { type: 'modelProfile.delete'; id: string }
   | { type: 'modelProfile.test'; profile: ModelProfileInput }
+  | { type: 'modelProvider.save'; provider: ModelProviderInput }
+  | { type: 'modelProvider.delete'; id: string }
+  | { type: 'modelProvider.discoverModels'; provider: ModelProviderInput }
+  | { type: 'modelProvider.test'; provider: ModelProviderInput; modelId: string }
+  | { type: 'providerModel.addMany'; providerId: string; models: ProviderModelInput[] }
+  | { type: 'providerModel.update'; providerId: string; model: ProviderModelInput & { id: string } }
+  | { type: 'providerModel.delete'; id: string }
   | { type: 'settings.update'; settings: RuntimeSettingsInput }
   | { type: 'workspace.register'; path: string; trustLevel: WorkspaceTrustLevel }
   | { type: 'workspace.delete'; workspaceId: string }
@@ -302,6 +311,62 @@ function isModelProfileInput(value: unknown): value is ModelProfileInput {
   }) === undefined;
 }
 
+function isProviderProtocol(value: unknown): boolean {
+  return value === 'openai-chat-completions' || value === 'openai-responses' || value === 'anthropic-messages';
+}
+
+function isPlainJsonRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  try {
+    return JSON.stringify(value).length <= 32_768;
+  } catch {
+    return false;
+  }
+}
+
+function isCustomHeaders(value: unknown): value is Record<string, string> {
+  return value === undefined || (
+    isRecord(value) &&
+    Object.keys(value).length <= 64 &&
+    Object.entries(value).every(([name, headerValue]) =>
+      /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(name) &&
+      typeof headerValue === 'string' && headerValue.length <= 8_192)
+  );
+}
+
+function isModelProviderInput(value: unknown): value is ModelProviderInput {
+  if (!isRecord(value)) return false;
+  return (
+    hasOptionalString(value, 'id') &&
+    hasString(value, 'name') && String(value.name).length <= 200 &&
+    hasString(value, 'baseUrl') && String(value.baseUrl).length <= 2_048 &&
+    isProviderProtocol(value.protocol) &&
+    hasOptionalString(value, 'apiKey') &&
+    isPositiveInteger(value.maxConcurrency) && Number(value.maxConcurrency) <= 1_024 &&
+    isPositiveInteger(value.requestTimeoutMs) && Number(value.requestTimeoutMs) <= 3_600_000 &&
+    typeof value.allowImages === 'boolean' &&
+    (value.toolCallingMode === 'native' || value.toolCallingMode === 'text-fallback') &&
+    (value.thinkingMode === 'model-default' || value.thinkingMode === 'custom') &&
+    (value.customRequestBody === undefined || isPlainJsonRecord(value.customRequestBody)) &&
+    isCustomHeaders(value.customHeaders) &&
+    hasOptionalString(value, 'catalogPath')
+  );
+}
+
+function isProviderModelInput(value: unknown, requireId = false): value is ProviderModelInput & { id?: string } {
+  if (!isRecord(value)) return false;
+  return (
+    (!requireId ? hasOptionalString(value, 'id') : hasString(value, 'id')) &&
+    hasString(value, 'modelId') && String(value.modelId).length <= 512 &&
+    hasOptionalString(value, 'displayName') &&
+    (value.enabled === undefined || typeof value.enabled === 'boolean') &&
+    (value.contextWindowTokens === undefined || (isPositiveInteger(value.contextWindowTokens) && Number(value.contextWindowTokens) <= 100_000_000)) &&
+    (value.maxOutputTokens === undefined || (isPositiveInteger(value.maxOutputTokens) && Number(value.maxOutputTokens) <= 10_000_000)) &&
+    (value.isDefault === undefined || typeof value.isDefault === 'boolean') &&
+    (value.catalogState === undefined || value.catalogState === 'available' || value.catalogState === 'missing' || value.catalogState === 'manual')
+  );
+}
+
 export function isDesktopRequest(value: unknown): value is DesktopRequest {
   if (!isRecord(value) || typeof value.type !== 'string') {
     return false;
@@ -331,6 +396,22 @@ export function isDesktopRequest(value: unknown): value is DesktopRequest {
       return isModelProfileInput(value.profile);
     case 'modelProfile.delete':
       return hasString(value, 'id');
+    case 'modelProvider.save':
+    case 'modelProvider.discoverModels':
+      return isModelProviderInput(value.provider);
+    case 'modelProvider.test':
+      return isModelProviderInput(value.provider) && hasString(value, 'modelId');
+    case 'modelProvider.delete':
+    case 'providerModel.delete':
+      return hasString(value, 'id');
+    case 'providerModel.addMany': {
+      if (!hasString(value, 'providerId') || !Array.isArray(value.models) || value.models.length === 0 || value.models.length > 10_000) return false;
+      if (!value.models.every((model) => isProviderModelInput(model))) return false;
+      const ids = value.models.map((model) => (model as ProviderModelInput).modelId);
+      return new Set(ids).size === ids.length;
+    }
+    case 'providerModel.update':
+      return hasString(value, 'providerId') && isProviderModelInput(value.model, true);
     case 'settings.update':
       return isRuntimeSettingsInput(value.settings);
     case 'workspace.register':

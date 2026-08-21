@@ -59,7 +59,7 @@ export interface ToolItem extends BaseItem {
   /** Provider/harness invocation id used to merge live and persisted events. */
   toolId?: string;
   title: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   output?: string;
 }
 
@@ -119,6 +119,10 @@ export interface AppSettings {
 }
 
 export type ModelProviderType = 'openai-compatible';
+export type ProviderProtocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages';
+export type ProviderThinkingMode = 'model-default' | 'custom';
+export type ProviderToolCallingMode = 'native' | 'text-fallback';
+export type ModelCatalogState = 'available' | 'missing' | 'manual';
 
 export type MetricSource = 'server' | 'client' | 'unavailable';
 export type ReasoningMode = 'auto' | 'enabled' | 'disabled';
@@ -190,6 +194,8 @@ export type ModelRuntimeType = 'llama.cpp' | 'ollama' | 'vllm' | 'tgi' | 'openai
 
 export interface ModelProfile {
   id: string;
+  /** Parent provider. Optional only while legacy rows are being migrated. */
+  providerId?: string;
   name: string;
   provider: ModelProviderType;
   /** Where inference capacity is managed. */
@@ -198,6 +204,9 @@ export interface ModelProfile {
   runtimeType: ModelRuntimeType;
   baseUrl: string;
   model: string;
+  enabled?: boolean;
+  catalogState?: ModelCatalogState;
+  contextWindowTokens?: number;
   apiKeyConfigured: boolean;
   capabilities: ModelCapabilities;
   reasoning: ModelReasoningSettings;
@@ -248,6 +257,64 @@ export interface ModelConnectionConcurrencyWarningResult extends ModelConnection
   ok: true;
   status: 'concurrency-warning';
   serviceSlots: number;
+}
+
+export interface ModelProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
+  apiKeyConfigured: boolean;
+  maxConcurrency: number;
+  requestTimeoutMs: number;
+  allowImages: boolean;
+  toolCallingMode: ProviderToolCallingMode;
+  thinkingMode: ProviderThinkingMode;
+  customRequestBody?: Record<string, unknown>;
+  customHeaderNames: string[];
+  catalogPath?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelProviderInput {
+  id?: string;
+  name: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
+  apiKey?: string;
+  maxConcurrency: number;
+  requestTimeoutMs: number;
+  allowImages: boolean;
+  toolCallingMode: ProviderToolCallingMode;
+  thinkingMode: ProviderThinkingMode;
+  customRequestBody?: Record<string, unknown>;
+  customHeaders?: Record<string, string>;
+  catalogPath?: string;
+}
+
+export interface ProviderModelInput {
+  id?: string;
+  modelId: string;
+  displayName?: string;
+  enabled?: boolean;
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+  isDefault?: boolean;
+  catalogState?: ModelCatalogState;
+}
+
+export interface ModelCatalogResult {
+  status: 'available' | 'unsupported';
+  models: string[];
+  warning?: string;
+}
+
+export interface ProviderConnectionResult {
+  ok: boolean;
+  status: 'connected' | 'offline' | 'authentication-failed' | 'protocol-mismatch' | 'cancelled';
+  message: string;
+  model: string;
 }
 
 export interface ModelConnectionProviderManagedResult extends ModelConnectionResultBase {
@@ -340,6 +407,8 @@ export interface AppSnapshot {
   items: Record<string, Item[]>;
   approvals: Approval[];
   modelProfiles: ModelProfile[];
+  /** Optional only during the provider-catalog compatibility migration. */
+  modelProviders?: ModelProvider[];
   settings: AppSettings;
   workspaces: WorkspaceRecord[];
   undoableTurns: UndoableTurnSummary[];

@@ -41,6 +41,14 @@ const SINGLE_FILE_SCHEMA: Record<string, Record<string, unknown>> = {
 };
 
 const TOOL_SCHEMAS: Record<string, NativeToolSchema> = {
+  get_current_datetime: {
+    type: 'function',
+    function: {
+      name: 'get_current_datetime',
+      description: 'Return the current trusted system date, time, time zone, locale and platform without invoking a shell.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
   workspace_tree: {
     type: 'function',
     function: {
@@ -140,7 +148,7 @@ const TOOL_SCHEMAS: Record<string, NativeToolSchema> = {
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a command inside the workspace directory; forbidden commands are blocked.',
+      description: 'Run a finite build, test, or diagnostic command inside the workspace. The project package manager is detected automatically; mismatches and long-running dev/start/serve/watch scripts are rejected.',
       parameters: {
         type: 'object',
         properties: {

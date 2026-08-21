@@ -34,8 +34,6 @@ export interface ModelProfileFormValues {
   effortOptions: string[];
   defaultEffort: string;
   customRequestBodyText?: string;
-  rawOutput: boolean;
-  summaryOutput: boolean;
   maxConcurrency: number;
   maxOutputTokens: number;
 }
@@ -56,6 +54,7 @@ export interface ReasoningControlSelection {
 }
 
 export type EffortValidationIssue = 'effortOptionsRequired' | 'defaultEffortInvalid' | 'currentEffortInvalid';
+export type ReasoningControlKind = 'unsupported' | 'toggle' | 'effort';
 export type ConnectionTestState = 'untested' | 'testing' | 'failed' | ModelConnectionStatus;
 export const OPENAI_REASONING_EFFORT_OPTIONS = ['high', 'max'];
 
@@ -157,10 +156,6 @@ export function buildModelProfileInput(
     ...capabilities.reasoning,
     inputMode: form.reasoningInputMode,
     effortOptions: [...form.effortOptions],
-    outputModes: [
-      ...(form.rawOutput ? ['raw' as const] : []),
-      ...(form.summaryOutput ? ['summary' as const] : []),
-    ],
     defaultEffort: form.defaultEffort || undefined,
     customRequestBody: parseCustomRequestBody(form.customRequestBodyText),
   };
@@ -233,6 +228,61 @@ export function recommendedReasoningControlForProtocol(
     };
   }
   return undefined;
+}
+
+/** Collapses the persisted protocol/input pair into the single user-facing control. */
+export function reasoningControlKind(
+  protocol: ReasoningProtocol,
+  inputMode: ReasoningInputMode,
+): ReasoningControlKind {
+  if (protocol === 'qwen' && inputMode === 'toggle') return 'toggle';
+  if (protocol === 'openai' && inputMode === 'effort') return 'effort';
+  return 'unsupported';
+}
+
+/** Atomically maps one user choice back to the existing storage and request fields. */
+export function reasoningControlConfiguration(kind: ReasoningControlKind): {
+  protocol: ReasoningProtocol;
+  inputMode: ReasoningInputMode;
+  effortOptions: string[];
+  currentEffort: string;
+  defaultEffort: string;
+} {
+  if (kind === 'toggle') {
+    return { protocol: 'qwen', inputMode: 'toggle', effortOptions: [], currentEffort: '', defaultEffort: '' };
+  }
+  if (kind === 'effort') {
+    return {
+      protocol: 'openai',
+      inputMode: 'effort',
+      effortOptions: [...OPENAI_REASONING_EFFORT_OPTIONS],
+      currentEffort: OPENAI_REASONING_EFFORT_OPTIONS[0] ?? '',
+      defaultEffort: OPENAI_REASONING_EFFORT_OPTIONS[0] ?? '',
+    };
+  }
+  return { protocol: 'none', inputMode: 'unsupported', effortOptions: [], currentEffort: '', defaultEffort: '' };
+}
+
+/** Normalizes legacy or mismatched persisted fields to the value shown by the unified control. */
+export function normalizeReasoningControlConfiguration(
+  protocol: ReasoningProtocol,
+  inputMode: ReasoningInputMode,
+  current: Omit<ReasoningControlSelection, 'inputMode'>,
+): ReturnType<typeof reasoningControlConfiguration> {
+  const kind = reasoningControlKind(protocol, inputMode);
+  if (kind === 'unsupported') {
+    return reasoningControlConfiguration('unsupported');
+  }
+  if (kind === 'toggle') {
+    return reasoningControlConfiguration('toggle');
+  }
+  return {
+    protocol: 'openai',
+    inputMode: 'effort',
+    effortOptions: [...current.effortOptions],
+    currentEffort: current.currentEffort,
+    defaultEffort: current.defaultEffort,
+  };
 }
 
 export function reconcileEffortSelection(input: EffortSelectionInput): {

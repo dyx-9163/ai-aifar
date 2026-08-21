@@ -2,6 +2,7 @@ export interface ScheduledTurn {
   turnId: string;
   threadId: string;
   modelProfileId: string;
+  capacityKey: string;
   title: string;
   run(signal: AbortSignal): Promise<void>;
 }
@@ -12,7 +13,7 @@ export interface SchedulerCallbacks {
   onCancelling?(turn: ScheduledTurn): Promise<void> | void;
   onCancelled(turn: ScheduledTurn, wasRunning: boolean): Promise<void> | void;
   onQueuePositions(
-    modelProfileId: string,
+    capacityKey: string,
     positions: ReadonlyMap<string, number>,
   ): Promise<void> | void;
 }
@@ -40,7 +41,7 @@ export class ModelTurnScheduler {
   private readonly processingModels = new Set<string>();
 
   constructor(
-    private readonly limitFor: (modelProfileId: string) => number,
+    private readonly limitFor: (capacityKey: string) => number,
     private readonly callbacks: SchedulerCallbacks,
   ) {}
 
@@ -50,16 +51,16 @@ export class ModelTurnScheduler {
     }
 
     this.activeThreads.add(turn.threadId);
-    const queue = this.queueFor(turn.modelProfileId);
-    const mustQueue = queue.length > 0 || this.slotCount(turn.modelProfileId) >= this.effectiveLimit(turn.modelProfileId);
+    const queue = this.queueFor(turn.capacityKey);
+    const mustQueue = queue.length > 0 || this.slotCount(turn.capacityKey) >= this.effectiveLimit(turn.capacityKey);
     queue.push(turn);
 
     if (!mustQueue) {
-      this.scheduleDrain(turn.modelProfileId);
+      this.scheduleDrain(turn.capacityKey);
       return;
     }
 
-    this.scheduleModelOperation(turn.modelProfileId, {
+    this.scheduleModelOperation(turn.capacityKey, {
       run: () => {
         const position = this.positionOf(turn);
         return position === undefined
@@ -67,8 +68,8 @@ export class ModelTurnScheduler {
           : this.invoke(() => this.callbacks.onQueued(turn, position));
       },
     });
-    this.scheduleQueuePositions(turn.modelProfileId);
-    this.movePendingOperationToTail(turn.modelProfileId, 'drain');
+    this.scheduleQueuePositions(turn.capacityKey);
+    this.movePendingOperationToTail(turn.capacityKey, 'drain');
   }
 
   cancel(turnId: string): boolean {
@@ -82,7 +83,7 @@ export class ModelTurnScheduler {
         return false;
       }
       running.controller.abort();
-      this.scheduleModelOperation(running.turn.modelProfileId, {
+      this.scheduleModelOperation(running.turn.capacityKey, {
         run: () => this.invoke(() => this.callbacks.onCancelling?.(running.turn)),
       });
       return true;
@@ -97,7 +98,7 @@ export class ModelTurnScheduler {
       return true;
     }
 
-    for (const [modelProfileId, queue] of this.queues) {
+    for (const [capacityKey, queue] of this.queues) {
       const index = queue.findIndex((turn) => turn.turnId === turnId);
       if (index < 0) {
         continue;
@@ -105,58 +106,58 @@ export class ModelTurnScheduler {
 
       const [turn] = queue.splice(index, 1);
       this.schedulePreStartCancellation(turn, true);
-      this.movePendingOperationToTail(modelProfileId, 'drain');
+      this.movePendingOperationToTail(capacityKey, 'drain');
       return true;
     }
 
     return false;
   }
 
-  updateLimit(modelProfileId: string): void {
-    this.scheduleDrain(modelProfileId);
+  updateLimit(capacityKey: string): void {
+    this.scheduleDrain(capacityKey);
   }
 
   hasActiveThread(threadId: string): boolean {
     return this.activeThreads.has(threadId);
   }
 
-  private queueFor(modelProfileId: string): ScheduledTurn[] {
-    let queue = this.queues.get(modelProfileId);
+  private queueFor(capacityKey: string): ScheduledTurn[] {
+    let queue = this.queues.get(capacityKey);
     if (!queue) {
       queue = [];
-      this.queues.set(modelProfileId, queue);
+      this.queues.set(capacityKey, queue);
     }
     return queue;
   }
 
   private positionOf(turn: ScheduledTurn): number | undefined {
-    const index = (this.queues.get(turn.modelProfileId) ?? []).indexOf(turn);
+    const index = (this.queues.get(turn.capacityKey) ?? []).indexOf(turn);
     return index < 0 ? undefined : index + 1;
   }
 
-  private effectiveLimit(modelProfileId: string): number {
-    const configured = this.limitFor(modelProfileId);
+  private effectiveLimit(capacityKey: string): number {
+    const configured = this.limitFor(capacityKey);
     return Number.isFinite(configured) ? Math.max(1, Math.floor(configured)) : 1;
   }
 
-  private slotCount(modelProfileId: string): number {
-    return this.runningByModel.get(modelProfileId)?.size ?? 0;
+  private slotCount(capacityKey: string): number {
+    return this.runningByModel.get(capacityKey)?.size ?? 0;
   }
 
-  private scheduleDrain(modelProfileId: string): void {
-    this.scheduleUniqueModelOperation(modelProfileId, {
+  private scheduleDrain(capacityKey: string): void {
+    this.scheduleUniqueModelOperation(capacityKey, {
       kind: 'drain',
-      run: () => this.drain(modelProfileId),
+      run: () => this.drain(capacityKey),
     });
   }
 
-  private async drain(modelProfileId: string): Promise<void> {
-    const queue = this.queues.get(modelProfileId);
+  private async drain(capacityKey: string): Promise<void> {
+    const queue = this.queues.get(capacityKey);
     const promoted: TurnSlot[] = [];
     while (
       queue &&
       queue.length > 0 &&
-      this.slotCount(modelProfileId) < this.effectiveLimit(modelProfileId)
+      this.slotCount(capacityKey) < this.effectiveLimit(capacityKey)
     ) {
       const turn = queue.shift();
       if (!turn || !this.activeThreads.has(turn.threadId)) {
@@ -173,14 +174,14 @@ export class ModelTurnScheduler {
       return;
     }
 
-    await this.notifyQueuePositions(modelProfileId);
+    await this.notifyQueuePositions(capacityKey);
     const excess: ScheduledTurn[] = [];
     for (const slot of promoted) {
       if (this.reserved.get(slot.turn.turnId) !== slot) {
         continue;
       }
 
-      if (this.runningCount(modelProfileId) >= this.effectiveLimit(modelProfileId)) {
+      if (this.runningCount(capacityKey) >= this.effectiveLimit(capacityKey)) {
         this.reserved.delete(slot.turn.turnId);
         this.releaseSlot(slot.turn);
         excess.push(slot.turn);
@@ -194,32 +195,32 @@ export class ModelTurnScheduler {
     }
 
     if (excess.length > 0) {
-      this.queueFor(modelProfileId).unshift(...excess);
-      await this.notifyQueuePositions(modelProfileId);
+      this.queueFor(capacityKey).unshift(...excess);
+      await this.notifyQueuePositions(capacityKey);
     }
   }
 
   private reserveSlot(turn: ScheduledTurn): void {
-    let turnIds = this.runningByModel.get(turn.modelProfileId);
+    let turnIds = this.runningByModel.get(turn.capacityKey);
     if (!turnIds) {
       turnIds = new Set<string>();
-      this.runningByModel.set(turn.modelProfileId, turnIds);
+      this.runningByModel.set(turn.capacityKey, turnIds);
     }
     turnIds.add(turn.turnId);
   }
 
   private releaseSlot(turn: ScheduledTurn): void {
-    const turnIds = this.runningByModel.get(turn.modelProfileId);
+    const turnIds = this.runningByModel.get(turn.capacityKey);
     turnIds?.delete(turn.turnId);
     if (turnIds?.size === 0) {
-      this.runningByModel.delete(turn.modelProfileId);
+      this.runningByModel.delete(turn.capacityKey);
     }
   }
 
-  private runningCount(modelProfileId: string): number {
+  private runningCount(capacityKey: string): number {
     let count = 0;
     for (const { turn } of this.running.values()) {
-      if (turn.modelProfileId === modelProfileId) {
+      if (turn.capacityKey === capacityKey) {
         count += 1;
       }
     }
@@ -234,7 +235,7 @@ export class ModelTurnScheduler {
     } catch {
       // Turn execution owns failure reporting. The scheduler only owns capacity.
     } finally {
-      this.scheduleModelOperation(slot.turn.modelProfileId, {
+      this.scheduleModelOperation(slot.turn.capacityKey, {
         run: () => this.finishRunning(slot),
       });
     }
@@ -259,12 +260,12 @@ export class ModelTurnScheduler {
     this.running.delete(slot.turn.turnId);
     this.releaseSlot(slot.turn);
     this.activeThreads.delete(slot.turn.threadId);
-    this.scheduleDrain(slot.turn.modelProfileId);
+    this.scheduleDrain(slot.turn.capacityKey);
   }
 
   private schedulePreStartCancellation(turn: ScheduledTurn, queueChanged: boolean): void {
     this.cancellingBeforeStart.add(turn.turnId);
-    this.scheduleModelOperation(turn.modelProfileId, {
+    this.scheduleModelOperation(turn.capacityKey, {
       run: async () => {
         await this.invoke(() => this.callbacks.onCancelled(turn, false));
         this.cancellingBeforeStart.delete(turn.turnId);
@@ -272,9 +273,9 @@ export class ModelTurnScheduler {
       },
     });
     if (queueChanged) {
-      this.scheduleQueuePositions(turn.modelProfileId);
+      this.scheduleQueuePositions(turn.capacityKey);
     }
-    this.scheduleDrain(turn.modelProfileId);
+    this.scheduleDrain(turn.capacityKey);
   }
 
   private scheduleQueuePositions(modelProfileId: string): void {

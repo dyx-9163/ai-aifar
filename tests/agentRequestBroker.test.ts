@@ -6,6 +6,31 @@ afterEach(() => {
 });
 
 describe('agent request broker', () => {
+  it('queues the initial snapshot until the agent port connects', async () => {
+    const sent: unknown[] = [];
+    const broker = new AgentRequestBroker(30_000);
+
+    const snapshot = broker.request({ type: 'snapshot.get' });
+    const outcome = snapshot.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    expect(broker.pendingCount).toBe(1);
+
+    broker.connect({ postMessage: (message) => sent.push(message) });
+    expect(sent).toEqual([{
+      type: 'agent.request',
+      requestId: 'request-1',
+      request: { type: 'snapshot.get' },
+    }]);
+
+    expect(broker.handleReply({
+      type: 'agent.reply', requestId: 'request-1', ok: true, data: { threads: [] },
+    })).toBe(true);
+    await expect(outcome).resolves.toEqual({ value: { threads: [] } });
+    expect(broker.pendingCount).toBe(0);
+  });
+
   it('rejects and removes every request when its deadline expires', async () => {
     vi.useFakeTimers();
     const sent: unknown[] = [];

@@ -13,6 +13,11 @@ import type {
   ModelConnectionResult,
   ModelProfile,
   ModelProfileInput,
+  ModelProvider,
+  ModelProviderInput,
+  ModelCatalogResult,
+  ProviderConnectionResult,
+  ProviderModelInput,
   ModelResponseSpeed,
   ReasoningEffort,
   ReasoningMode,
@@ -50,6 +55,7 @@ export function startInitialAgentSync(options: {
   getSnapshot(): Promise<AppSnapshot>;
   subscribe(listener: (event: AgentEvent) => void): () => void;
   onReady(): void;
+  onFailure?(error: unknown): void;
 }): { ready: Promise<void>; dispose(): void } {
   let disposed = false;
   let buffering = true;
@@ -86,6 +92,7 @@ export function startInitialAgentSync(options: {
       options.onReady();
     } catch (error) {
       stop();
+      options.onFailure?.(error);
       throw error;
     }
   })();
@@ -101,6 +108,7 @@ export function startInitialAgentSync(options: {
 export function useApp() {
   const state = ref<RendererState>(emptyState());
   const loading = ref(true);
+  const startupError = ref('');
   const approvalResponseInFlightId = ref<string>();
   const activeWorkspaceId = ref<string | undefined>(undefined);
 
@@ -156,7 +164,10 @@ export function useApp() {
 
   let unsubscribe: (() => void) | undefined;
 
-  onMounted(async () => {
+  async function loadInitialWorkspace(): Promise<void> {
+    unsubscribe?.();
+    loading.value = true;
+    startupError.value = '';
     const sync = startInitialAgentSync({
       readState: () => state.value,
       writeState: (next) => { state.value = next; },
@@ -171,14 +182,28 @@ export function useApp() {
           });
         }
       }),
-      onReady: () => { loading.value = false; },
+      onReady: () => {
+        startupError.value = '';
+        loading.value = false;
+      },
+      onFailure: (error) => {
+        const detail = error instanceof Error && error.message.trim()
+          ? `：${error.message}`
+          : '';
+        startupError.value = `无法加载工作区${detail}`;
+        loading.value = false;
+      },
     });
     unsubscribe = sync.dispose;
     try {
       await sync.ready;
-    } finally {
-      loading.value = false;
+    } catch {
+      // Startup failure is rendered as an explicit retry surface.
     }
+  }
+
+  onMounted(() => {
+    void loadInitialWorkspace();
   });
 
   onUnmounted(() => {
@@ -392,6 +417,52 @@ export function useApp() {
     return window.desktop.testModelProfile(profile);
   }
 
+  async function saveModelProvider(provider: ModelProviderInput): Promise<ModelProvider> {
+    const saved = await window.desktop.saveModelProvider(provider);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return saved;
+  }
+
+  async function deleteModelProvider(id: string): Promise<void> {
+    await window.desktop.deleteModelProvider(id);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
+  async function discoverProviderModels(provider: ModelProviderInput): Promise<ModelCatalogResult> {
+    const result = await window.desktop.discoverProviderModels(provider);
+    if (provider.id) {
+      state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    }
+    return result;
+  }
+
+  async function testModelProvider(
+    provider: ModelProviderInput,
+    modelId: string,
+  ): Promise<ProviderConnectionResult> {
+    return window.desktop.testModelProvider(provider, modelId);
+  }
+
+  async function addProviderModels(providerId: string, models: ProviderModelInput[]): Promise<ModelProfile[]> {
+    const added = await window.desktop.addProviderModels(providerId, models);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return added;
+  }
+
+  async function updateProviderModel(
+    providerId: string,
+    model: ProviderModelInput & { id: string },
+  ): Promise<ModelProfile> {
+    const saved = await window.desktop.updateProviderModel(providerId, model);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+    return saved;
+  }
+
+  async function deleteProviderModel(id: string): Promise<void> {
+    await window.desktop.deleteProviderModel(id);
+    state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
+  }
+
   async function registerWorkspace(path: string, trustLevel: WorkspaceTrustLevel): Promise<WorkspaceRecord> {
     const workspace = await window.desktop.registerWorkspace(path, trustLevel);
     state.value = reduceEvent(state.value, { type: 'snapshot', snapshot: await window.desktop.getSnapshot() });
@@ -436,6 +507,8 @@ export function useApp() {
   return {
     state,
     loading,
+    startupError,
+    retryInitialWorkspace: loadInitialWorkspace,
     activeThread,
     activeItems,
     activeTurns,
@@ -458,6 +531,13 @@ export function useApp() {
     updateActiveModelRuntime,
     deleteModelProfile,
     testModelProfile,
+    saveModelProvider,
+    deleteModelProvider,
+    discoverProviderModels,
+    testModelProvider,
+    addProviderModels,
+    updateProviderModel,
+    deleteProviderModel,
     registerWorkspace,
     deleteWorkspace,
     updateWorkspaceTrust,

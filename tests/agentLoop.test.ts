@@ -250,6 +250,28 @@ describe('tool call parsing', () => {
     expect(prompt).toContain('never tell the user to paste code manually');
   });
 
+  it('injects trusted local time and forbids shell-based date lookup', () => {
+    const prompt = (buildAgentSystemPrompt as (...args: unknown[]) => string)(
+      'my-project',
+      'read-only',
+      false,
+      {
+        iso: '2026-08-20T09:30:00+08:00',
+        date: '2026-08-20',
+        time: '09:30:00',
+        timeZone: 'Asia/Shanghai',
+        utcOffset: '+08:00',
+        locale: 'zh-CN',
+        platform: 'win32',
+        source: 'system-clock',
+      },
+    );
+
+    expect(prompt).toContain('2026-08-20T09:30:00+08:00');
+    expect(prompt).toContain('Asia/Shanghai');
+    expect(prompt).toContain('never use a workspace command tool or shell command');
+  });
+
   it('only offers write tools when the workspace is read-write', () => {
     const readOnly = buildAgentSystemPrompt('my-project', 'read-only');
     expect(readOnly).not.toContain('apply_patch');

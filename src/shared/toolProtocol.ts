@@ -8,6 +8,7 @@
  */
 
 export type AgentToolName =
+  | 'get_current_datetime'
   | 'workspace_tree'
   | 'read_file'
   | 'search_code'

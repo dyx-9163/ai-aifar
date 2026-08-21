@@ -2,6 +2,53 @@ import { describe, expect, it } from 'vitest';
 import { isAgentEvent, isDesktopRequest } from '../src/shared/protocol';
 
 describe('desktop protocol guards', () => {
+  it('accepts generic provider requests for all supported transports', () => {
+    for (const protocol of ['openai-chat-completions', 'openai-responses', 'anthropic-messages'] as const) {
+      expect(isDesktopRequest({
+        type: 'modelProvider.save',
+        provider: {
+          name: 'Primary provider',
+          baseUrl: 'https://example.test/v1',
+          protocol,
+          maxConcurrency: 2,
+          requestTimeoutMs: 300_000,
+          allowImages: false,
+          toolCallingMode: 'native',
+          thinkingMode: 'model-default',
+        },
+      })).toBe(true);
+    }
+  });
+
+  it('rejects vendor labels as provider transport protocols', () => {
+    expect(isDesktopRequest({
+      type: 'modelProvider.save',
+      provider: {
+        name: 'Invalid provider',
+        baseUrl: 'https://example.test/v1',
+        protocol: 'qwen',
+        maxConcurrency: 1,
+        requestTimeoutMs: 10_000,
+        allowImages: false,
+        toolCallingMode: 'native',
+        thinkingMode: 'model-default',
+      },
+    })).toBe(false);
+  });
+
+  it('validates provider model batch additions and token overrides', () => {
+    expect(isDesktopRequest({
+      type: 'providerModel.addMany',
+      providerId: 'provider-1',
+      models: [{ modelId: 'deepseek-v4-pro', maxOutputTokens: 8192 }],
+    })).toBe(true);
+    expect(isDesktopRequest({
+      type: 'providerModel.addMany',
+      providerId: 'provider-1',
+      models: [{ modelId: 'bad', contextWindowTokens: 0 }],
+    })).toBe(false);
+  });
+
   it('rejects a turn request without text', () => {
     expect(isDesktopRequest({ type: 'turn.start', threadId: 't1' })).toBe(false);
   });

@@ -10,10 +10,15 @@ import type {
   MessageItem,
   ModelProfile,
   ModelProfileInput,
+  ModelProvider,
+  ModelProviderInput,
   ModelRunMetrics,
   ModelResponseSpeed,
   ReasoningItem,
   ReasoningProtocol,
+  ProviderModelInput,
+  ProviderProtocol,
+  ProviderThinkingMode,
   RuntimeSettingsInput,
   ThreadSummary,
   TurnRecord,
@@ -62,6 +67,13 @@ export interface AppDatabase {
   upsertApproval(approval: Approval): void;
   saveModelProfile(profile: ModelProfileInput): ModelProfile;
   deleteModelProfile(id: string): void;
+  saveModelProvider(provider: ModelProviderInput): ModelProvider;
+  deleteModelProvider(id: string): void;
+  getModelProviderForRuntime(id: string): RuntimeModelProvider | undefined;
+  addProviderModels(providerId: string, models: ProviderModelInput[]): ModelProfile[];
+  updateProviderModel(providerId: string, model: ProviderModelInput & { id: string }): ModelProfile;
+  deleteProviderModel(id: string): void;
+  refreshProviderCatalogState(providerId: string, advertisedIds: readonly string[]): void;
   getModelProfileForRuntime(id?: string): RuntimeModelProfile | undefined;
   registerWorkspace(input: WorkspaceRegistrationInput): WorkspaceRecord;
   deleteWorkspace(workspaceId: string): void;
@@ -92,7 +104,23 @@ export interface FileCheckpointRecord extends FileCheckpointInput {
   updatedAt: string;
 }
 
-export type RuntimeModelProfile = ModelProfile & { apiKey?: string };
+export type RuntimeModelProvider = ModelProvider & {
+  apiKey?: string;
+  customHeaders?: Record<string, string>;
+};
+
+export type RuntimeModelProfile = ModelProfile & {
+  apiKey?: string;
+  providerName?: string;
+  protocol?: ProviderProtocol;
+  requestTimeoutMs?: number;
+  allowImages?: boolean;
+  toolCallingMode?: 'native' | 'text-fallback';
+  thinkingMode?: ProviderThinkingMode;
+  customRequestBody?: Record<string, unknown>;
+  customHeaders?: Record<string, string>;
+  catalogPath?: string;
+};
 
 type ThreadRow = {
   id: string;
@@ -172,12 +200,16 @@ type UndoableTurnRow = {
 
 type ModelProfileRow = {
   id: string;
+  provider_id: string | null;
   name: string;
   provider: ModelProfile['provider'];
   deployment_type: string | null;
   runtime_type: string | null;
   base_url: string;
   model: string;
+  enabled: number;
+  catalog_state: string | null;
+  context_window_tokens: number | null;
   api_key: string | null;
   capabilities: string;
   reasoning: string;
@@ -185,6 +217,24 @@ type ModelProfileRow = {
   max_output_tokens: number;
   response_speed: string | null;
   is_default: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type ModelProviderRow = {
+  id: string;
+  name: string;
+  base_url: string;
+  protocol: string;
+  api_key: string | null;
+  max_concurrency: number;
+  request_timeout_ms: number;
+  allow_images: number;
+  tool_calling_mode: string;
+  thinking_mode: string;
+  custom_request_body: string | null;
+  custom_headers: string | null;
+  catalog_path: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -246,6 +296,7 @@ class SqliteAppDatabase implements AppDatabase {
       items,
       approvals,
       modelProfiles: this.readModelProfiles(false),
+      modelProviders: this.readModelProviders(false),
       settings: this.readSettings(),
       workspaces: this.readWorkspaces(),
       undoableTurns: this.db
@@ -509,6 +560,30 @@ class SqliteAppDatabase implements AppDatabase {
            WHERE status IN ('queued', 'running', 'cancelling')`,
         )
         .run({ updatedAt: interruptedAt });
+
+      const staleTools = this.db
+        .prepare(
+          `SELECT i.id, i.payload, t.status AS turn_status
+           FROM items i
+           INNER JOIN turns t ON t.id = i.turn_id
+           WHERE i.kind = 'tool'
+             AND t.status IN ('completed', 'failed', 'cancelled', 'interrupted')`,
+        )
+        .all() as Array<{ id: string; payload: string; turn_status: TurnRecord['status'] }>;
+      const updateTool = this.db.prepare('UPDATE items SET payload = :payload WHERE id = :id');
+      for (const row of staleTools) {
+        const item = parseItem(row.payload);
+        if (!item || item.kind !== 'tool' || item.status !== 'running') continue;
+        const status: ToolItem['status'] = row.turn_status === 'completed'
+          ? 'completed'
+          : row.turn_status === 'failed'
+            ? 'failed'
+            : row.turn_status === 'cancelled'
+              ? 'cancelled'
+              : 'interrupted';
+        updateTool.run({ id: row.id, payload: JSON.stringify({ ...item, status }) });
+      }
+
       this.db
         .prepare(
           `UPDATE approvals
@@ -616,6 +691,9 @@ class SqliteAppDatabase implements AppDatabase {
       runtimeType: normalizeRuntimeType(input.runtimeType ?? existing?.runtimeType, deploymentType),
       baseUrl: normalizeBaseUrl(input.baseUrl),
       model: requireTrimmed(input.model, 'Model name'),
+      enabled: existing?.enabled ?? true,
+      catalogState: existing?.catalogState ?? 'manual',
+      contextWindowTokens: existing?.contextWindowTokens,
       apiKey: input.apiKey?.trim() || existing?.apiKey,
       apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
       capabilities,
@@ -632,21 +710,26 @@ class SqliteAppDatabase implements AppDatabase {
     };
 
     this.transaction(() => {
+      profile.providerId = this.ensureProviderForLegacyProfile(profile, existing?.providerId);
       if (profile.isDefault) {
         this.db.prepare('UPDATE model_profiles SET is_default = 0').run();
         this.upsertSetting('activeModelProfileId', profile.id);
       }
       this.db
         .prepare(
-          `INSERT INTO model_profiles (id, name, provider, deployment_type, runtime_type, base_url, model, api_key, capabilities, reasoning, max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at)
-           VALUES (:id, :name, :provider, :deploymentType, :runtimeType, :baseUrl, :model, :apiKey, :capabilities, :reasoning, :maxConcurrency, :maxOutputTokens, :responseSpeed, :isDefault, :createdAt, :updatedAt)
+          `INSERT INTO model_profiles (id, provider_id, name, provider, deployment_type, runtime_type, base_url, model, enabled, catalog_state, context_window_tokens, api_key, capabilities, reasoning, max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at)
+           VALUES (:id, :providerId, :name, :provider, :deploymentType, :runtimeType, :baseUrl, :model, :enabled, :catalogState, :contextWindowTokens, :apiKey, :capabilities, :reasoning, :maxConcurrency, :maxOutputTokens, :responseSpeed, :isDefault, :createdAt, :updatedAt)
            ON CONFLICT(id) DO UPDATE SET
+             provider_id = excluded.provider_id,
              name = excluded.name,
              provider = excluded.provider,
              deployment_type = excluded.deployment_type,
              runtime_type = excluded.runtime_type,
              base_url = excluded.base_url,
              model = excluded.model,
+             enabled = excluded.enabled,
+             catalog_state = excluded.catalog_state,
+             context_window_tokens = excluded.context_window_tokens,
              api_key = excluded.api_key,
              capabilities = excluded.capabilities,
              reasoning = excluded.reasoning,
@@ -658,12 +741,16 @@ class SqliteAppDatabase implements AppDatabase {
         )
         .run({
           id: profile.id,
+          providerId: profile.providerId,
           name: profile.name,
           provider: profile.provider,
           deploymentType: profile.deploymentType,
           runtimeType: profile.runtimeType,
           baseUrl: profile.baseUrl,
           model: profile.model,
+          enabled: profile.enabled === false ? 0 : 1,
+          catalogState: profile.catalogState ?? 'manual',
+          contextWindowTokens: profile.contextWindowTokens ?? null,
           apiKey: profile.apiKey ?? null,
           capabilities: JSON.stringify(profile.capabilities),
           reasoning: JSON.stringify(profile.reasoning),
@@ -692,6 +779,214 @@ class SqliteAppDatabase implements AppDatabase {
       this.db.prepare('UPDATE threads SET model_profile_id = NULL WHERE model_profile_id = :id').run({ id });
       const defaultId = this.defaultModelProfileId();
       this.upsertSetting('activeModelProfileId', defaultId ?? '');
+    });
+  }
+
+  saveModelProvider(input: ModelProviderInput): ModelProvider {
+    const now = new Date().toISOString();
+    const existing = input.id ? this.getModelProviderForRuntime(input.id) : undefined;
+    const id = input.id ?? randomUUID();
+    const customHeaders = mergeProviderHeaders(existing?.customHeaders, input.customHeaders);
+    const provider: RuntimeModelProvider = {
+      id,
+      name: requireTrimmed(input.name, 'Provider name'),
+      baseUrl: normalizeBaseUrl(input.baseUrl),
+      protocol: normalizeProviderProtocol(input.protocol),
+      apiKey: input.apiKey?.trim() || existing?.apiKey,
+      apiKeyConfigured: Boolean(input.apiKey?.trim() || existing?.apiKey),
+      maxConcurrency: requirePositiveInteger(input.maxConcurrency, 'Provider concurrency'),
+      requestTimeoutMs: requirePositiveInteger(input.requestTimeoutMs, 'Provider timeout'),
+      allowImages: Boolean(input.allowImages),
+      toolCallingMode: input.toolCallingMode === 'text-fallback' ? 'text-fallback' : 'native',
+      thinkingMode: input.thinkingMode === 'custom' ? 'custom' : 'model-default',
+      customRequestBody: normalizeOptionalRecord(input.customRequestBody),
+      customHeaders,
+      customHeaderNames: Object.keys(customHeaders).sort(),
+      catalogPath: input.catalogPath?.trim() || undefined,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+
+    this.db.prepare(`
+      INSERT INTO model_providers (
+        id, name, base_url, protocol, api_key, max_concurrency, request_timeout_ms,
+        allow_images, tool_calling_mode, thinking_mode, custom_request_body,
+        custom_headers, catalog_path, created_at, updated_at
+      ) VALUES (
+        :id, :name, :baseUrl, :protocol, :apiKey, :maxConcurrency, :requestTimeoutMs,
+        :allowImages, :toolCallingMode, :thinkingMode, :customRequestBody,
+        :customHeaders, :catalogPath, :createdAt, :updatedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        base_url = excluded.base_url,
+        protocol = excluded.protocol,
+        api_key = excluded.api_key,
+        max_concurrency = excluded.max_concurrency,
+        request_timeout_ms = excluded.request_timeout_ms,
+        allow_images = excluded.allow_images,
+        tool_calling_mode = excluded.tool_calling_mode,
+        thinking_mode = excluded.thinking_mode,
+        custom_request_body = excluded.custom_request_body,
+        custom_headers = excluded.custom_headers,
+        catalog_path = excluded.catalog_path,
+        updated_at = excluded.updated_at
+    `).run({
+      id: provider.id,
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      protocol: provider.protocol,
+      apiKey: provider.apiKey ?? null,
+      maxConcurrency: provider.maxConcurrency,
+      requestTimeoutMs: provider.requestTimeoutMs,
+      allowImages: provider.allowImages ? 1 : 0,
+      toolCallingMode: provider.toolCallingMode,
+      thinkingMode: provider.thinkingMode,
+      customRequestBody: provider.customRequestBody ? JSON.stringify(provider.customRequestBody) : null,
+      customHeaders: Object.keys(customHeaders).length > 0 ? JSON.stringify(customHeaders) : null,
+      catalogPath: provider.catalogPath ?? null,
+      createdAt: provider.createdAt,
+      updatedAt: provider.updatedAt,
+    });
+    return redactModelProvider(provider);
+  }
+
+  deleteModelProvider(id: string): void {
+    const referenced = this.db.prepare(`
+      SELECT mp.id
+      FROM model_profiles mp
+      WHERE mp.provider_id = :id
+        AND (
+          mp.is_default = 1 OR
+          EXISTS (SELECT 1 FROM threads t WHERE t.model_profile_id = mp.id AND t.deleted_at IS NULL) OR
+          EXISTS (SELECT 1 FROM turns tr WHERE tr.model_profile_id = mp.id AND tr.status IN ('queued', 'running', 'cancelling'))
+        )
+      LIMIT 1
+    `).get({ id });
+    if (referenced) {
+      throw new Error('Provider cannot be deleted while one of its models is selected or active.');
+    }
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM model_profiles WHERE provider_id = :id').run({ id });
+      this.db.prepare('DELETE FROM model_providers WHERE id = :id').run({ id });
+    });
+  }
+
+  getModelProviderForRuntime(id: string): RuntimeModelProvider | undefined {
+    const row = this.db.prepare('SELECT * FROM model_providers WHERE id = :id').get({ id });
+    return row ? mapModelProvider(row as ModelProviderRow, true) : undefined;
+  }
+
+  addProviderModels(providerId: string, models: ProviderModelInput[]): ModelProfile[] {
+    const provider = this.getModelProviderForRuntime(providerId);
+    if (!provider) throw new Error(`Model provider ${providerId} does not exist.`);
+    const modelIds = models.map((model) => requireTrimmed(model.modelId, 'Model ID'));
+    if (new Set(modelIds).size !== modelIds.length) throw new Error('Model IDs must be unique.');
+    const existingRows = this.db.prepare('SELECT model FROM model_profiles WHERE provider_id = :providerId').all({ providerId }) as Array<{ model: string }>;
+    const existingIds = new Set(existingRows.map((row) => row.model));
+    if (modelIds.some((modelId) => existingIds.has(modelId))) throw new Error('Model is already configured for this provider.');
+
+    const capabilities = normalizeModelCapabilities({
+      vision: provider.allowImages,
+      nativeTools: provider.toolCallingMode === 'native',
+    }, 'none');
+    const now = new Date().toISOString();
+    const insertedIds: string[] = [];
+    this.transaction(() => {
+      const insert = this.db.prepare(`
+        INSERT INTO model_profiles (
+          id, provider_id, name, provider, deployment_type, runtime_type, base_url, model,
+          enabled, catalog_state, context_window_tokens, api_key, capabilities, reasoning,
+          max_concurrency, max_output_tokens, response_speed, is_default, created_at, updated_at
+        ) VALUES (
+          :id, :providerId, :name, 'openai-compatible', :deploymentType, 'openai-compatible', :baseUrl, :model,
+          :enabled, :catalogState, :contextWindowTokens, :apiKey, :capabilities, :reasoning,
+          :maxConcurrency, :maxOutputTokens, 'standard', :isDefault, :createdAt, :updatedAt
+        )
+      `);
+      for (let index = 0; index < models.length; index += 1) {
+        const input = models[index];
+        const id = input.id ?? randomUUID();
+        const makeDefault = Boolean(input.isDefault) || (!this.defaultModelProfileId() && index === 0);
+        if (makeDefault) this.db.prepare('UPDATE model_profiles SET is_default = 0').run();
+        insert.run({
+          id,
+          providerId,
+          name: input.displayName?.trim() || modelIds[index],
+          deploymentType: normalizeDeploymentType(undefined, provider.baseUrl),
+          baseUrl: provider.baseUrl,
+          model: modelIds[index],
+          enabled: input.enabled === false ? 0 : 1,
+          catalogState: input.catalogState ?? 'available',
+          contextWindowTokens: input.contextWindowTokens ?? null,
+          apiKey: provider.apiKey ?? null,
+          capabilities: JSON.stringify(capabilities),
+          reasoning: JSON.stringify({ mode: 'disabled', protocol: 'none', display: 'auto' }),
+          maxConcurrency: provider.maxConcurrency,
+          maxOutputTokens: normalizeMaxOutputTokens(input.maxOutputTokens),
+          isDefault: makeDefault ? 1 : 0,
+          createdAt: now,
+          updatedAt: now,
+        });
+        if (makeDefault) this.upsertSetting('activeModelProfileId', id);
+        insertedIds.push(id);
+      }
+    });
+    return insertedIds.map((id) => redactModelProfile(this.getModelProfileForRuntime(id)!));
+  }
+
+  updateProviderModel(providerId: string, input: ProviderModelInput & { id: string }): ModelProfile {
+    const existing = this.getModelProfileForRuntime(input.id);
+    if (!existing || existing.providerId !== providerId) throw new Error(`Model profile ${input.id} does not exist for this provider.`);
+    const modelId = requireTrimmed(input.modelId, 'Model ID');
+    const duplicate = this.db.prepare(
+      'SELECT id FROM model_profiles WHERE provider_id = :providerId AND model = :model AND id <> :id',
+    ).get({ providerId, model: modelId, id: input.id });
+    if (duplicate) throw new Error('Model is already configured for this provider.');
+    this.transaction(() => {
+      if (input.isDefault) {
+        this.db.prepare('UPDATE model_profiles SET is_default = 0').run();
+        this.upsertSetting('activeModelProfileId', input.id);
+      }
+      this.db.prepare(`
+        UPDATE model_profiles
+        SET name = :name, model = :model, enabled = :enabled,
+            catalog_state = :catalogState, context_window_tokens = :contextWindowTokens,
+            max_output_tokens = :maxOutputTokens, is_default = :isDefault, updated_at = :updatedAt
+        WHERE id = :id AND provider_id = :providerId
+      `).run({
+        id: input.id,
+        providerId,
+        name: input.displayName?.trim() || existing.name,
+        model: modelId,
+        enabled: (input.enabled ?? existing.enabled ?? true) ? 1 : 0,
+        catalogState: input.catalogState ?? existing.catalogState ?? 'manual',
+        contextWindowTokens: input.contextWindowTokens ?? existing.contextWindowTokens ?? null,
+        maxOutputTokens: normalizeMaxOutputTokens(input.maxOutputTokens ?? existing.maxOutputTokens),
+        isDefault: (input.isDefault ?? existing.isDefault) ? 1 : 0,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+    return redactModelProfile(this.getModelProfileForRuntime(input.id)!);
+  }
+
+  deleteProviderModel(id: string): void {
+    this.deleteModelProfile(id);
+  }
+
+  refreshProviderCatalogState(providerId: string, advertisedIds: readonly string[]): void {
+    if (!this.getModelProviderForRuntime(providerId)) throw new Error(`Model provider ${providerId} does not exist.`);
+    const advertised = new Set(advertisedIds);
+    const rows = this.db.prepare(
+      "SELECT id, model, catalog_state FROM model_profiles WHERE provider_id = :providerId",
+    ).all({ providerId }) as Array<{ id: string; model: string; catalog_state: string }>;
+    this.transaction(() => {
+      const update = this.db.prepare('UPDATE model_profiles SET catalog_state = :state, updated_at = :updatedAt WHERE id = :id');
+      const updatedAt = new Date().toISOString();
+      for (const row of rows) {
+        if (row.catalog_state === 'manual') continue;
+        update.run({ id: row.id, state: advertised.has(row.model) ? 'available' : 'missing', updatedAt });
+      }
     });
   }
 
@@ -868,7 +1163,27 @@ class SqliteAppDatabase implements AppDatabase {
     const row = selectedId
       ? this.db.prepare('SELECT * FROM model_profiles WHERE id = :id').get({ id: selectedId })
       : this.db.prepare('SELECT * FROM model_profiles WHERE is_default = 1 ORDER BY updated_at DESC LIMIT 1').get();
-    return row ? mapModelProfile(row as ModelProfileRow, true) : undefined;
+    if (!row) return undefined;
+    const profile = mapModelProfile(row as ModelProfileRow, true);
+    if (!profile.providerId) return profile;
+    const provider = this.getModelProviderForRuntime(profile.providerId);
+    if (!provider) return profile;
+    return {
+      ...profile,
+      providerName: provider.name,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      apiKeyConfigured: provider.apiKeyConfigured,
+      maxConcurrency: provider.maxConcurrency,
+      protocol: provider.protocol,
+      requestTimeoutMs: provider.requestTimeoutMs,
+      allowImages: provider.allowImages,
+      toolCallingMode: provider.toolCallingMode,
+      thinkingMode: provider.thinkingMode,
+      customRequestBody: provider.customRequestBody,
+      customHeaders: provider.customHeaders,
+      catalogPath: provider.catalogPath,
+    };
   }
 
   close(): void {
@@ -974,14 +1289,36 @@ class SqliteAppDatabase implements AppDatabase {
         UNIQUE (workspace_id, turn_id, relative_path)
       );
 
+      CREATE TABLE IF NOT EXISTS model_providers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        api_key TEXT,
+        max_concurrency INTEGER NOT NULL DEFAULT 1,
+        request_timeout_ms INTEGER NOT NULL DEFAULT 300000,
+        allow_images INTEGER NOT NULL DEFAULT 0,
+        tool_calling_mode TEXT NOT NULL DEFAULT 'native',
+        thinking_mode TEXT NOT NULL DEFAULT 'model-default',
+        custom_request_body TEXT,
+        custom_headers TEXT,
+        catalog_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS model_profiles (
         id TEXT PRIMARY KEY,
+        provider_id TEXT,
         name TEXT NOT NULL,
         provider TEXT NOT NULL,
         deployment_type TEXT NOT NULL DEFAULT 'cloud',
         runtime_type TEXT NOT NULL DEFAULT 'openai-compatible',
         base_url TEXT NOT NULL,
         model TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        catalog_state TEXT NOT NULL DEFAULT 'manual',
+        context_window_tokens INTEGER,
         api_key TEXT,
         capabilities TEXT NOT NULL,
         max_concurrency INTEGER NOT NULL DEFAULT 1,
@@ -1088,6 +1425,7 @@ class SqliteAppDatabase implements AppDatabase {
         update.run({ id: row.id, deploymentType, runtimeType });
       }
     });
+    this.applyMigration(12, () => this.migrateModelProviders());
     this.interruptUnfinishedTurns();
   }
 
@@ -1127,6 +1465,15 @@ class SqliteAppDatabase implements AppDatabase {
       .map((row) =>
         includeApiKey ? mapModelProfile(row as ModelProfileRow, true) : mapModelProfile(row as ModelProfileRow, false),
       );
+  }
+
+  private readModelProviders(includeApiKey: true): RuntimeModelProvider[];
+  private readModelProviders(includeApiKey: false): ModelProvider[];
+  private readModelProviders(includeApiKey: boolean): RuntimeModelProvider[] | ModelProvider[] {
+    return this.db
+      .prepare('SELECT * FROM model_providers ORDER BY updated_at DESC, name ASC')
+      .all()
+      .map((row) => mapModelProvider(row as ModelProviderRow, includeApiKey));
   }
 
   private defaultModelProfileId(): string | undefined {
@@ -1337,6 +1684,79 @@ class SqliteAppDatabase implements AppDatabase {
     if (isDefault) {
       this.upsertSetting('activeModelProfileId', presetId);
     }
+  }
+
+  private migrateModelProviders(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS model_providers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        api_key TEXT,
+        max_concurrency INTEGER NOT NULL DEFAULT 1,
+        request_timeout_ms INTEGER NOT NULL DEFAULT 300000,
+        allow_images INTEGER NOT NULL DEFAULT 0,
+        tool_calling_mode TEXT NOT NULL DEFAULT 'native',
+        thinking_mode TEXT NOT NULL DEFAULT 'model-default',
+        custom_request_body TEXT,
+        custom_headers TEXT,
+        catalog_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    this.ensureColumn('model_profiles', 'provider_id', 'ALTER TABLE model_profiles ADD COLUMN provider_id TEXT');
+    this.ensureColumn('model_profiles', 'enabled', 'ALTER TABLE model_profiles ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
+    this.ensureColumn(
+      'model_profiles',
+      'catalog_state',
+      "ALTER TABLE model_profiles ADD COLUMN catalog_state TEXT NOT NULL DEFAULT 'manual'",
+    );
+    this.ensureColumn(
+      'model_profiles',
+      'context_window_tokens',
+      'ALTER TABLE model_profiles ADD COLUMN context_window_tokens INTEGER',
+    );
+
+    const rows = this.db.prepare('SELECT * FROM model_profiles ORDER BY created_at ASC, id ASC').all() as ModelProfileRow[];
+    const providerIds = new Map<string, string>();
+    const update = this.db.prepare(`
+      UPDATE model_profiles
+      SET provider_id = :providerId,
+          enabled = COALESCE(enabled, 1),
+          catalog_state = COALESCE(catalog_state, 'manual')
+      WHERE id = :id
+    `);
+    for (const row of rows) {
+      if (row.provider_id && this.getModelProviderForRuntime(row.provider_id)) continue;
+      const profile = mapModelProfile(row, true);
+      const input = legacyProviderInput(profile);
+      const fingerprint = JSON.stringify({
+        baseUrl: input.baseUrl,
+        protocol: input.protocol,
+        apiKey: input.apiKey ?? '',
+        maxConcurrency: input.maxConcurrency,
+        allowImages: input.allowImages,
+        toolCallingMode: input.toolCallingMode,
+        thinkingMode: input.thinkingMode,
+        customRequestBody: input.customRequestBody ?? null,
+      });
+      let providerId = providerIds.get(fingerprint);
+      if (!providerId) {
+        providerId = this.saveModelProvider(input).id;
+        providerIds.set(fingerprint, providerId);
+      }
+      update.run({ id: row.id, providerId });
+    }
+  }
+
+  private ensureProviderForLegacyProfile(profile: RuntimeModelProfile, providerId?: string): string {
+    const existing = providerId ? this.getModelProviderForRuntime(providerId) : undefined;
+    return this.saveModelProvider({
+      ...legacyProviderInput(profile),
+      ...(existing ? { id: existing.id, name: existing.name } : {}),
+    }).id;
   }
 
   private completeLegacyTurns(status: 'running' | 'interrupted'): void {
@@ -1564,12 +1984,16 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
   const reasoning = normalizeReasoningSettings(reasoningInput, capabilities);
   const profile: RuntimeModelProfile = {
     id: row.id,
+    providerId: row.provider_id ?? undefined,
     name: row.name,
     provider: row.provider,
     deploymentType: normalizeDeploymentType(row.deployment_type, row.base_url),
     runtimeType: normalizeRuntimeType(row.runtime_type, normalizeDeploymentType(row.deployment_type, row.base_url)),
     baseUrl: row.base_url,
     model: row.model,
+    enabled: row.enabled !== 0,
+    catalogState: row.catalog_state === 'available' || row.catalog_state === 'missing' ? row.catalog_state : 'manual',
+    contextWindowTokens: row.context_window_tokens ?? undefined,
     apiKey: includeApiKey ? (row.api_key ?? undefined) : undefined,
     apiKeyConfigured: Boolean(row.api_key),
     capabilities,
@@ -1586,7 +2010,51 @@ function mapModelProfile(row: ModelProfileRow, includeApiKey: boolean): RuntimeM
 }
 
 function redactModelProfile(profile: RuntimeModelProfile): ModelProfile {
-  const { apiKey: _apiKey, ...redacted } = profile;
+  const {
+    apiKey: _apiKey,
+    providerName: _providerName,
+    protocol: _protocol,
+    requestTimeoutMs: _requestTimeoutMs,
+    allowImages: _allowImages,
+    toolCallingMode: _toolCallingMode,
+    thinkingMode: _thinkingMode,
+    customRequestBody: _customRequestBody,
+    customHeaders: _customHeaders,
+    catalogPath: _catalogPath,
+    ...redacted
+  } = profile;
+  return redacted;
+}
+
+function mapModelProvider(row: ModelProviderRow, includeApiKey: true): RuntimeModelProvider;
+function mapModelProvider(row: ModelProviderRow, includeApiKey: false): ModelProvider;
+function mapModelProvider(row: ModelProviderRow, includeApiKey: boolean): RuntimeModelProvider | ModelProvider;
+function mapModelProvider(row: ModelProviderRow, includeApiKey: boolean): RuntimeModelProvider | ModelProvider {
+  const customHeaders = parseStringRecord(row.custom_headers);
+  const provider: RuntimeModelProvider = {
+    id: row.id,
+    name: row.name,
+    baseUrl: row.base_url,
+    protocol: normalizeProviderProtocol(row.protocol),
+    apiKey: includeApiKey ? (row.api_key ?? undefined) : undefined,
+    apiKeyConfigured: Boolean(row.api_key),
+    maxConcurrency: requirePositiveInteger(row.max_concurrency, 'Provider concurrency'),
+    requestTimeoutMs: requirePositiveInteger(row.request_timeout_ms, 'Provider timeout'),
+    allowImages: row.allow_images === 1,
+    toolCallingMode: row.tool_calling_mode === 'text-fallback' ? 'text-fallback' : 'native',
+    thinkingMode: row.thinking_mode === 'custom' ? 'custom' : 'model-default',
+    customRequestBody: parseOptionalRecord(row.custom_request_body),
+    customHeaders,
+    customHeaderNames: Object.keys(customHeaders).sort(),
+    catalogPath: row.catalog_path ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+  return includeApiKey ? provider : redactModelProvider(provider);
+}
+
+function redactModelProvider(provider: RuntimeModelProvider): ModelProvider {
+  const { apiKey: _apiKey, customHeaders: _customHeaders, ...redacted } = provider;
   return redacted;
 }
 
@@ -1640,6 +2108,90 @@ function normalizeRuntimeType(value: unknown, deploymentType: 'cloud' | 'private
 function normalizeBaseUrl(value: string): string {
   const trimmed = requireTrimmed(value, 'Base URL');
   return normalizeModelBaseUrl(trimmed);
+}
+
+function normalizeProviderProtocol(value: unknown): ProviderProtocol {
+  if (value === 'openai-chat-completions' || value === 'openai-responses' || value === 'anthropic-messages') {
+    return value;
+  }
+  throw new Error('Unsupported provider protocol.');
+}
+
+function requirePositiveInteger(value: number, label: string): number {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer.`);
+  return value;
+}
+
+function normalizeOptionalRecord(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || Array.isArray(value)) throw new Error('Custom request body must be a JSON object.');
+  return Object.keys(value).length > 0 ? value : undefined;
+}
+
+function mergeProviderHeaders(
+  existing: Record<string, string> | undefined,
+  submitted: Record<string, string> | undefined,
+): Record<string, string> {
+  if (submitted === undefined) return { ...existing };
+  const merged: Record<string, string> = {};
+  for (const [rawName, rawValue] of Object.entries(submitted)) {
+    const name = rawName.trim();
+    if (!name) throw new Error('Custom header name is required.');
+    const value = rawValue.trim();
+    if (value) merged[name] = value;
+    else if (existing?.[name]) merged[name] = existing[name];
+    else throw new Error(`Custom header ${name} requires a value.`);
+  }
+  return merged;
+}
+
+function parseOptionalRecord(value: string | null | undefined): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseStringRecord(value: string | null | undefined): Record<string, string> {
+  const parsed = parseOptionalRecord(value);
+  if (!parsed) return {};
+  return Object.fromEntries(
+    Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
+}
+
+function legacyProviderInput(profile: RuntimeModelProfile): ModelProviderInput {
+  const customRequestBody = legacyThinkingBody(profile);
+  return {
+    name: `${profile.name} provider`,
+    baseUrl: profile.baseUrl,
+    protocol: 'openai-chat-completions',
+    apiKey: profile.apiKey,
+    maxConcurrency: profile.maxConcurrency,
+    requestTimeoutMs: 300_000,
+    allowImages: profile.capabilities.vision,
+    toolCallingMode: profile.capabilities.nativeTools ? 'native' : 'text-fallback',
+    thinkingMode: customRequestBody ? 'custom' : 'model-default',
+    customRequestBody,
+  };
+}
+
+function legacyThinkingBody(profile: RuntimeModelProfile): Record<string, unknown> | undefined {
+  if (profile.reasoning.protocol === 'custom') {
+    return profile.capabilities.reasoning.customRequestBody;
+  }
+  if (profile.reasoning.protocol === 'qwen') {
+    return { chat_template_kwargs: { enable_thinking: profile.reasoning.mode !== 'disabled' } };
+  }
+  if (profile.reasoning.protocol === 'openai' && profile.reasoning.mode !== 'disabled') {
+    return { reasoning_effort: profile.reasoning.effort ?? profile.capabilities.reasoning.defaultEffort ?? 'medium' };
+  }
+  return undefined;
 }
 
 function requireTrimmed(value: string, label: string): string {
